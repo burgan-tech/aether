@@ -163,16 +163,22 @@ jobs:
 
     - name: Publish to GitHub Packages
       if: success()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        # Configure NuGet to authenticate with GitHub Packages
-        dotnet nuget add source --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }} --store-password-in-clear-text --name github "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
-        
+        # Push directly to GitHub Packages with authentication
         for package in ${{ env.NUGET_OUTPUT_DIRECTORY }}/*.nupkg; do
           echo "Publishing $package to GitHub Packages..."
           if [ "${{ github.event.inputs.force_publish }}" = "true" ]; then
-            dotnet nuget push "$package" --source "github" --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
+            dotnet nuget push "$package" \
+              --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+              --api-key ${{ secrets.GITHUB_TOKEN }} \
+              --skip-duplicate
           else
-            dotnet nuget push "$package" --source "github" --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
+            dotnet nuget push "$package" \
+              --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+              --api-key ${{ secrets.GITHUB_TOKEN }} \
+              --skip-duplicate
           fi
         done
 
@@ -229,7 +235,7 @@ jobs:
       if: success()
       run: |
         echo "✅ Successfully published NuGet packages for version ${{ steps.version.outputs.VERSION }}"
-        echo "📦 Packages are available at: https://github.com/${{ github.repository }}/packages"fix
+        echo "📦 Packages are available at: https://github.com/${{ github.repository }}/packages"
 
     - name: Restore original common.props
       if: always()
