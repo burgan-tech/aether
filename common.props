@@ -1,0 +1,42 @@
+
+<Project>
+    <PropertyGroup>
+        <LangVersion>latest</LangVersion>
+        <Version>1.0.0</Version>
+        <NoWarn>$(NoWarn);CS1591;CS0436</NoWarn>
+        
+        <!-- Package metadata -->
+        <PackageProjectUrl>https://github.com/burgan-tech/aether</PackageProjectUrl>
+        <PackageLicenseExpression>LGPL-3.0-only</PackageLicenseExpression>
+        <RepositoryType>git</RepositoryType>
+        <RepositoryUrl>https://github.com/burgan-tech/aether/tree/master</RepositoryUrl>
+        <PackageReadmeFile>NuGet.md</PackageReadmeFile>
+        <PackageTags>aspnetcore framework best-practices csharp burganbank aether</PackageTags>
+        
+        <!-- Package generation settings -->
+        <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+        
+        <!-- Include symbol files (*.pdb) in the built .nupkg -->
+        <AllowedOutputExtensionsInPackageBuildOutputFolder>$(AllowedOutputExtensionsInPackageBuildOutputFolder);.pdb</AllowedOutputExtensionsInPackageBuildOutputFolder>
+        
+        <!-- Additional metadata -->
+        <Authors>Burgan Tech</Authors>
+        <Company>Burgan Bank</Company>
+        <Product>BBT Aether Framework</Product>
+        <Description>Aether is a .NET Core framework designed to provide developers with a foundational structure and pre-built cross-cutting concerns.</Description>
+        <Copyright>Copyright © Burgan Tech</Copyright>
+        <PackageReleaseNotes>See the full changelog at: $(RepositoryUrl)</PackageReleaseNotes>
+    </PropertyGroup>
+    <ItemGroup>
+        <None Include="..\..\NuGet.md" Pack="true" PackagePath="\"/>
+    </ItemGroup>
+    <ItemGroup>
+        <PackageReference Include="Microsoft.SourceLink.GitHub">
+        <PrivateAssets>all</PrivateAssets>
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+        </PackageReference>
+    </ItemGroup>
+</Project>
