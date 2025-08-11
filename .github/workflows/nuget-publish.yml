@@ -170,9 +170,9 @@ jobs:
         for package in ${{ env.NUGET_OUTPUT_DIRECTORY }}/*.nupkg; do
           echo "Publishing $package to GitHub Packages..."
           if [ "${{ github.event.inputs.force_publish }}" = "true" ]; then
-            dotnet nuget push "$package" --source "github" --skip-duplicate
+            dotnet nuget push "$package" --source "github" --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
           else
-            dotnet nuget push "$package" --source "github" --skip-duplicate
+            dotnet nuget push "$package" --source "github" --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
           fi
         done
 
