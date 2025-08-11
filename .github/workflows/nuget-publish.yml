@@ -229,7 +229,7 @@ jobs:
       if: success()
       run: |
         echo "✅ Successfully published NuGet packages for version ${{ steps.version.outputs.VERSION }}"
-        echo "📦 Packages are available at: https://www.nuget.org/profiles/your-profile"
+        echo "📦 Packages are available at: https://github.com/${{ github.repository }}/packages"fix
 
     - name: Restore original common.props
       if: always()
