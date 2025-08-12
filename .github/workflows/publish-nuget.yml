@@ -1,136 +1,317 @@
-name: Publish to NuGet.org
+name: Build and Publish to NuGet.org
 
 on:
-  # Trigger when a GitHub release is created or published
-  release:
-    types: [created, published]
-  
-  # Allow manual trigger with release tag input
+  push:
+    branches:
+      - 'release-v*'
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: 'Release tag to publish (e.g., v1.0.0)'
-        required: true
+      version_override:
+        description: 'Override version (e.g., 1.0.6). Leave empty to auto-calculate from branch.'
+        required: false
         type: string
+      force_publish:
+        description: 'Force publish packages even if they already exist'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
 
 jobs:
-  publish-to-nuget:
+  build-and-publish:
     runs-on: ubuntu-latest
     
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    
     steps:
-      # Setup .NET (needed for dotnet nuget push command)
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '9.0.x'
-      
-      # Debug: Show trigger information
-      - name: Debug trigger information
-        run: |
-          echo "Event name: ${{ github.event_name }}"
-          echo "Event action: ${{ github.event.action }}"
-          echo "Release tag: ${{ github.event.release.tag_name }}"
-          echo "Release draft: ${{ github.event.release.draft }}"
-          echo "Release prerelease: ${{ github.event.release.prerelease }}"
-          echo "Release published_at: ${{ github.event.release.published_at }}"
-          echo "Release created_at: ${{ github.event.release.created_at }}"
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for version calculation
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: |
+          8.0.x
+          9.0.x
+    
+    - name: Calculate version
+      id: version
+      run: |
+        # Check if version is manually provided
+        if [ -n "${{ github.event.inputs.version_override }}" ]; then
+          VERSION="${{ github.event.inputs.version_override }}"
+          echo "Using manual version override: $VERSION"
+        else
+          # Extract version from branch name (e.g., release-v1.0 -> 1.0)
+          BRANCH_NAME="${{ github.ref_name }}"
           
-      # Download packages from the GitHub release
-      - name: Download packages from release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Determine the release tag
-          if [ "${{ github.event_name }}" == "release" ]; then
-            RELEASE_TAG="${{ github.event.release.tag_name }}"
+          if [[ "$BRANCH_NAME" =~ ^release-v([0-9]+\.[0-9]+)$ ]]; then
+            BASE_VERSION="${BASH_REMATCH[1]}"
+            echo "Base version from branch: $BASE_VERSION"
+            
+            # Find the next available patch version
+            PATCH=0
+            while true; do
+              VERSION="${BASE_VERSION}.${PATCH}"
+              TAG="v${VERSION}"
+              
+              # Check if this tag already exists
+              if git tag -l "$TAG" | grep -q "^$TAG$"; then
+                echo "Version $VERSION already exists, trying next patch version..."
+                PATCH=$((PATCH + 1))
+              else
+                echo "Found available version: $VERSION"
+                break
+              fi
+              
+              # Safety check to prevent infinite loop
+              if [ $PATCH -gt 100 ]; then
+                echo "Error: Could not find available patch version after 100 attempts"
+                exit 1
+              fi
+            done
           else
-            RELEASE_TAG="${{ github.event.inputs.release_tag }}"
-          fi
-          
-          echo "Downloading packages from release: $RELEASE_TAG"
-          
-          # Create directory for packages
-          mkdir -p ./packages
-          
-          # Use GitHub CLI to download release assets
-          echo "Listing release assets..."
-          gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | select(.name | endswith(".nupkg")) | "\(.name) \(.url)"'
-          
-          # Download each .nupkg asset using GitHub CLI
-          gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | select(.name | endswith(".nupkg")) | .name' | while read -r filename; do
-            if [ ! -z "$filename" ]; then
-              echo "Downloading: $filename"
-              gh release download "$RELEASE_TAG" --pattern "$filename" --dir ./packages/ --clobber
+            # Fallback to version from common.props
+            echo "Branch name doesn't match release-vX.Y pattern, using version from common.props"
+            VERSION=$(grep '<Version>' ./common.props | sed 's/.*<Version>\(.*\)<\/Version>.*/\1/' | head -n 1)
+            
+            if [ -z "$VERSION" ]; then
+              echo "Error: Could not determine version"
+              exit 1
             fi
+          fi
+        fi
+        
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Final version: $VERSION"
+    
+    - name: Update version in common.props
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        sed -i "s|<Version>.*</Version>|<Version>$VERSION</Version>|g" ./common.props
+        echo "Updated common.props with version $VERSION"
+    
+    - name: Restore dependencies
+      run: |
+        dotnet restore ./framework/BBT.Aether.sln
+    
+    - name: Build solution
+      run: |
+        dotnet build ./framework/BBT.Aether.sln \
+          --configuration Release \
+          --no-restore \
+          -p:Version=${{ steps.version.outputs.version }}
+    
+    - name: Run tests
+      run: |
+        # Find and run all test projects
+        for test_project in $(find ./framework -name "*Test*.csproj" -o -name "*Tests.csproj"); do
+          if [ -f "$test_project" ]; then
+            echo "Running tests for: $test_project"
+            dotnet test "$test_project" \
+              --configuration Release \
+              --no-build \
+              --verbosity normal \
+              --logger "trx;LogFileName=test-results.trx" \
+              --logger "console;verbosity=detailed" \
+              --collect:"XPlat Code Coverage" \
+              -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover
+          fi
+        done || echo "No test projects found or tests completed"
+    
+    - name: Create NuGet packages
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        OUTPUT_DIR="${{ github.workspace }}/packages"
+        mkdir -p "$OUTPUT_DIR"
+        
+        # Framework packages
+        declare -a PROJECTS=(
+          "./framework/src/BBT.Aether.Core/BBT.Aether.Core.csproj"
+          "./framework/src/BBT.Aether.Domain/BBT.Aether.Domain.csproj"
+          "./framework/src/BBT.Aether.Application/BBT.Aether.Application.csproj"
+          "./framework/src/BBT.Aether.Infrastructure/BBT.Aether.Infrastructure.csproj"
+          "./framework/src/BBT.Aether.AspNetCore/BBT.Aether.AspNetCore.csproj"
+          "./framework/src/BBT.Aether.TestBase/BBT.Aether.TestBase.csproj"
+          "./framework/src/BBT.Aether.HttpClient/BBT.Aether.HttpClient.csproj"
+        )
+        
+        # Check for module projects (if they exist)
+        if [ -d "./modules" ]; then
+          for module_project in $(find ./modules -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
+            PROJECTS+=("$module_project")
           done
-          
-          echo "Downloaded packages:"
-          ls -la ./packages/
-          
-          # Verify packages are valid
-          echo "Verifying package sizes:"
-          for pkg in ./packages/*.nupkg; do
-            if [ -f "$pkg" ]; then
-              size=$(stat -c%s "$pkg" 2>/dev/null || stat -f%z "$pkg" 2>/dev/null || echo "unknown")
-              echo "$(basename "$pkg"): $size bytes"
-              if [ "$size" -lt 1000 ]; then
-                echo "WARNING: Package $(basename "$pkg") seems too small ($size bytes)"
-                echo "Content preview:"
-                head -c 200 "$pkg" | cat -v
+        fi
+        
+        # Pack each project
+        for project in "${PROJECTS[@]}"; do
+          if [ -f "$project" ]; then
+            echo "Packing: $project"
+            dotnet pack "$project" \
+              --configuration Release \
+              --no-build \
+              --output "$OUTPUT_DIR" \
+              -p:Version=$VERSION \
+              -p:IncludeSymbols=true \
+              -p:SymbolPackageFormat=snupkg \
+              -p:GenerateDocumentationFile=true \
+              -p:PublishRepositoryUrl=true \
+              -p:EmbedUntrackedSources=true \
+              -p:ContinuousIntegrationBuild=true
+          else
+            echo "Warning: Project file not found: $project"
+          fi
+        done
+        
+        echo "Created packages:"
+        ls -la "$OUTPUT_DIR"
+        
+        # Verify packages are valid
+        echo "Verifying package integrity:"
+        for package in "$OUTPUT_DIR"/*.nupkg; do
+          if [[ -f "$package" ]] && [[ ! "$package" == *.symbols.nupkg ]]; then
+            size=$(stat -c%s "$package" 2>/dev/null || stat -f%z "$package" 2>/dev/null || echo "unknown")
+            echo "✅ $(basename "$package"): $size bytes"
+            
+            # Basic validation - check if it's a valid ZIP file (NuGet packages are ZIP files)
+            if command -v unzip >/dev/null 2>&1; then
+              if unzip -t "$package" >/dev/null 2>&1; then
+                echo "   📦 Package structure is valid"
+              else
+                echo "   ❌ WARNING: Package may be corrupted"
               fi
             fi
-          done
-      
-      # Publish to NuGet.org
-      - name: Publish to NuGet.org
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: |
-          # Check if API key is configured
-          if [ -z "$NUGET_API_KEY" ]; then
-            echo "Error: NUGET_API_KEY secret is not configured"
-            echo "Please add your NuGet.org API key as a repository secret"
-            exit 1
           fi
-          
-          # Push each package to NuGet.org
-          for package in ./packages/*.nupkg; do
-            if [[ -f "$package" ]] && [[ ! "$package" == *.symbols.nupkg ]]; then
-              echo "Publishing to NuGet.org: $(basename $package)"
-              dotnet nuget push "$package" \
-                --source "https://api.nuget.org/v3/index.json" \
-                --api-key "$NUGET_API_KEY" \
-                --skip-duplicate \
-                || echo "Warning: Failed to push $(basename $package) - it may already exist"
+        done
+    
+    - name: Upload packages as artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: nuget-packages-${{ steps.version.outputs.version }}
+        path: packages/
+        retention-days: 30
+    
+    - name: Publish to NuGet.org
+      env:
+        NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      run: |
+        # Check if API key is configured
+        if [ -z "$NUGET_API_KEY" ]; then
+          echo "❌ Error: NUGET_API_KEY secret is not configured"
+          echo "Please add your NuGet.org API key as a repository secret named 'NUGET_API_KEY'"
+          echo "Get your API key from: https://www.nuget.org/account/apikeys"
+          exit 1
+        fi
+        
+        echo "🚀 Publishing packages to NuGet.org..."
+        
+        FORCE_FLAG=""
+        if [ "${{ github.event.inputs.force_publish }}" == "true" ]; then
+          echo "⚠️  Force publish enabled - will attempt to push even if packages exist"
+        else
+          FORCE_FLAG="--skip-duplicate"
+        fi
+        
+        SUCCESS_COUNT=0
+        TOTAL_COUNT=0
+        
+        # Push each package to NuGet.org
+        for package in ./packages/*.nupkg; do
+          if [[ -f "$package" ]] && [[ ! "$package" == *.symbols.nupkg ]]; then
+            TOTAL_COUNT=$((TOTAL_COUNT + 1))
+            package_name=$(basename "$package")
+            echo "📦 Publishing: $package_name"
+            
+            if dotnet nuget push "$package" \
+              --source "https://api.nuget.org/v3/index.json" \
+              --api-key "$NUGET_API_KEY" \
+              $FORCE_FLAG; then
+              echo "✅ Successfully published: $package_name"
+              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+            else
+              echo "❌ Failed to publish: $package_name"
+              echo "   This might be because the package version already exists on NuGet.org"
             fi
-          done
-      
-      # Summary
-      - name: Summary
-        run: |
-          echo "## 📦 NuGet.org Publishing Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "${{ github.event_name }}" == "release" ]; then
-            echo "### Triggered by Release" >> $GITHUB_STEP_SUMMARY
-            echo "- **Release**: ${{ github.event.release.tag_name }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Release URL**: ${{ github.event.release.html_url }}" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### Manual Trigger" >> $GITHUB_STEP_SUMMARY
-            echo "- **Release Tag**: ${{ github.event.inputs.release_tag }}" >> $GITHUB_STEP_SUMMARY
+            echo ""
           fi
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Published Packages" >> $GITHUB_STEP_SUMMARY
-          echo "The following packages have been published to NuGet.org:" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          for package in ./packages/*.nupkg; do
-            if [[ -f "$package" ]] && [[ ! "$package" == *.symbols.nupkg ]]; then
-              echo "- ✅ $(basename $package)" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### View on NuGet.org" >> $GITHUB_STEP_SUMMARY
-          echo "Packages should be available at: https://www.nuget.org/profiles/${{ github.repository_owner }}" >> $GITHUB_STEP_SUMMARY
+        done
+        
+        echo "📊 Publication Summary:"
+        echo "   Successfully published: $SUCCESS_COUNT/$TOTAL_COUNT packages"
+        
+        if [ $SUCCESS_COUNT -eq 0 ] && [ $TOTAL_COUNT -gt 0 ]; then
+          echo "❌ No packages were successfully published"
+          if [ "${{ github.event.inputs.force_publish }}" != "true" ]; then
+            echo "💡 Tip: If you want to republish existing versions, use the 'force_publish' option"
+          fi
+          exit 1
+        elif [ $SUCCESS_COUNT -lt $TOTAL_COUNT ]; then
+          echo "⚠️  Some packages failed to publish, but at least one succeeded"
+        else
+          echo "🎉 All packages published successfully!"
+        fi
+    
+    - name: Create Git Tag
+      if: success()
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        TAG="v$VERSION"
+        
+        # Create and push the tag
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        
+        if git tag -l "$TAG" | grep -q "^$TAG$"; then
+          echo "⚠️  Tag $TAG already exists, skipping tag creation"
+        else
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "✅ Created and pushed tag: $TAG"
+        fi
+    
+    - name: Summary
+      if: always()
+      run: |
+        echo "## 📦 NuGet Package Publishing Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Version Information" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version**: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -n "${{ github.event.inputs.version_override }}" ]; then
+          echo "- **Version Override**: Used manual version override" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ github.event.inputs.force_publish }}" == "true" ]; then
+          echo "- **Force Publish**: Enabled" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Published Packages" >> $GITHUB_STEP_SUMMARY
+        echo "The following packages have been published to NuGet.org:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        for package in ./packages/*.nupkg; do
+          if [[ -f "$package" ]] && [[ ! "$package" == *.symbols.nupkg ]]; then
+            package_name=$(basename "$package" .nupkg)
+            echo "- 📦 [\`$package_name\`](https://www.nuget.org/packages/$package_name)" >> $GITHUB_STEP_SUMMARY
+          fi
+        done
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔗 Quick Links" >> $GITHUB_STEP_SUMMARY
+        echo "- [Your NuGet.org Profile](https://www.nuget.org/profiles/${{ github.repository_owner }})" >> $GITHUB_STEP_SUMMARY
+        echo "- [Workflow Artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "1. Packages are now available on NuGet.org (may take a few minutes to appear in search)" >> $GITHUB_STEP_SUMMARY
+        echo "2. Install packages using: \`dotnet add package PackageName --version ${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "3. View package details and download statistics on NuGet.org" >> $GITHUB_STEP_SUMMARY
