@@ -37,6 +37,8 @@ jobs:
           
       # Download packages from the GitHub release
       - name: Download packages from release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Determine the release tag
           if [ "${{ github.event_name }}" == "release" ]; then
@@ -50,22 +52,34 @@ jobs:
           # Create directory for packages
           mkdir -p ./packages
           
-          # Get release information
-          RELEASE_INFO=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG")
+          # Use GitHub CLI to download release assets
+          echo "Listing release assets..."
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | select(.name | endswith(".nupkg")) | "\(.name) \(.url)"'
           
-          # Download each .nupkg asset from the release
-          echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name | endswith(".nupkg")) | .browser_download_url' | while read -r url; do
-            if [ ! -z "$url" ]; then
-              filename=$(basename "$url")
+          # Download each .nupkg asset using GitHub CLI
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | select(.name | endswith(".nupkg")) | .name' | while read -r filename; do
+            if [ ! -z "$filename" ]; then
               echo "Downloading: $filename"
-              curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                -o "./packages/$filename" "$url"
+              gh release download "$RELEASE_TAG" --pattern "$filename" --dir ./packages/ --clobber
             fi
           done
           
           echo "Downloaded packages:"
           ls -la ./packages/
+          
+          # Verify packages are valid
+          echo "Verifying package sizes:"
+          for pkg in ./packages/*.nupkg; do
+            if [ -f "$pkg" ]; then
+              size=$(stat -c%s "$pkg" 2>/dev/null || stat -f%z "$pkg" 2>/dev/null || echo "unknown")
+              echo "$(basename "$pkg"): $size bytes"
+              if [ "$size" -lt 1000 ]; then
+                echo "WARNING: Package $(basename "$pkg") seems too small ($size bytes)"
+                echo "Content preview:"
+                head -c 200 "$pkg" | cat -v
+              fi
+            fi
+          done
       
       # Publish to NuGet.org
       - name: Publish to NuGet.org
