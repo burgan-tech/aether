@@ -1,9 +1,9 @@
 name: Publish to NuGet.org
 
 on:
-  # Trigger when a GitHub release is published
+  # Trigger when a GitHub release is created or published
   release:
-    types: [published]
+    types: [created, published]
   
   # Allow manual trigger with release tag input
   workflow_dispatch:
