@@ -1,0 +1,111 @@
+name: Publish to NuGet.org
+
+on:
+  # Trigger when a GitHub release is published
+  release:
+    types: [published]
+  
+  # Allow manual trigger with release tag input
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to publish (e.g., v1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  publish-to-nuget:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Setup .NET (needed for dotnet nuget push command)
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      
+      # Download packages from the GitHub release
+      - name: Download packages from release
+        run: |
+          # Determine the release tag
+          if [ "${{ github.event_name }}" == "release" ]; then
+            RELEASE_TAG="${{ github.event.release.tag_name }}"
+          else
+            RELEASE_TAG="${{ github.event.inputs.release_tag }}"
+          fi
+          
+          echo "Downloading packages from release: $RELEASE_TAG"
+          
+          # Create directory for packages
+          mkdir -p ./packages
+          
+          # Get release information
+          RELEASE_INFO=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG")
+          
+          # Download each .nupkg asset from the release
+          echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name | endswith(".nupkg")) | .browser_download_url' | while read -r url; do
+            if [ ! -z "$url" ]; then
+              filename=$(basename "$url")
+              echo "Downloading: $filename"
+              curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -o "./packages/$filename" "$url"
+            fi
+          done
+          
+          echo "Downloaded packages:"
+          ls -la ./packages/
+      
+      # Publish to NuGet.org
+      - name: Publish to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          # Check if API key is configured
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "Error: NUGET_API_KEY secret is not configured"
+            echo "Please add your NuGet.org API key as a repository secret"
+            exit 1
+          fi
+          
+          # Push each package to NuGet.org
+          for package in ./packages/*.nupkg; do
+            if [[ -f "$package" ]] && [[ ! "$package" == *.symbols.nupkg ]]; then
+              echo "Publishing to NuGet.org: $(basename $package)"
+              dotnet nuget push "$package" \
+                --source "https://api.nuget.org/v3/index.json" \
+                --api-key "$NUGET_API_KEY" \
+                --skip-duplicate \
+                || echo "Warning: Failed to push $(basename $package) - it may already exist"
+            fi
+          done
+      
+      # Summary
+      - name: Summary
+        run: |
+          echo "## 📦 NuGet.org Publishing Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ github.event_name }}" == "release" ]; then
+            echo "### Triggered by Release" >> $GITHUB_STEP_SUMMARY
+            echo "- **Release**: ${{ github.event.release.tag_name }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Release URL**: ${{ github.event.release.html_url }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### Manual Trigger" >> $GITHUB_STEP_SUMMARY
+            echo "- **Release Tag**: ${{ github.event.inputs.release_tag }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Published Packages" >> $GITHUB_STEP_SUMMARY
+          echo "The following packages have been published to NuGet.org:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          for package in ./packages/*.nupkg; do
+            if [[ -f "$package" ]] && [[ ! "$package" == *.symbols.nupkg ]]; then
+              echo "- ✅ $(basename $package)" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### View on NuGet.org" >> $GITHUB_STEP_SUMMARY
+          echo "Packages should be available at: https://www.nuget.org/profiles/${{ github.repository_owner }}" >> $GITHUB_STEP_SUMMARY
