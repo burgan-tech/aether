@@ -194,63 +194,75 @@ jobs:
     
     - name: Create GitHub Release
       id: create_release
-      uses: actions/create-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: v${{ steps.version.outputs.version }}
-        release_name: Release v${{ steps.version.outputs.version }}
-        body: |
-          ## BBT Aether Framework v${{ steps.version.outputs.version }}
-          
-          ### 📦 Published Packages
-          
-          #### Framework Packages
-          - `BBT.Aether.Core` v${{ steps.version.outputs.version }}
-          - `BBT.Aether.Domain` v${{ steps.version.outputs.version }}
-          - `BBT.Aether.Application` v${{ steps.version.outputs.version }}
-          - `BBT.Aether.Infrastructure` v${{ steps.version.outputs.version }}
-          - `BBT.Aether.AspNetCore` v${{ steps.version.outputs.version }}
-          - `BBT.Aether.TestBase` v${{ steps.version.outputs.version }}
-          - `BBT.Aether.HttpClient` v${{ steps.version.outputs.version }}
-          
-          ### 🚀 Installation
-          
-          To use these packages, configure GitHub Packages as a NuGet source:
-          
-          ```bash
-          dotnet nuget add source --username YOUR_GITHUB_USERNAME --password YOUR_PAT --store-password-in-clear-text --name github "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
-          ```
-          
-          Then install the packages:
-          
-          ```bash
-          dotnet add package BBT.Aether.Core --version ${{ steps.version.outputs.version }}
-          ```
-          
-          ### 📋 Changes
-          
-          See the [commit history](https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}) for details.
-          
-          ---
-          *Published from branch: `${{ github.ref_name }}`*
-          *Commit: ${{ github.sha }}*
-        draft: false
-        prerelease: false
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        TAG="v$VERSION"
+        
+        # Create release notes
+        cat > release_notes.md << 'EOF'
+        ## BBT Aether Framework v${{ steps.version.outputs.version }}
+        
+        ### 📦 Published Packages
+        
+        #### Framework Packages
+        - `BBT.Aether.Core` v${{ steps.version.outputs.version }}
+        - `BBT.Aether.Domain` v${{ steps.version.outputs.version }}
+        - `BBT.Aether.Application` v${{ steps.version.outputs.version }}
+        - `BBT.Aether.Infrastructure` v${{ steps.version.outputs.version }}
+        - `BBT.Aether.AspNetCore` v${{ steps.version.outputs.version }}
+        - `BBT.Aether.TestBase` v${{ steps.version.outputs.version }}
+        - `BBT.Aether.HttpClient` v${{ steps.version.outputs.version }}
+        
+        ### 🚀 Installation
+        
+        To use these packages, configure GitHub Packages as a NuGet source:
+        
+        ```bash
+        dotnet nuget add source --username YOUR_GITHUB_USERNAME --password YOUR_PAT --store-password-in-clear-text --name github "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+        ```
+        
+        Then install the packages:
+        
+        ```bash
+        dotnet add package BBT.Aether.Core --version ${{ steps.version.outputs.version }}
+        ```
+        
+        ### 📋 Changes
+        
+        See the [commit history](https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}) for details.
+        
+        ---
+        *Published from branch: `${{ github.ref_name }}`*
+        *Commit: ${{ github.sha }}*
+        EOF
+        
+        # Create the release using GitHub CLI
+        gh release create "$TAG" \
+          --title "Release v$VERSION" \
+          --notes-file release_notes.md \
+          --latest
+        
+        # Output the release URL for the next step
+        RELEASE_URL=$(gh release view "$TAG" --json url --jq '.url')
+        echo "html_url=$RELEASE_URL" >> $GITHUB_OUTPUT
+        echo "upload_url=https://uploads.github.com/repos/${{ github.repository }}/releases/$(gh release view "$TAG" --json id --jq '.id')/assets" >> $GITHUB_OUTPUT
     
     - name: Upload Release Assets
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        # Upload each package to the release
+        VERSION="${{ steps.version.outputs.version }}"
+        TAG="v$VERSION"
+        
+        # Upload each package to the release using GitHub CLI
         for package in ./packages/*.nupkg; do
           if [[ -f "$package" ]]; then
             asset_name=$(basename "$package")
             echo "Uploading release asset: $asset_name"
             
-            curl -X POST \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"$package" \
-              "${{ steps.create_release.outputs.upload_url }}?name=${asset_name}&label=${asset_name}"
+            gh release upload "$TAG" "$package" --clobber
           fi
         done
     
