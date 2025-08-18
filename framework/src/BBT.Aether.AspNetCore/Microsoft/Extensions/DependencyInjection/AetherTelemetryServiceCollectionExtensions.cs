@@ -24,10 +24,10 @@ namespace Microsoft.Extensions.DependencyInjection;
 public static class AetherTelemetryServiceCollectionExtensions
 {
     // Performance: Cache compiled regex patterns
-    private static readonly ConcurrentDictionary<string, Regex> RegexCache = new();
+    private readonly static ConcurrentDictionary<string, Regex> RegexCache = new();
     
     // Performance: Cache base64 encoded credentials
-    private static readonly ConcurrentDictionary<string, string> AuthHeaderCache = new();
+    private readonly static ConcurrentDictionary<string, string> AuthHeaderCache = new();
     public static IServiceCollection AddFrameworkTelemetry(
         this IServiceCollection services,
         IConfiguration configuration,
@@ -68,7 +68,7 @@ public static class AetherTelemetryServiceCollectionExtensions
             {
                 options.Environment = configuration["ASPNETCORE_ENVIRONMENT"] ?? "Development";
             }
-
+            
             if (options.ServiceName.IsNullOrWhiteSpace())
             {
                 options.ServiceName = configuration["OTEL_SERVICE_NAME"] ?? configuration["ApplicationName"] ?? "Unknown";
@@ -239,16 +239,12 @@ public static class AetherTelemetryServiceCollectionExtensions
                     break;
                     
                 case "otlp":
-                    if (!string.IsNullOrEmpty(options.Otlp?.Endpoint))
+                    builder.AddOtlpExporter(otlpOptions =>
                     {
-                        builder.AddOtlpExporter(otlpOptions =>
-                        {
-                            if (Uri.TryCreate(options.Otlp.Endpoint, UriKind.Absolute, out var uri))
-                            {
-                                otlpOptions.Endpoint = uri;
-                            }
-                        });
-                    }
+                        // Priority: Environment variables > Code configuration
+                        ConfigureOtlpEndpoint(otlpOptions, "otlp", options);
+                        ConfigureOtlpProtocol(otlpOptions);
+                    });
                     break;
             }
         }
@@ -274,46 +270,10 @@ public static class AetherTelemetryServiceCollectionExtensions
                 // or via code configuration below
                 builder.AddOtlpExporter(otlpOptions =>
                 {
-                    // Only set if not already configured via environment variables
-                    if (otlpOptions.Endpoint == null)
-                    {
-                        var endpoint = provider switch
-                        {
-                            "otlp" => options.Otlp?.Endpoint,
-                            "elastic" => options.Elastic?.Endpoint,
-                            "openobserve" => options.OpenObserve?.Endpoint,
-                            _ => null
-                        };
-                        
-                        if (!string.IsNullOrEmpty(endpoint))
-                        {
-                            otlpOptions.Endpoint = new Uri(endpoint);
-                        }
-                    }
-                    
-                    // Set default protocol if not configured via env vars
-                    if (otlpOptions.Protocol == OpenTelemetry.Exporter.OtlpExportProtocol.Grpc)
-                    {
-                        otlpOptions.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf;
-                    }
-                    
-                    // Set auth headers if not configured via env vars and credentials available
-                    if (string.IsNullOrEmpty(otlpOptions.Headers))
-                    {
-                        var authHeader = provider switch
-                        {
-                            "elastic" when !string.IsNullOrEmpty(options.Elastic?.Username) =>
-                                GetCachedAuthHeader($"elastic:{options.Elastic.Username}:{options.Elastic.Password}"),
-                            "openobserve" when !string.IsNullOrEmpty(options.OpenObserve?.Username) =>
-                                GetCachedAuthHeader($"openobserve:{options.OpenObserve.Username}:{options.OpenObserve.Password}"),
-                            _ => null
-                        };
-                        
-                        if (!string.IsNullOrEmpty(authHeader))
-                        {
-                            otlpOptions.Headers = authHeader;
-                        }
-                    }
+                    // Priority: Environment variables > Code configuration
+                    ConfigureOtlpEndpoint(otlpOptions, provider, options);
+                    ConfigureOtlpProtocol(otlpOptions);
+                    ConfigureOtlpHeaders(otlpOptions, provider, options);
                 });
                 break;
                 
@@ -396,6 +356,116 @@ public static class AetherTelemetryServiceCollectionExtensions
         catch
         {
             return httpContext.Request.Path.Value ?? "unknown";
+        }
+    }
+    
+    private static void ConfigureOtlpEndpoint(dynamic otlpOptions, string provider, TelemetryOptions options)
+    {
+        try
+        {
+            // Check if endpoint is already set via environment variables
+            if (otlpOptions.Endpoint != null) return;
+            
+            // Get endpoint from environment variables first
+            var envEndpoint = provider switch
+            {
+                "otlp" => Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT") 
+                         ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+                         ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
+                "elastic" => Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+                           ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT"),
+                "openobserve" => Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+                               ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT"),
+                _ => null
+            };
+            
+            // If no env variable, use code configuration
+            if (string.IsNullOrEmpty(envEndpoint))
+            {
+                envEndpoint = provider switch
+                {
+                    "otlp" => options.Otlp?.Endpoint,
+                    "elastic" => options.Elastic?.Endpoint,
+                    "openobserve" => options.OpenObserve?.Endpoint,
+                    _ => null
+                };
+            }
+            
+            if (!string.IsNullOrEmpty(envEndpoint) && Uri.TryCreate(envEndpoint, UriKind.Absolute, out var uri))
+            {
+                otlpOptions.Endpoint = uri;
+            }
+        }
+        catch
+        {
+            // Continue without endpoint configuration if it fails
+        }
+    }
+    
+    private static void ConfigureOtlpProtocol(dynamic otlpOptions)
+    {
+        try
+        {
+            // Check environment variable first
+            var envProtocol = Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_PROTOCOL")
+                           ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL");
+            
+            if (!string.IsNullOrEmpty(envProtocol))
+            {
+                otlpOptions.Protocol = envProtocol.ToLowerInvariant() switch
+                {
+                    "grpc" => OpenTelemetry.Exporter.OtlpExportProtocol.Grpc,
+                    "http/protobuf" => OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf,
+                    _ => OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf
+                };
+            }
+            else if (otlpOptions.Protocol == OpenTelemetry.Exporter.OtlpExportProtocol.Grpc)
+            {
+                // Default to HttpProtobuf for better compatibility
+                otlpOptions.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf;
+            }
+        }
+        catch
+        {
+            // Continue with default protocol if configuration fails
+        }
+    }
+    
+    private static void ConfigureOtlpHeaders(dynamic otlpOptions, string provider, TelemetryOptions options)
+    {
+        try
+        {
+            // Check if headers are already set via environment variables
+            if (!string.IsNullOrEmpty(otlpOptions.Headers)) return;
+            
+            // Check environment variables first
+            var envHeaders = Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_HEADERS")
+                          ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_HEADERS");
+            
+            if (!string.IsNullOrEmpty(envHeaders))
+            {
+                otlpOptions.Headers = envHeaders;
+                return;
+            }
+            
+            // If no env headers, use code configuration
+            var authHeader = provider switch
+            {
+                "elastic" when !string.IsNullOrEmpty(options.Elastic?.Username) =>
+                    GetCachedAuthHeader($"elastic:{options.Elastic.Username}:{options.Elastic.Password}"),
+                "openobserve" when !string.IsNullOrEmpty(options.OpenObserve?.Username) =>
+                    GetCachedAuthHeader($"openobserve:{options.OpenObserve.Username}:{options.OpenObserve.Password}"),
+                _ => null
+            };
+            
+            if (!string.IsNullOrEmpty(authHeader))
+            {
+                otlpOptions.Headers = authHeader;
+            }
+        }
+        catch
+        {
+            // Continue without headers if configuration fails
         }
     }
     
