@@ -1,12 +1,17 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using BBT.Aether.AspNetCore.Telemetry;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Extensions;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using OpenTelemetry.Exporter;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -18,35 +23,83 @@ namespace Microsoft.Extensions.DependencyInjection;
 
 public static class AetherTelemetryServiceCollectionExtensions
 {
+    // Performance: Cache compiled regex patterns
+    private readonly static ConcurrentDictionary<string, Regex> RegexCache = new();
+    
+    // Performance: Cache base64 encoded credentials
+    private readonly static ConcurrentDictionary<string, string> AuthHeaderCache = new();
     public static IServiceCollection AddFrameworkTelemetry(
         this IServiceCollection services,
         IConfiguration configuration,
         Action<LoggerConfiguration, TelemetryOptions>? configureLogger = null)
     {
-        var options = configuration.GetSection("Telemetry").Get<TelemetryOptions>() ?? new TelemetryOptions();
-        ConfigureOptions(options, configuration);
-        ConfigureTraceProvider(services, options);
-        ConfigureLogProvider(services, options, configureLogger);
+        try
+        {
+            var options = configuration.GetSection("Telemetry").Get<TelemetryOptions>() ?? new TelemetryOptions();
+            ConfigureOptions(options, configuration);
+            ConfigureTraceProvider(services, options);
+            ConfigureLogProvider(services, options, configureLogger);
 
-        return services;
+            return services;
+        }
+        catch (Exception ex)
+        {
+            // Log error but don't fail application startup
+            try
+            {
+                using var serviceProvider = services.BuildServiceProvider();
+                var loggerFactory = serviceProvider.GetService<ILoggerFactory>();
+                var logger = loggerFactory?.CreateLogger("AetherTelemetry");
+                logger?.LogError(ex, "Failed to configure telemetry. Continuing without telemetry.");
+            }
+            catch
+            {
+                // Even logging failed, but don't crash the application
+            }
+            return services;
+        }
     }
 
     private static void ConfigureOptions(TelemetryOptions options, IConfiguration configuration)
     {
-        if (options.Environment.IsNullOrWhiteSpace())
+        try
         {
-            options.Environment = configuration["ASPNETCORE_ENVIRONMENT"] ?? "Development";
-        }
+            if (options.Environment.IsNullOrWhiteSpace())
+            {
+                options.Environment = configuration["ASPNETCORE_ENVIRONMENT"] ?? "Development";
+            }
+            
+            if (options.ServiceName.IsNullOrWhiteSpace())
+            {
+                options.ServiceName = configuration["OTEL_SERVICE_NAME"] ?? configuration["ApplicationName"] ?? "Unknown";
+            }
 
-        if (options.ServiceName.IsNullOrWhiteSpace())
-        {
-            options.ServiceName = configuration["OTEL_SERVICE_NAME"] ?? configuration["ApplicationName"];
+            if (options.ServiceVersion.IsNullOrWhiteSpace())
+            {
+                try
+                {
+                    var assemblyLocation = Assembly.GetExecutingAssembly().Location;
+                    if (!string.IsNullOrEmpty(assemblyLocation))
+                    {
+                        options.ServiceVersion = FileVersionInfo.GetVersionInfo(assemblyLocation).FileVersion ?? "1.0.0";
+                    }
+                    else
+                    {
+                        options.ServiceVersion = "1.0.0";
+                    }
+                }
+                catch
+                {
+                    options.ServiceVersion = "1.0.0";
+                }
+            }
         }
-
-        if (options.ServiceVersion.IsNullOrWhiteSpace())
+        catch
         {
-            var assemblyLocation = Assembly.GetExecutingAssembly().Location;
-            options.ServiceVersion = FileVersionInfo.GetVersionInfo(assemblyLocation).FileVersion ?? "1.0.0";
+            // Ensure we have safe defaults
+            options.Environment ??= "Development";
+            options.ServiceName ??= "Unknown";
+            options.ServiceVersion ??= "1.0.0";
         }
     }
 
@@ -74,34 +127,78 @@ public static class AetherTelemetryServiceCollectionExtensions
                     {
                         b.EnrichWithHttpResponse = (activity, httpResponse) =>
                         {
-                            var headersToLog = options.Logging?.Enrichers?.Headers ?? [];
-                            activity.DisplayName =
-                                $"{httpResponse.HttpContext.Request.Method} {httpResponse.HttpContext.Request.Path.Value ?? "unknown"}";
-                            activity.SetTag("http.route", httpResponse.HttpContext.Request.Path.Value ?? "unknown");
-                            foreach (var header in headersToLog)
+                            try
                             {
-                                activity.SetTag($"http.request.header.{header.ToLower()}",
-                                    httpResponse.HttpContext.Request.Headers.TryGetValue(header, out var headerValue)
-                                        ? headerValue.ToString()
-                                        : "-");
+                                var headersToLog = options.Logging?.Enrichers?.Headers ?? [];
+                                var httpMethod = httpResponse.HttpContext.Request.Method;
+                                
+                                // Get route pattern for better transaction grouping (with error handling)
+                                var routePattern = GetRoutePatternSafe(httpResponse.HttpContext);
+                                
+                                activity.DisplayName = $"{httpMethod} {routePattern}";
+                                activity.SetTag("http.route", routePattern);
+                                
+                                // Performance: Avoid allocation if no headers to log
+                                if (headersToLog.Count > 0)
+                                {
+                                    foreach (var header in headersToLog)
+                                    {
+                                        try
+                                        {
+                                            var headerKey = $"http.request.header.{header.ToLowerInvariant()}";
+                                            var headerValue = httpResponse.HttpContext.Request.Headers.TryGetValue(header, out var value)
+                                                ? value.ToString()
+                                                : "-";
+                                            activity.SetTag(headerKey, headerValue);
+                                        }
+                                        catch
+                                        {
+                                            // Skip problematic headers
+                                        }
+                                    }
+                                }
+                            }
+                            catch
+                            {
+                                // Don't break telemetry for header processing errors
                             }
                         };
 
                         b.Filter = httpContext =>
                         {
-                            var path = httpContext.Request.Path.Value;
-
-                            if (path == null) return true;
-
-                            foreach (var pattern in options.Logging.ExcludedPaths)
+                            try
                             {
-                                if (Regex.IsMatch(path, pattern, RegexOptions.IgnoreCase))
-                                {
-                                    return false;
-                                }
-                            }
+                                var path = httpContext.Request.Path.Value;
+                                if (string.IsNullOrEmpty(path)) return true;
 
-                            return true;
+                                var excludedPaths = options.Logging?.ExcludedPaths;
+                                if (excludedPaths == null || excludedPaths.Count == 0) return true;
+
+                                // Performance: Use cached compiled regex
+                                foreach (var pattern in excludedPaths)
+                                {
+                                    try
+                                    {
+                                        var regex = RegexCache.GetOrAdd(pattern, p => new Regex(p, RegexOptions.IgnoreCase | RegexOptions.Compiled));
+                                        if (regex.IsMatch(path))
+                                        {
+                                            return false;
+                                        }
+                                    }
+                                    catch
+                                    {
+                                        // Skip invalid regex patterns
+                                        continue;
+                                    }
+                                }
+
+                                return true;
+                            }
+                            catch
+                            {
+                                // Default to including the request if filtering fails
+                                return true;
+                            }
                         };
                     })
                     .AddEntityFrameworkCoreInstrumentation(efOptions =>
@@ -122,19 +219,38 @@ public static class AetherTelemetryServiceCollectionExtensions
 
     private static TracerProviderBuilder AddTraceExporter(this TracerProviderBuilder builder, TelemetryOptions options)
     {
-        if (options.TraceProvider?.ToLower() == "zipkin")
+        try
         {
-            builder.AddZipkinExporter(zipkinOptions =>
+            var provider = options.TraceProvider?.ToLowerInvariant();
+            
+            switch (provider)
             {
-                zipkinOptions.Endpoint = new Uri(options.Zipkin.Endpoint);
-            });
+                case "zipkin":
+                    if (!string.IsNullOrEmpty(options.Zipkin?.Endpoint))
+                    {
+                        builder.AddZipkinExporter(zipkinOptions =>
+                        {
+                            if (Uri.TryCreate(options.Zipkin.Endpoint, UriKind.Absolute, out var uri))
+                            {
+                                zipkinOptions.Endpoint = uri;
+                            }
+                        });
+                    }
+                    break;
+                    
+                case "otlp":
+                    builder.AddOtlpExporter(otlpOptions =>
+                    {
+                        // Priority: Environment variables > Code configuration
+                        ConfigureOtlpEndpoint(otlpOptions, "otlp", options);
+                        ConfigureOtlpProtocol(otlpOptions);
+                    });
+                    break;
+            }
         }
-        else if (options.TraceProvider?.ToLower() == "otlp")
+        catch
         {
-            builder.AddOtlpExporter(otlpOptions =>
-            {
-                otlpOptions.Endpoint = new Uri(options.Otlp.Endpoint);
-            });
+            // Continue without trace exporter if configuration fails
         }
 
         return builder;
@@ -142,37 +258,27 @@ public static class AetherTelemetryServiceCollectionExtensions
 
     private static MeterProviderBuilder AddMetricExporter(this MeterProviderBuilder builder, TelemetryOptions options)
     {
-        switch (options.TraceProvider.ToLower())
+        var provider = options.TraceProvider;
+        
+        switch (provider?.ToLower())
         {
             case "otlp":
-                builder.AddOtlpExporter(otlpOptions =>
-                {
-                    otlpOptions.Endpoint = new Uri(options.Otlp.Endpoint);
-                });
-                break;
-
             case "elastic":
+            case "openobserve":
+                // All these providers use OTLP protocol
+                // Configuration can be done via environment variables (OTEL_EXPORTER_OTLP_METRICS_*)
+                // or via code configuration below
                 builder.AddOtlpExporter(otlpOptions =>
                 {
-                    otlpOptions.Endpoint = new Uri(options.Elastic.Endpoint);
-                    if (!string.IsNullOrEmpty(options.Elastic.Username))
-                    {
-                        otlpOptions.Headers =
-                            $"Authorization=Bearer {Convert.ToBase64String(Encoding.UTF8.GetBytes($"{options.Elastic.Username}:{options.Elastic.Password}"))}";
-                    }
+                    // Priority: Environment variables > Code configuration
+                    ConfigureOtlpEndpoint(otlpOptions, provider, options);
+                    ConfigureOtlpProtocol(otlpOptions);
+                    ConfigureOtlpHeaders(otlpOptions, provider, options);
                 });
                 break;
-
-            case "openobserve":
-                builder.AddOtlpExporter(otlpOptions =>
-                {
-                    otlpOptions.Endpoint = new Uri(options.OpenObserve.Endpoint);
-                    if (!string.IsNullOrEmpty(options.OpenObserve.Username))
-                    {
-                        otlpOptions.Headers =
-                            $"Authorization=Basic {Convert.ToBase64String(Encoding.UTF8.GetBytes($"{options.OpenObserve.Username}:{options.OpenObserve.Password}"))}";
-                    }
-                });
+                
+            default:
+                // No metric exporter configured
                 break;
         }
 
@@ -194,19 +300,30 @@ public static class AetherTelemetryServiceCollectionExtensions
             .Enrich.WithProperty("DeploymentId", GetDeploymentId(options))
             .Filter.ByExcluding(Matching.FromSource("Microsoft.AspNetCore.StaticFiles"));
 
-        // Configure file logging
-        loggerConfig.WriteTo.File(
-            path: options.Logging.FilePath,
-            rollingInterval: RollingInterval.Day,
-            retainedFileCountLimit: 10,
-            rollOnFileSizeLimit: true,
-            outputTemplate:
-            "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}");
+        if (options.LogProvider.Contains("file", StringComparison.OrdinalIgnoreCase))
+        {
+            // Configure file logging
+            loggerConfig.WriteTo.File(
+                path: options.Logging.FilePath,
+                rollingInterval: RollingInterval.Day,
+                retainedFileCountLimit: 10,
+                rollOnFileSizeLimit: true,
+                outputTemplate:
+                "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}");
+        }
 
-        // Configure console logging
-        loggerConfig.WriteTo.Console(outputTemplate:
-            "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}");
+        if (options.LogProvider.Contains("console", StringComparison.OrdinalIgnoreCase))
+        {
+            // Configure console logging
+            loggerConfig.WriteTo.Console(outputTemplate:
+                "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}");
+        }
 
+        if (options.LogProvider.Contains("otlp", StringComparison.OrdinalIgnoreCase))
+        {
+            loggerConfig.WriteTo.OpenTelemetry();
+        }
+        
         configureLogger?.Invoke(loggerConfig, options);
 
         Log.Logger = loggerConfig.CreateLogger();
@@ -229,6 +346,154 @@ public static class AetherTelemetryServiceCollectionExtensions
         _ => LogEventLevel.Information
     };
 
-    public static string GetDeploymentId(TelemetryOptions options) =>
-        $"{options.Environment}-{options.ServiceName}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N").Substring(0, 8)}";
+    private static string GetRoutePatternSafe(HttpContext httpContext)
+    {
+        try
+        {
+            var routePattern = (httpContext.GetEndpoint() as RouteEndpoint)?.RoutePattern.RawText;
+            return routePattern ?? httpContext.Request.Path.Value ?? "unknown";
+        }
+        catch
+        {
+            return httpContext.Request.Path.Value ?? "unknown";
+        }
+    }
+    
+    private static void ConfigureOtlpEndpoint(dynamic otlpOptions, string provider, TelemetryOptions options)
+    {
+        try
+        {
+            // Check if endpoint is already set via environment variables
+            if (otlpOptions.Endpoint != null) return;
+            
+            // Get endpoint from environment variables first
+            var envEndpoint = provider switch
+            {
+                "otlp" => Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT") 
+                         ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+                         ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
+                "elastic" => Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+                           ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT"),
+                "openobserve" => Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+                               ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT"),
+                _ => null
+            };
+            
+            // If no env variable, use code configuration
+            if (string.IsNullOrEmpty(envEndpoint))
+            {
+                envEndpoint = provider switch
+                {
+                    "otlp" => options.Otlp?.Endpoint,
+                    "elastic" => options.Elastic?.Endpoint,
+                    "openobserve" => options.OpenObserve?.Endpoint,
+                    _ => null
+                };
+            }
+            
+            if (!string.IsNullOrEmpty(envEndpoint) && Uri.TryCreate(envEndpoint, UriKind.Absolute, out var uri))
+            {
+                otlpOptions.Endpoint = uri;
+            }
+        }
+        catch
+        {
+            // Continue without endpoint configuration if it fails
+        }
+    }
+    
+    private static void ConfigureOtlpProtocol(dynamic otlpOptions)
+    {
+        try
+        {
+            // Check environment variable first
+            var envProtocol = Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_PROTOCOL")
+                           ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL");
+            
+            if (!string.IsNullOrEmpty(envProtocol))
+            {
+                otlpOptions.Protocol = envProtocol.ToLowerInvariant() switch
+                {
+                    "grpc" => OpenTelemetry.Exporter.OtlpExportProtocol.Grpc,
+                    "http/protobuf" => OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf,
+                    _ => OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf
+                };
+            }
+            else if (otlpOptions.Protocol == OpenTelemetry.Exporter.OtlpExportProtocol.Grpc)
+            {
+                // Default to HttpProtobuf for better compatibility
+                otlpOptions.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf;
+            }
+        }
+        catch
+        {
+            // Continue with default protocol if configuration fails
+        }
+    }
+    
+    private static void ConfigureOtlpHeaders(dynamic otlpOptions, string provider, TelemetryOptions options)
+    {
+        try
+        {
+            // Check if headers are already set via environment variables
+            if (!string.IsNullOrEmpty(otlpOptions.Headers)) return;
+            
+            // Check environment variables first
+            var envHeaders = Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_HEADERS")
+                          ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_HEADERS");
+            
+            if (!string.IsNullOrEmpty(envHeaders))
+            {
+                otlpOptions.Headers = envHeaders;
+                return;
+            }
+            
+            // If no env headers, use code configuration
+            var authHeader = provider switch
+            {
+                "elastic" when !string.IsNullOrEmpty(options.Elastic?.Username) =>
+                    GetCachedAuthHeader($"elastic:{options.Elastic.Username}:{options.Elastic.Password}"),
+                "openobserve" when !string.IsNullOrEmpty(options.OpenObserve?.Username) =>
+                    GetCachedAuthHeader($"openobserve:{options.OpenObserve.Username}:{options.OpenObserve.Password}"),
+                _ => null
+            };
+            
+            if (!string.IsNullOrEmpty(authHeader))
+            {
+                otlpOptions.Headers = authHeader;
+            }
+        }
+        catch
+        {
+            // Continue without headers if configuration fails
+        }
+    }
+    
+    private static string GetCachedAuthHeader(string key)
+    {
+        return AuthHeaderCache.GetOrAdd(key, k =>
+        {
+            try
+            {
+                var parts = k.Split(':');
+                if (parts.Length >= 3)
+                {
+                    var username = parts[1];
+                    var password = parts[2];
+                    var credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
+                    return $"Authorization=Basic {credentials}";
+                }
+            }
+            catch
+            {
+                // Return empty if encoding fails
+            }
+            return string.Empty;
+        });
+    }
+
+    public static string GetDeploymentId(TelemetryOptions options)
+    {
+        return $"{options.Environment}-{options.ServiceName}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}";
+    }
 }

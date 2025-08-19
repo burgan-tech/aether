@@ -37,6 +37,7 @@
         <PackageReference Include="Serilog.Formatting.Compact"/>
         <PackageReference Include="Serilog.Sinks.Console"/>
         <PackageReference Include="Serilog.Sinks.File"/>
+        <PackageReference Include="Serilog.Sinks.OpenTelemetry"/>
         <PackageReference Include="Microsoft.Extensions.Diagnostics"/>
         <PackageReference Include="Microsoft.AspNetCore.ResponseCompression"/>
         <ProjectReference Include="..\BBT.Aether.Application\BBT.Aether.Application.csproj"/>
