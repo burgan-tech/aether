@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using BBT.Aether.Domain.Events;
+using BBT.Aether.Domain.Events.Distributed;
 
 namespace BBT.Aether.Domain.Entities;
 
@@ -13,6 +14,8 @@ public abstract class BasicAggregateRoot : Entity,
     IAggregateRoot
 {
     private readonly List<IDomainEvent> _domainEvents = new();
+    private readonly List<IDistributedDomainEvent> _distributedEvents = new();
+    private long _version = 0;
 
     /// <summary>
     /// Gets the domain events that have been raised by this aggregate root.
@@ -20,7 +23,17 @@ public abstract class BasicAggregateRoot : Entity,
     public IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents.AsReadOnly();
 
     /// <summary>
-    /// Raises a domain event.
+    /// Gets the distributed domain events that have been raised by this aggregate root.
+    /// </summary>
+    public IReadOnlyCollection<IDistributedDomainEvent> DistributedEvents => _distributedEvents.AsReadOnly();
+
+    /// <summary>
+    /// Gets the current version of this aggregate root.
+    /// </summary>
+    public long EventVersion => _version;
+
+    /// <summary>
+    /// Raises a local domain event.
     /// </summary>
     /// <param name="domainEvent">The domain event to raise.</param>
     protected void Raise(IDomainEvent domainEvent)
@@ -32,11 +45,41 @@ public abstract class BasicAggregateRoot : Entity,
     }
 
     /// <summary>
+    /// Raises a distributed domain event.
+    /// </summary>
+    /// <param name="distributedEvent">The distributed domain event to raise.</param>
+    protected void RaiseDistributed(IDistributedDomainEvent distributedEvent)
+    {
+        if (distributedEvent == null)
+            throw new ArgumentNullException(nameof(distributedEvent));
+
+        _distributedEvents.Add(distributedEvent);
+        _version++; // Increment version for each distributed event
+    }
+
+    /// <summary>
     /// Clears all domain events from this aggregate root.
     /// </summary>
     public void ClearDomainEvents()
     {
         _domainEvents.Clear();
+    }
+
+    /// <summary>
+    /// Clears all distributed events from this aggregate root.
+    /// </summary>
+    public void ClearDistributedEvents()
+    {
+        _distributedEvents.Clear();
+    }
+
+    /// <summary>
+    /// Clears all events (both local and distributed) from this aggregate root.
+    /// </summary>
+    public void ClearAllEvents()
+    {
+        _domainEvents.Clear();
+        _distributedEvents.Clear();
     }
 }
 
@@ -49,11 +92,23 @@ public abstract class BasicAggregateRoot<TKey> : Entity<TKey>,
     IAggregateRoot<TKey>
 {
     private readonly List<IDomainEvent> _domainEvents = new();
+    private readonly List<IDistributedDomainEvent> _distributedEvents = new();
+    private long _version = 0;
 
     /// <summary>
     /// Gets the domain events that have been raised by this aggregate root.
     /// </summary>
     public IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents.AsReadOnly();
+
+    /// <summary>
+    /// Gets the distributed domain events that have been raised by this aggregate root.
+    /// </summary>
+    public IReadOnlyCollection<IDistributedDomainEvent> DistributedEvents => _distributedEvents.AsReadOnly();
+
+    /// <summary>
+    /// Gets the current version of this aggregate root.
+    /// </summary>
+    public long EventVersion => _version;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="BasicAggregateRoot{TKey}"/> class.
@@ -72,7 +127,7 @@ public abstract class BasicAggregateRoot<TKey> : Entity<TKey>,
     }
 
     /// <summary>
-    /// Raises a domain event.
+    /// Raises a local domain event.
     /// </summary>
     /// <param name="domainEvent">The domain event to raise.</param>
     protected void Raise(IDomainEvent domainEvent)
@@ -84,10 +139,40 @@ public abstract class BasicAggregateRoot<TKey> : Entity<TKey>,
     }
 
     /// <summary>
+    /// Raises a distributed domain event.
+    /// </summary>
+    /// <param name="distributedEvent">The distributed domain event to raise.</param>
+    protected void RaiseDistributed(IDistributedDomainEvent distributedEvent)
+    {
+        if (distributedEvent == null)
+            throw new ArgumentNullException(nameof(distributedEvent));
+
+        _distributedEvents.Add(distributedEvent);
+        _version++; // Increment version for each distributed event
+    }
+
+    /// <summary>
     /// Clears all domain events from this aggregate root.
     /// </summary>
     public void ClearDomainEvents()
     {
         _domainEvents.Clear();
+    }
+
+    /// <summary>
+    /// Clears all distributed events from this aggregate root.
+    /// </summary>
+    public void ClearDistributedEvents()
+    {
+        _distributedEvents.Clear();
+    }
+
+    /// <summary>
+    /// Clears all events (both local and distributed) from this aggregate root.
+    /// </summary>
+    public void ClearAllEvents()
+    {
+        _domainEvents.Clear();
+        _distributedEvents.Clear();
     }
 }
