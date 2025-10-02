@@ -9,17 +9,20 @@ using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.EntityFrameworkCore.Modeling;
+using BBT.Aether.Domain.Events;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace BBT.Aether.Domain.EntityFrameworkCore;
 
 public abstract class AetherDbContext<TDbContext>(
-    DbContextOptions<TDbContext> options
+    DbContextOptions<TDbContext> options,
+    IDomainEventDispatcher? domainEventDispatcher = null
 )
     : DbContext(options)
     where TDbContext : DbContext
 {
+    private readonly IDomainEventDispatcher? _domainEventDispatcher = domainEventDispatcher;
     private readonly static MethodInfo ConfigureBasePropertiesMethodInfo
         = typeof(AetherDbContext<TDbContext>)
             .GetMethod(
@@ -53,6 +56,12 @@ public abstract class AetherDbContext<TDbContext>(
      public override int SaveChanges()
     {
         TrackEntityStates();
+        
+        if (_domainEventDispatcher != null)
+        {
+            return SaveChangesWithDomainEvents().GetAwaiter().GetResult();
+        }
+        
         return base.SaveChanges();
     }
 
@@ -62,6 +71,12 @@ public abstract class AetherDbContext<TDbContext>(
         try
         {
             TrackEntityStates();
+            
+            if (_domainEventDispatcher != null)
+            {
+                return await SaveChangesWithDomainEvents(acceptAllChangesOnSuccess, cancellationToken);
+            }
+            
             var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
             return result;
         }
@@ -91,6 +106,77 @@ public abstract class AetherDbContext<TDbContext>(
         CancellationToken cancellationToken = default)
     {
         return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    private async Task<int> SaveChangesWithDomainEvents(bool acceptAllChangesOnSuccess = true, CancellationToken cancellationToken = default)
+    {
+        // 1) Collect domain events from tracked aggregate roots
+        var aggregates = ChangeTracker
+            .Entries()
+            .Where(e => e.Entity is IAggregateRoot)
+            .Select(e => (IAggregateRoot)e.Entity)
+            .ToList();
+
+        var preCommitEvents = aggregates
+            .SelectMany(a => GetDomainEvents(a))
+            .OfType<IPreCommitEvent>()
+            .ToList();
+
+        // 2) Dispatch pre-commit events (within transaction)
+        if (preCommitEvents.Count > 0 && _domainEventDispatcher != null)
+        {
+            await _domainEventDispatcher.DispatchAsync(preCommitEvents, cancellationToken);
+        }
+
+        // 3) Commit changes to database
+        var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+
+        // 4) Dispatch post-commit events (after successful save)
+        var postCommitEvents = aggregates
+            .SelectMany(a => GetDomainEvents(a))
+            .OfType<IPostCommitEvent>()
+            .ToList();
+
+        try
+        {
+            if (postCommitEvents.Count > 0 && _domainEventDispatcher != null)
+            {
+                await _domainEventDispatcher.DispatchAsync(postCommitEvents, cancellationToken);
+            }
+        }
+        finally
+        {
+            // 5) Clear domain events from aggregates (important for idempotency)
+            foreach (var aggregate in aggregates)
+            {
+                ClearDomainEvents(aggregate);
+            }
+        }
+
+        return result;
+    }
+
+    private static IEnumerable<IDomainEvent> GetDomainEvents(IAggregateRoot aggregate)
+    {
+        // Use reflection to get DomainEvents property from BasicAggregateRoot
+        var domainEventsProperty = aggregate.GetType()
+            .GetProperty("DomainEvents", BindingFlags.Public | BindingFlags.Instance);
+        
+        if (domainEventsProperty?.GetValue(aggregate) is IEnumerable<IDomainEvent> events)
+        {
+            return events;
+        }
+
+        return Enumerable.Empty<IDomainEvent>();
+    }
+
+    private static void ClearDomainEvents(IAggregateRoot aggregate)
+    {
+        // Use reflection to call ClearDomainEvents method from BasicAggregateRoot
+        var clearMethod = aggregate.GetType()
+            .GetMethod("ClearDomainEvents", BindingFlags.Public | BindingFlags.Instance);
+        
+        clearMethod?.Invoke(aggregate, null);
     }
 
     protected virtual void ConfigureBaseProperties<TEntity>(ModelBuilder modelBuilder,

@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using BBT.Aether.Domain.Events;
 
 namespace BBT.Aether.Domain.Entities;
 
@@ -9,6 +12,32 @@ namespace BBT.Aether.Domain.Entities;
 public abstract class BasicAggregateRoot : Entity,
     IAggregateRoot
 {
+    private readonly List<IDomainEvent> _domainEvents = new();
+
+    /// <summary>
+    /// Gets the domain events that have been raised by this aggregate root.
+    /// </summary>
+    public IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents.AsReadOnly();
+
+    /// <summary>
+    /// Raises a domain event.
+    /// </summary>
+    /// <param name="domainEvent">The domain event to raise.</param>
+    protected void Raise(IDomainEvent domainEvent)
+    {
+        if (domainEvent == null)
+            throw new ArgumentNullException(nameof(domainEvent));
+
+        _domainEvents.Add(domainEvent);
+    }
+
+    /// <summary>
+    /// Clears all domain events from this aggregate root.
+    /// </summary>
+    public void ClearDomainEvents()
+    {
+        _domainEvents.Clear();
+    }
 }
 
 /// <summary>
@@ -19,6 +48,13 @@ public abstract class BasicAggregateRoot : Entity,
 public abstract class BasicAggregateRoot<TKey> : Entity<TKey>,
     IAggregateRoot<TKey>
 {
+    private readonly List<IDomainEvent> _domainEvents = new();
+
+    /// <summary>
+    /// Gets the domain events that have been raised by this aggregate root.
+    /// </summary>
+    public IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents.AsReadOnly();
+
     /// <summary>
     /// Initializes a new instance of the <see cref="BasicAggregateRoot{TKey}"/> class.
     /// </summary>
@@ -33,5 +69,25 @@ public abstract class BasicAggregateRoot<TKey> : Entity<TKey>,
     protected BasicAggregateRoot(TKey id)
         : base(id)
     {
+    }
+
+    /// <summary>
+    /// Raises a domain event.
+    /// </summary>
+    /// <param name="domainEvent">The domain event to raise.</param>
+    protected void Raise(IDomainEvent domainEvent)
+    {
+        if (domainEvent == null)
+            throw new ArgumentNullException(nameof(domainEvent));
+
+        _domainEvents.Add(domainEvent);
+    }
+
+    /// <summary>
+    /// Clears all domain events from this aggregate root.
+    /// </summary>
+    public void ClearDomainEvents()
+    {
+        _domainEvents.Clear();
     }
 }
