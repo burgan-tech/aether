@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using BBT.Aether.Tracing;
@@ -26,15 +27,14 @@ public sealed class AetherCorrelationIdMiddleware(
 
     private string? GetCorrelationIdFromRequest(HttpContext context)
     {
-        var correlationId = context.Request.Headers[_options.HttpHeaderName];
-        if (correlationId.IsNullOrEmpty())
+        var correlationId = context.Request.Headers[_options.HttpHeaderName].FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(correlationId))
         {
-            if (context.TraceIdentifier != null)
+            if (!string.IsNullOrWhiteSpace(context.TraceIdentifier))
             {
                 correlationId = context.TraceIdentifier;
             }
-
-            if (correlationId.IsNullOrEmpty())
+            else
             {
                 correlationId = Guid.NewGuid().ToString("N");
             }
