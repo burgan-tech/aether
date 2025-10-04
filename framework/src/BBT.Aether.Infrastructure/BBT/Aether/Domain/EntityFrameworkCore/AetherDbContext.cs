@@ -19,15 +19,13 @@ namespace BBT.Aether.Domain.EntityFrameworkCore;
 
 public abstract class AetherDbContext<TDbContext>(
     DbContextOptions<TDbContext> options,
-    IDomainEventDispatcher? domainEventDispatcher = null,
-    IDistributedDomainEventPublisher? distributedEventPublisher = null,
+    IEventContext? eventContext = null,
     ITransactionService? transactionService = null
 )
     : DbContext(options)
     where TDbContext : DbContext
 {
-    private readonly IDomainEventDispatcher? _domainEventDispatcher = domainEventDispatcher;
-    private readonly IDistributedDomainEventPublisher? _distributedEventPublisher = distributedEventPublisher;
+    private readonly IEventContext? _eventContext = eventContext;
     private readonly ITransactionService? _transactionService = transactionService;
     private readonly static MethodInfo ConfigureBasePropertiesMethodInfo
         = typeof(AetherDbContext<TDbContext>)
@@ -63,7 +61,7 @@ public abstract class AetherDbContext<TDbContext>(
     {
         TrackEntityStates();
         
-        if (_domainEventDispatcher != null || _distributedEventPublisher != null)
+        if (_eventContext != null)
         {
             return SaveChangesWithDomainEvents().GetAwaiter().GetResult();
         }
@@ -78,7 +76,7 @@ public abstract class AetherDbContext<TDbContext>(
         {
             TrackEntityStates();
             
-            if (_domainEventDispatcher != null || _distributedEventPublisher != null)
+            if (_eventContext != null)
             {
                 return await SaveChangesWithDomainEvents(acceptAllChangesOnSuccess, cancellationToken);
             }
@@ -151,9 +149,9 @@ public abstract class AetherDbContext<TDbContext>(
             .ToList();
 
         // 3) Dispatch pre-commit events (within transaction)
-        if (preCommitEvents.Count > 0 && _domainEventDispatcher != null)
+        if (preCommitEvents.Count > 0 && _eventContext != null)
         {
-            await _domainEventDispatcher.DispatchAsync(preCommitEvents, cancellationToken);
+            await _eventContext.DispatchPreCommitEventsAsync(preCommitEvents, cancellationToken);
         }
 
         // 4) Save changes to database
@@ -202,9 +200,9 @@ public abstract class AetherDbContext<TDbContext>(
             .ToList();
 
         // 4) Dispatch pre-commit events (within transaction)
-        if (preCommitEvents.Count > 0 && _domainEventDispatcher != null)
+        if (preCommitEvents.Count > 0 && _eventContext != null)
         {
-            await _domainEventDispatcher.DispatchAsync(preCommitEvents, cancellationToken);
+            await _eventContext.DispatchPreCommitEventsAsync(preCommitEvents, cancellationToken);
         }
 
         // 5) Commit changes to database
@@ -213,15 +211,15 @@ public abstract class AetherDbContext<TDbContext>(
         try
         {
             // 6) Dispatch post-commit events (after successful save)
-            if (postCommitEvents.Count > 0 && _domainEventDispatcher != null)
+            if (postCommitEvents.Count > 0 && _eventContext != null)
             {
-                await _domainEventDispatcher.DispatchAsync(postCommitEvents, cancellationToken);
+                await _eventContext.DispatchPostCommitEventsAsync(postCommitEvents, cancellationToken);
             }
 
             // 7) Publish distributed events (after local events)
-            if (distributedEvents.Count > 0 && _distributedEventPublisher != null)
+            if (distributedEvents.Count > 0 && _eventContext != null)
             {
-                await _distributedEventPublisher.PublishAsync(distributedEvents, cancellationToken);
+                await _eventContext.PublishDistributedEventsAsync(distributedEvents, cancellationToken);
             }
         }
         finally

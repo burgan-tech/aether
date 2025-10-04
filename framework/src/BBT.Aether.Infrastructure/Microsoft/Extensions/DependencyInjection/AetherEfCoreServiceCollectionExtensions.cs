@@ -24,6 +24,9 @@ public static class AetherEfCoreServiceCollectionExtensions
 
         // Register distributed event publisher if not already registered
         services.TryAddScoped<IDistributedDomainEventPublisher, NullDistributedDomainEventPublisher>();
+        
+        // Register the unified event context
+        services.TryAddScoped<IEventContext, EventContext>();
 
         services.AddDbContext<TDbContext>((sp, dbContextOptions) =>
         {
@@ -53,6 +56,9 @@ public static class AetherEfCoreServiceCollectionExtensions
 
         // Register distributed event publisher if not already registered
         services.TryAddScoped<IDistributedDomainEventPublisher, NullDistributedDomainEventPublisher>();
+        
+        // Register the unified event context
+        services.TryAddScoped<IEventContext, EventContext>();
         
         // Configure DbContextOptions
         services.AddDbContextOptions<TDbContext>(options);

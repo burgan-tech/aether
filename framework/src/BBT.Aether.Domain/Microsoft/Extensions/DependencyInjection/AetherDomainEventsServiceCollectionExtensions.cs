@@ -2,7 +2,9 @@ using System;
 using System.Linq;
 using System.Reflection;
 using BBT.Aether.Domain.Events;
+using BBT.Aether.Domain.Events.Distributed;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
@@ -23,7 +25,13 @@ public static class AetherDomainEventsServiceCollectionExtensions
             throw new ArgumentNullException(nameof(services));
 
         // Register the domain event dispatcher
-        services.AddScoped<IDomainEventDispatcher, DomainEventDispatcher>();
+        services.TryAddScoped<IDomainEventDispatcher, DomainEventDispatcher>();
+        
+        // Register distributed event publisher if not already registered
+        services.TryAddScoped<IDistributedDomainEventPublisher, NullDistributedDomainEventPublisher>();
+        
+        // Register the unified event context
+        services.TryAddScoped<IEventContext, EventContext>();
 
         // If no assemblies provided, use the calling assembly
         if (assemblies == null || assemblies.Length == 0)

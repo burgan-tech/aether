@@ -21,8 +21,7 @@ namespace BBT.Aether.Domain.EntityFrameworkCore;
 public sealed class EfCoreTransactionService<TDbContext>(
     TDbContext dbContext, 
     ILogger<EfCoreTransactionService<TDbContext>> logger,
-    IDomainEventDispatcher? domainEventDispatcher = null,
-    IDistributedDomainEventPublisher? distributedEventPublisher = null)
+    IEventContext? eventContext = null)
     : ITransactionService, ISupportsRollback, ITransactionEventStorage
     where TDbContext : DbContext
 {
@@ -194,20 +193,26 @@ public sealed class EfCoreTransactionService<TDbContext>(
 
     private async Task DispatchStoredEvents(CancellationToken cancellationToken)
     {
+        if (eventContext == null)
+        {
+            logger.LogWarning("No event context available. Stored events will not be dispatched");
+            return;
+        }
+
         try
         {
             // Dispatch post-commit events
-            if (_postCommitEvents.Count > 0 && domainEventDispatcher != null)
+            if (_postCommitEvents.Count > 0)
             {
                 logger.LogDebug("Dispatching {Count} post-commit events after successful transaction commit", _postCommitEvents.Count);
-                await domainEventDispatcher.DispatchAsync(_postCommitEvents, cancellationToken);
+                await eventContext.DispatchPostCommitEventsAsync(_postCommitEvents, cancellationToken);
             }
 
             // Publish distributed events
-            if (_distributedEvents.Count > 0 && distributedEventPublisher != null)
+            if (_distributedEvents.Count > 0)
             {
                 logger.LogDebug("Publishing {Count} distributed events after successful transaction commit", _distributedEvents.Count);
-                await distributedEventPublisher.PublishAsync(_distributedEvents, cancellationToken);
+                await eventContext.PublishDistributedEventsAsync(_distributedEvents, cancellationToken);
             }
         }
         catch (Exception ex)

@@ -40,10 +40,8 @@ public sealed class DomainEventDispatcher : IDomainEventDispatcher
     {
         var eventType = @event.GetType();
         var handlerType = typeof(IDomainEventHandler<>).MakeGenericType(eventType);
-        var enumerableHandlerType = typeof(IEnumerable<>).MakeGenericType(handlerType);
         
-        var handlers = (IEnumerable<object>?)_serviceProvider.GetService(enumerableHandlerType) 
-                       ?? Array.Empty<object>();
+        var handlers = _serviceProvider.GetServices(handlerType).Cast<object>();
 
         // Sort handlers by order if they implement IOrderedDomainEventHandler
         var orderedHandlers = handlers
