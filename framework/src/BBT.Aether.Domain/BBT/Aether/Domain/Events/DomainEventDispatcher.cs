@@ -66,7 +66,7 @@ public sealed class DomainEventDispatcher : IDomainEventDispatcher
         // Check if handler implements IOrderedDomainEventHandler<TEvent>
         var orderedHandlerType = typeof(IOrderedDomainEventHandler<>).MakeGenericType(eventType);
         
-        if (orderedHandlerType.IsAssignableFrom(handler.GetType()))
+        if (orderedHandlerType.IsInstanceOfType(handler))
         {
             var orderProperty = orderedHandlerType.GetProperty(nameof(IOrderedDomainEventHandler<IDomainEvent>.Order));
             if (orderProperty?.GetValue(handler) is int order)

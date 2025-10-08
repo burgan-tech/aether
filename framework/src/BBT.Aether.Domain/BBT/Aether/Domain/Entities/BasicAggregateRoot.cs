@@ -38,8 +38,7 @@ public abstract class BasicAggregateRoot : Entity,
     /// <param name="domainEvent">The domain event to raise.</param>
     protected void Raise(IDomainEvent domainEvent)
     {
-        if (domainEvent == null)
-            throw new ArgumentNullException(nameof(domainEvent));
+        ArgumentNullException.ThrowIfNull(domainEvent);
 
         _domainEvents.Add(domainEvent);
     }
@@ -50,8 +49,7 @@ public abstract class BasicAggregateRoot : Entity,
     /// <param name="distributedEvent">The distributed domain event to raise.</param>
     protected void RaiseDistributed(IDistributedDomainEvent distributedEvent)
     {
-        if (distributedEvent == null)
-            throw new ArgumentNullException(nameof(distributedEvent));
+        ArgumentNullException.ThrowIfNull(distributedEvent);
 
         _distributedEvents.Add(distributedEvent);
         _version++; // Increment version for each distributed event
@@ -132,8 +130,7 @@ public abstract class BasicAggregateRoot<TKey> : Entity<TKey>,
     /// <param name="domainEvent">The domain event to raise.</param>
     protected void Raise(IDomainEvent domainEvent)
     {
-        if (domainEvent == null)
-            throw new ArgumentNullException(nameof(domainEvent));
+        ArgumentNullException.ThrowIfNull(domainEvent);
 
         _domainEvents.Add(domainEvent);
     }
@@ -144,8 +141,7 @@ public abstract class BasicAggregateRoot<TKey> : Entity<TKey>,
     /// <param name="distributedEvent">The distributed domain event to raise.</param>
     protected void RaiseDistributed(IDistributedDomainEvent distributedEvent)
     {
-        if (distributedEvent == null)
-            throw new ArgumentNullException(nameof(distributedEvent));
+        ArgumentNullException.ThrowIfNull(distributedEvent);
 
         _distributedEvents.Add(distributedEvent);
         _version++; // Increment version for each distributed event

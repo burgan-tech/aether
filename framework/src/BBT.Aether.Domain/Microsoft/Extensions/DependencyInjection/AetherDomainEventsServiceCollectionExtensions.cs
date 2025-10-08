@@ -21,8 +21,7 @@ public static class AetherDomainEventsServiceCollectionExtensions
     /// <returns>The service collection for chaining.</returns>
     public static IServiceCollection AddDomainEvents(this IServiceCollection services, params Assembly[] assemblies)
     {
-        if (services == null)
-            throw new ArgumentNullException(nameof(services));
+        ArgumentNullException.ThrowIfNull(services);
 
         // Register the domain event dispatcher
         services.TryAddScoped<IDomainEventDispatcher, DomainEventDispatcher>();

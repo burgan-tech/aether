@@ -65,7 +65,7 @@ public sealed class EventContext : IEventContext
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to dispatch {Count} pre-commit events", eventList.Count);
-            throw;
+                
         }
     }
 
@@ -95,7 +95,7 @@ public sealed class EventContext : IEventContext
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to dispatch {Count} post-commit events", eventList.Count);
-            throw;
+            throw new InvalidOperationException($"Failed to dispatch {eventList.Count} post-commit events", ex);
         }
     }
 
@@ -125,7 +125,7 @@ public sealed class EventContext : IEventContext
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to publish {Count} distributed events", eventList.Count);
-            throw;
+            throw new InvalidOperationException($"Failed to publish {eventList.Count} distributed events", ex);
         }
     }
 
