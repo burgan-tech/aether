@@ -17,35 +17,27 @@ public class RedisDistributedLockService(
 {
     public async Task<bool> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60, CancellationToken cancellationToken = default)
     {
-        try
-        {
             var database = redisConnection.GetDatabase();
-            var lockKey = $"distributed-lock:{resourceId}";
-            var lockValue = $"{GetClientIdentifier()}-{resourceId}";
+            var lockOwner = GetClientIdentifier();
             var expiry = TimeSpan.FromSeconds(expiryInSeconds);
 
             // Use atomic SETNX (SET if Not eXists) with expiry
+            // Key: resourceId, Value: lockOwner
             var acquired = await database.StringSetAsync(
-                lockKey,
-                lockValue,
+                resourceId,
+                lockOwner,
                 expiry,
                 When.NotExists
             );
 
             if (acquired)
             {
-                logger.LogDebug("Successfully acquired Redis lock for resource {ResourceId}", resourceId);
+                logger.LogDebug("Successfully acquired Redis lock for resource {ResourceId} with owner {LockOwner}", resourceId, lockOwner);
                 return true;
             }
 
             logger.LogWarning("Failed to acquire Redis lock for resource {ResourceId}", resourceId);
             return false;
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error acquiring Redis lock for resource {ResourceId}", resourceId);
-            return false;
-        }
     }
 
     public async Task<bool> ReleaseLockAsync(string resourceId, CancellationToken cancellationToken = default)
@@ -53,9 +45,9 @@ public class RedisDistributedLockService(
         try
         {
             var database = redisConnection.GetDatabase();
-            var lockKey = $"distributed-lock:{resourceId}";
+            var lockOwner = GetClientIdentifier();
 
-            // Use Lua script to ensure atomic delete only if the lock exists
+            // Use Lua script to ensure atomic delete only if the lock exists and is owned by this client
             var script = @"
                 if redis.call('get', KEYS[1]) == ARGV[1] then
                     return redis.call('del', KEYS[1])
@@ -63,27 +55,20 @@ public class RedisDistributedLockService(
                     return 0
                 end";
 
-            var lockValue = await database.StringGetAsync(lockKey);
-            if (lockValue.IsNullOrEmpty)
-            {
-                logger.LogWarning("Attempting to release non-existent lock for resource {ResourceId}", resourceId);
-                return false;
-            }
-
             var result = await database.ScriptEvaluateAsync(script,
-                [lockKey],
-                [lockValue]
+                [resourceId],
+                [lockOwner]
             );
 
             var released = (int)result == 1;
 
             if (released)
             {
-                logger.LogDebug("Successfully released Redis lock for resource {ResourceId}", resourceId);
+                logger.LogDebug("Successfully released Redis lock for resource {ResourceId} with owner {LockOwner}", resourceId, lockOwner);
             }
             else
             {
-                logger.LogWarning("Failed to release Redis lock for resource {ResourceId}", resourceId);
+                logger.LogWarning("Failed to release Redis lock for resource {ResourceId} - lock not owned by {LockOwner}", resourceId, lockOwner);
             }
 
             return released;
@@ -158,6 +143,6 @@ public class RedisDistributedLockService(
     
     private string GetClientIdentifier()
     {
-        return $"{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")}-{applicationInfoAccessor.ApplicationName}";
+        return ($"{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")}.{applicationInfoAccessor.ApplicationName}.{applicationInfoAccessor.InstanceId}").ToLowerInvariant();
     }
 }
