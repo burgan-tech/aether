@@ -45,7 +45,6 @@ public static class AetherEfCoreServiceCollectionExtensions
         
         // Register the factory
         services.AddScoped<IDbContextFactory<TDbContext>, TFactory>();
-        services.AddScoped<TFactory>();
 
         return services;
     }
