@@ -22,7 +22,7 @@ public abstract class DistributedEventBusBase(
     /// The Type is generated from EventNameAttribute on the event type using TopicNameStrategy.
     /// The Source is populated from AetherEventBusOptions.DefaultSource.
     /// </summary>
-    protected CloudEventEnvelope<TEvent> CreateEnvelope<TEvent>(
+    protected CloudEventEnvelope CreateEnvelope<TEvent>(
         TEvent payload,
         string? subject = null) where TEvent : class
     {
@@ -31,7 +31,7 @@ public abstract class DistributedEventBusBase(
             ?? throw new InvalidOperationException(
                 "DefaultSource must be configured in AetherEventBusOptions. Set AetherEventBusOptions.DefaultSource when configuring the EventBus.");
 
-        return new CloudEventEnvelope<TEvent>
+        return new CloudEventEnvelope
         {
             Type = type,
             Source = source,
@@ -61,7 +61,7 @@ public abstract class DistributedEventBusBase(
 
         if (useOutbox)
         {
-            await StoreInOutboxAsync(typeof(TEvent), envelope, cancellationToken);
+            await StoreInOutboxAsync(envelope, cancellationToken);
         }
         else
         {
@@ -71,15 +71,77 @@ public abstract class DistributedEventBusBase(
         }
     }
 
+    // Metadata-based publish for domain events (no reflection needed)
+    public async Task PublishAsync(
+        IDistributedEvent @event,
+        EventMetadata metadata,
+        string? subject = null,
+        bool useOutbox = true,
+        CancellationToken cancellationToken = default)
+    {
+        // Create envelope using metadata - no reflection needed
+        var envelope = CreateEnvelopeFromMetadata(@event, metadata, subject);
+        
+        // Get topic name using TopicNameStrategy (handles environment prefixing)
+        var topicName = TopicNameStrategy.GetTopicName(metadata.EventType);
+
+        if (useOutbox)
+        {
+            await StoreInOutboxAsync(envelope, cancellationToken);
+        }
+        else
+        {
+            var serialized = EventSerializer.Serialize(envelope);
+            // Use PubSubName from metadata or fall back to default from options
+            var pubSubName = metadata.PubSubName ?? AetherEventBusOptions.PubSubName;
+            await PublishToBrokerAsync(topicName, pubSubName, serialized, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Creates a CloudEventEnvelope from an event and its pre-extracted metadata.
+    /// No reflection needed - directly constructs the envelope.
+    /// </summary>
+    private CloudEventEnvelope CreateEnvelopeFromMetadata(IDistributedEvent @event, EventMetadata metadata, string? subject)
+    {
+        // Get topic name using TopicNameStrategy (handles environment prefixing)
+        var type = TopicNameStrategy.GetTopicName(metadata.EventType);
+        var source = AetherEventBusOptions.DefaultSource
+            ?? throw new InvalidOperationException(
+                "DefaultSource must be configured in AetherEventBusOptions. Set AetherEventBusOptions.DefaultSource when configuring the EventBus.");
+
+        return new CloudEventEnvelope
+        {
+            Type = type,
+            Source = source,
+            Subject = subject,
+            Data = @event
+            // Other properties (SpecVersion, Id, Time, DataContentType) use defaults from CloudEventEnvelope class
+        };
+    }
+
     /// <summary>
     /// Stores the event in outbox using a scoped IOutboxStore instance.
     /// This ensures that scoped services (like DbContext) are properly resolved per operation.
     /// </summary>
-    private async Task StoreInOutboxAsync(Type eventType, object envelope, CancellationToken cancellationToken)
+    private async Task StoreInOutboxAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken)
     {
         await using var scope = ServiceScopeFactory.CreateAsyncScope();
         var outboxStore = scope.ServiceProvider.GetRequiredService<IOutboxStore>();
-        await outboxStore.StoreAsync(eventType, envelope, cancellationToken);
+        await outboxStore.StoreAsync(envelope, cancellationToken);
+    }
+    
+    /// <summary>
+    /// Publishes a pre-serialized CloudEventEnvelope directly to the broker.
+    /// Used internally by the outbox processor to republish stored events.
+    /// </summary>
+    public Task PublishEnvelopeAsync(
+        byte[] serializedEnvelope,
+        string topicName,
+        string pubSubName,
+        CancellationToken cancellationToken = default)
+    {
+        return PublishToBrokerAsync(topicName, pubSubName, serializedEnvelope, cancellationToken);
     }
     
     /// <summary>
@@ -91,4 +153,14 @@ public abstract class DistributedEventBusBase(
     /// <param name="serializedEnvelope">The serialized CloudEventEnvelope</param>
     /// <param name="cancellationToken">Cancellation token</param>
     protected abstract Task PublishToBrokerAsync<TEvent>(string topic, byte[] serializedEnvelope, CancellationToken cancellationToken = default) where TEvent : class;
+    
+    /// <summary>
+    /// Publishes the serialized CloudEventEnvelope to the broker without generic type information.
+    /// Used by PublishEnvelopeAsync for outbox processing.
+    /// </summary>
+    /// <param name="topic">The topic name to publish to</param>
+    /// <param name="pubSubName">The PubSub component name</param>
+    /// <param name="serializedEnvelope">The serialized CloudEventEnvelope</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    protected abstract Task PublishToBrokerAsync(string topic, string pubSubName, byte[] serializedEnvelope, CancellationToken cancellationToken = default);
 }

@@ -8,8 +8,7 @@ namespace BBT.Aether.Events;
 /// The Type is generated from EventNameAttribute on the event type using TopicNameStrategy.
 /// The Source is populated from AetherEventBusOptions.DefaultSource.
 /// </summary>
-/// <typeparam name="TData">The event data type</typeparam>
-public class CloudEventEnvelope<TData>
+public class CloudEventEnvelope
 {
     /// <summary>
     /// CloudEvents specification version. Default: "1.0"
@@ -22,7 +21,7 @@ public class CloudEventEnvelope<TData>
     public string Id { get; init; } = Guid.NewGuid().ToString("N");
 
     /// <summary>
-    /// Event type identifier. Automatically generated from EventNameAttribute on TData using TopicNameStrategy.
+    /// Event type identifier. Automatically generated from EventNameAttribute on the event type using TopicNameStrategy.
     /// Format: "domain.EventName.vX" or "{environment}.domain.EventName.vX" if environment prefix is enabled.
     /// </summary>
     public string Type { get; init; } = default!;
@@ -51,5 +50,18 @@ public class CloudEventEnvelope<TData>
     /// <summary>
     /// The event payload data.
     /// </summary>
-    public TData Data { get; init; } = default!;
+    public object Data { get; init; } = default!;
+}
+
+/// <summary>
+/// Generic CloudEvents 1.0 compliant envelope for distributed events with strongly-typed data.
+/// Used by event handlers for type-safe access to event data and metadata.
+/// </summary>
+/// <typeparam name="TData">The type of the event data</typeparam>
+public class CloudEventEnvelope<TData> : CloudEventEnvelope
+{
+    /// <summary>
+    /// The strongly-typed event payload data.
+    /// </summary>
+    public new TData Data { get; init; } = default!;
 }

@@ -19,6 +19,7 @@ public static class AetherEventBusServiceCollectionExtensions
         services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
         services.AddSingleton<ITopicNameStrategy, DefaultTopicNameStrategy>();
         services.AddScoped<IOutboxStore, NullOutboxStore>();
+        services.AddScoped<IInboxStore, NullInboxStore>();
 
         // Configure event bus options
         var options = new AetherEventBusOptions();

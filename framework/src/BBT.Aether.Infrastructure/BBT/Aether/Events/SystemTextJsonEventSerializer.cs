@@ -14,9 +14,15 @@ public sealed class SystemTextJsonEventSerializer : IEventSerializer
     };
 
     /// <inheritdoc />
-    public byte[] Serialize<T>(CloudEventEnvelope<T> envelope)
+    public byte[] Serialize(CloudEventEnvelope envelope)
     {
         return JsonSerializer.SerializeToUtf8Bytes(envelope, Options);
+    }
+
+    /// <inheritdoc />
+    public byte[] Serialize(object obj)
+    {
+        return JsonSerializer.SerializeToUtf8Bytes(obj, Options);
     }
 
     /// <inheritdoc />

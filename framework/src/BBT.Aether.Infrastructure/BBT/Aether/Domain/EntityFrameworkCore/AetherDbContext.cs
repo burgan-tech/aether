@@ -10,19 +10,20 @@ using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.EntityFrameworkCore.Modeling;
 using BBT.Aether.Domain.Services;
+using BBT.Aether.Events;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace BBT.Aether.Domain.EntityFrameworkCore;
 
 public abstract class AetherDbContext<TDbContext>(
     DbContextOptions<TDbContext> options,
-    ITransactionService? transactionService = null
+    IServiceProvider? serviceProvider = null
 )
     : DbContext(options)
     where TDbContext : DbContext
 {
-    private readonly ITransactionService? _transactionService = transactionService;
     private readonly static MethodInfo ConfigureBasePropertiesMethodInfo
         = typeof(AetherDbContext<TDbContext>)
             .GetMethod(
@@ -45,18 +46,35 @@ public abstract class AetherDbContext<TDbContext>(
         {
             ConfigureBasePropertiesMethodInfo
                 .MakeGenericMethod(entityType.ClrType)
-                .Invoke(this, new object[] { modelBuilder, entityType });
+                .Invoke(this, [modelBuilder, entityType]);
             
             ConfigureValueGeneratedMethodInfo
                 .MakeGenericMethod(entityType.ClrType)
-                .Invoke(this, new object[] { modelBuilder, entityType });
+                .Invoke(this, [modelBuilder, entityType]);
         }
     }
     
      public override int SaveChanges()
     {
         TrackEntityStates();
-        return base.SaveChanges();
+        
+        // Collect domain events before saving
+        var domainEvents = CollectDomainEvents();
+        
+        var result = base.SaveChanges();
+        
+        // Dispatch domain events after successful save (synchronously, which is not ideal but follows the pattern)
+        if (domainEvents.Any() && serviceProvider != null)
+        {
+            var dispatcher = serviceProvider.GetService<IDomainEventDispatcher>();
+            if (dispatcher != null)
+            {
+                dispatcher.DispatchEventsAsync(domainEvents).GetAwaiter().GetResult();
+                ClearDomainEvents();
+            }
+        }
+        
+        return result;
     }
 
     public async override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess,
@@ -66,7 +84,23 @@ public abstract class AetherDbContext<TDbContext>(
         {
             TrackEntityStates();
             
+            // Collect domain events before saving
+            var domainEvents = CollectDomainEvents();
+            
+            // Commit the transaction first
             var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+            
+            // Dispatch domain events after successful save
+            if (domainEvents.Any() && serviceProvider != null)
+            {
+                var dispatcher = serviceProvider.GetService<IDomainEventDispatcher>();
+                if (dispatcher != null)
+                {
+                    await dispatcher.DispatchEventsAsync(domainEvents, cancellationToken);
+                    ClearDomainEvents();
+                }
+            }
+            
             return result;
         }
         catch (DbUpdateConcurrencyException ex)
@@ -223,6 +257,48 @@ public abstract class AetherDbContext<TDbContext>(
                     }
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Collects all domain events from tracked entities that implement IHasDomainEvents.
+    /// </summary>
+    private List<DomainEventEnvelope> CollectDomainEvents()
+    {
+        var domainEvents = new List<DomainEventEnvelope>();
+
+        var entitiesWithEvents = ChangeTracker.Entries()
+            .Where(e => e.Entity is IHasDomainEvents)
+            .Select(e => e.Entity as IHasDomainEvents)
+            .Where(e => e != null)
+            .ToList();
+
+        foreach (var entity in entitiesWithEvents)
+        {
+            var events = entity!.GetDomainEvents();
+            if (events.Any())
+            {
+                domainEvents.AddRange(events);
+            }
+        }
+
+        return domainEvents;
+    }
+
+    /// <summary>
+    /// Clears all domain events from tracked entities that implement IHasDomainEvents.
+    /// </summary>
+    private void ClearDomainEvents()
+    {
+        var entitiesWithEvents = ChangeTracker.Entries()
+            .Where(e => e.Entity is IHasDomainEvents)
+            .Select(e => e.Entity as IHasDomainEvents)
+            .Where(e => e != null)
+            .ToList();
+
+        foreach (var entity in entitiesWithEvents)
+        {
+            entity!.ClearDomainEvents();
         }
     }
 }

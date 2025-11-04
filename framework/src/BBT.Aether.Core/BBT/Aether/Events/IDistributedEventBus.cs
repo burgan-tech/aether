@@ -22,4 +22,34 @@ public interface IDistributedEventBus : IEventBus
         bool useOutbox = true, 
         CancellationToken cancellationToken = default)
         where TEvent : class;
+
+    /// <summary>
+    /// Publishes an event using pre-extracted metadata from EventNameAttribute.
+    /// This method is primarily used by the domain event dispatcher to avoid reflection during dispatching.
+    /// </summary>
+    /// <param name="event">The event to publish</param>
+    /// <param name="metadata">Pre-extracted event metadata (EventName, Version, PubSubName, etc.)</param>
+    /// <param name="subject">Optional subject identifier (e.g., aggregate ID)</param>
+    /// <param name="useOutbox">Whether to use the outbox pattern for transactional publishing</param>
+    /// <param name="cancellationToken"></param>
+    Task PublishAsync(
+        IDistributedEvent @event,
+        EventMetadata metadata,
+        string? subject = null,
+        bool useOutbox = true,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Publishes a pre-serialized CloudEventEnvelope directly to the broker.
+    /// Used internally by the outbox processor to republish stored events.
+    /// </summary>
+    /// <param name="serializedEnvelope">The serialized CloudEventEnvelope (JSON bytes)</param>
+    /// <param name="topicName">The topic name to publish to</param>
+    /// <param name="pubSubName">The PubSub component name</param>
+    /// <param name="cancellationToken"></param>
+    Task PublishEnvelopeAsync(
+        byte[] serializedEnvelope,
+        string topicName,
+        string pubSubName,
+        CancellationToken cancellationToken = default);
 }

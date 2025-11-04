@@ -19,10 +19,11 @@ public class DaprEventController(
     IEventSerializer serializer,
     IEventTypeRegistry eventTypeRegistry,
     ITopicNameStrategy topicNameStrategy,
+    IInboxStore inboxStore,
     ILogger<DaprEventController> logger)
     : ControllerBase
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    private readonly static JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
@@ -68,9 +69,31 @@ public class DaprEventController(
             await Request.Body.CopyToAsync(memoryStream, cancellationToken);
             var payload = memoryStream.ToArray();
 
-            // Parse the final payload to extract Type field
+            // Parse the final payload to extract Type and Id fields
             var jsonDoc = JsonDocument.Parse(payload);
             var root = jsonDoc.RootElement;
+
+            // Extract Id property from JSON (CloudEvent Id field)
+            string? eventId = null;
+            if (root.TryGetProperty("id", out var idElement) || root.TryGetProperty("Id", out idElement))
+            {
+                eventId = idElement.GetString();
+            }
+
+            if (string.IsNullOrWhiteSpace(eventId))
+            {
+                logger.LogWarning("CloudEventEnvelope.Id is missing or empty from topic {TopicName}", topicName);
+                jsonDoc.Dispose();
+                return Ok();
+            }
+
+            // Check if event has already been processed (idempotency check)
+            if (await inboxStore.HasProcessedAsync(eventId, cancellationToken))
+            {
+                logger.LogInformation("Event {EventId} has already been processed, skipping", eventId);
+                jsonDoc.Dispose();
+                return Ok();
+            }
 
             // Extract Type property from JSON (CloudEvent Type field)
             if (!root.TryGetProperty("type", out var typeElement) && !root.TryGetProperty("Type", out typeElement))
@@ -98,19 +121,20 @@ public class DaprEventController(
                 return Ok();
             }
 
-            // Deserialize to typed CloudEventEnvelope<T> with the correct event type
+            // Deserialize directly to strongly-typed CloudEventEnvelope<TEvent>
+            // This eliminates reflection for data extraction!
             var typedEnvelopeType = typeof(CloudEventEnvelope<>).MakeGenericType(clrType);
             var typedEnvelope = serializer.Deserialize(payload, typedEnvelopeType);
 
             if (typedEnvelope == null)
             {
-                logger.LogWarning("Failed to deserialize typed CloudEventEnvelope<{EventType}> from topic {TopicName}",
+                logger.LogWarning("Failed to deserialize CloudEventEnvelope<{EventType}> from topic {TopicName}",
                     clrType.Name, topicName);
                 jsonDoc.Dispose();
                 return Ok();
             }
 
-            // Resolve handlers from DI (no reflection needed - DI handles this)
+            // Resolve handlers from DI
             var handlerInterface = typeof(IDistributedEventHandler<>).MakeGenericType(clrType);
             var handlers = serviceProvider.GetServices(handlerInterface);
 
@@ -121,7 +145,8 @@ public class DaprEventController(
                 return Ok();
             }
 
-            // Invoke handlers - minimal reflection (only for generic interface method call)
+            // Invoke handlers with strongly-typed envelope
+            // Handlers receive CloudEventEnvelope<TEvent> with type-safe data access
             var handleAsyncMethod = handlerInterface.GetMethod(nameof(IDistributedEventHandler<object>.HandleAsync))!;
             var tasks = enumerable
                 .Select(handler =>
@@ -129,6 +154,10 @@ public class DaprEventController(
                 .ToList();
 
             await Task.WhenAll(tasks);
+
+            // Mark event as processed after successful handling
+            // Cast to non-generic for storage
+            await inboxStore.MarkProcessedAsync((CloudEventEnvelope)typedEnvelope, cancellationToken);
 
             jsonDoc.Dispose();
             return Ok();

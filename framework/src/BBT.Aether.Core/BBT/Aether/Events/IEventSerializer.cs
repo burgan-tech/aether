@@ -10,10 +10,17 @@ public interface IEventSerializer
     /// <summary>
     /// Serializes a CloudEvent envelope to bytes.
     /// </summary>
-    /// <typeparam name="T">The data type</typeparam>
     /// <param name="envelope">The envelope to serialize</param>
     /// <returns>Serialized bytes</returns>
-    byte[] Serialize<T>(CloudEventEnvelope<T> envelope);
+    byte[] Serialize(CloudEventEnvelope envelope);
+
+    /// <summary>
+    /// Serializes any object (typically a CloudEvent envelope) to bytes.
+    /// Used for non-generic serialization scenarios.
+    /// </summary>
+    /// <param name="obj">The object to serialize</param>
+    /// <returns>Serialized bytes</returns>
+    byte[] Serialize(object obj);
 
     /// <summary>
     /// Deserializes bytes to a CloudEvent envelope.
