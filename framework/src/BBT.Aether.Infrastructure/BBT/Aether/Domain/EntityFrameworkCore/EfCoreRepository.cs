@@ -7,8 +7,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Repositories;
-using BBT.Aether.Domain.Services;
 using BBT.Aether.Guids;
+using BBT.Aether.Uow;
 using BBT.Aether.Users;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -18,7 +18,7 @@ namespace BBT.Aether.Domain.EntityFrameworkCore;
 public class EfCoreRepository<TDbContext, TEntity>(
     TDbContext dbContext,
     IServiceProvider serviceProvider,
-    ITransactionService transactionService)
+    IAmbientUnitOfWorkAccessor uowAccessor)
     : RepositoryBase<TEntity>(serviceProvider), IEfCoreRepository<TEntity>
     where TDbContext : AetherDbContext<TDbContext>
     where TEntity : class, IEntity
@@ -30,7 +30,8 @@ public class EfCoreRepository<TDbContext, TEntity>(
 
     protected virtual bool ShouldSaveChanges(bool saveChanges)
     {
-        return saveChanges && !transactionService.HasActiveTransaction;
+        // Don't save changes if within an ambient unit of work
+        return saveChanges && uowAccessor.Current == null;
     }
 
     async Task<DbContext> IEfCoreRepository<TEntity>.GetDbContextAsync()
@@ -63,7 +64,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
         return (await GetDbContextAsync()).Database.CurrentTransaction?.GetDbTransaction();
     }
 
-    public async override Task<TEntity> InsertAsync(TEntity entity, bool saveChanges = true,
+    public async override Task<TEntity> InsertAsync(TEntity entity, bool saveChanges = false,
         CancellationToken cancellationToken = default)
     {
         CheckAndSetId(entity);
@@ -78,7 +79,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
         return savedEntity;
     }
 
-    public async override Task<TEntity> UpdateAsync(TEntity entity, bool saveChanges = true,
+    public async override Task<TEntity> UpdateAsync(TEntity entity, bool saveChanges = false,
         CancellationToken cancellationToken = default)
     {
         var context = await GetDbContextAsync();
@@ -97,7 +98,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
         return entity;
     }
 
-    public async override Task DeleteAsync(TEntity entity, bool saveChanges = true,
+    public async override Task DeleteAsync(TEntity entity, bool saveChanges = false,
         CancellationToken cancellationToken = default)
     {
         var context = await GetDbContextAsync();
@@ -176,7 +177,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
     }
 
     public async override Task DeleteAsync(Expression<Func<TEntity, bool>> predicate,
-        bool saveChanges = true,
+        bool saveChanges = false,
         CancellationToken cancellationToken = default)
     {
         var context = await GetDbContextAsync();
@@ -198,7 +199,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
     }
 
     public async override Task DeleteDirectAsync(Expression<Func<TEntity, bool>> predicate,
-        bool saveChanges = true,
+        bool saveChanges = false,
         CancellationToken cancellationToken = default)
     {
         var context = await GetDbContextAsync();
@@ -291,8 +292,8 @@ public class EfCoreRepository<TDbContext, TEntity>(
 public class EfCoreRepository<TDbContext, TEntity, TKey>(
     TDbContext dbContext,
     IServiceProvider serviceProvider,
-    ITransactionService transactionService)
-    : EfCoreRepository<TDbContext, TEntity>(dbContext, serviceProvider, transactionService),
+    IAmbientUnitOfWorkAccessor uowAccessor)
+    : EfCoreRepository<TDbContext, TEntity>(dbContext, serviceProvider, uowAccessor),
         IEfCoreRepository<TEntity, TKey>
     where TDbContext : AetherDbContext<TDbContext>
     where TEntity : class, IEntity<TKey>

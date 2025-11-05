@@ -45,11 +45,11 @@ public abstract class RepositoryBase<TEntity>(IServiceProvider serviceProvider)
     }
 
     public abstract Task DeleteAsync(Expression<Func<TEntity, bool>> predicate,
-        bool saveChanges = true,
+        bool saveChanges = false,
         CancellationToken cancellationToken = default);
 
     public abstract Task DeleteDirectAsync(Expression<Func<TEntity, bool>> predicate,
-        bool saveChanges = true,
+        bool saveChanges = false,
         CancellationToken cancellationToken = default);
 
     protected virtual TQueryable ApplyDataFilters<TQueryable>(TQueryable query)
@@ -73,7 +73,7 @@ public abstract class RepositoryBase<TEntity, TKey>(IServiceProvider serviceProv
 
     public abstract Task<TEntity?> FindAsync(TKey id, bool includeDetails = true, CancellationToken cancellationToken = default);
 
-    public virtual async Task DeleteAsync(TKey id, bool saveChanges = true, CancellationToken cancellationToken = default)
+    public virtual async Task DeleteAsync(TKey id, bool saveChanges = false, CancellationToken cancellationToken = default)
     {
         var entity = await FindAsync(id, cancellationToken: cancellationToken);
         if (entity == null)

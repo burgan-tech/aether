@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO.Compression;
 using System.Linq;
 using BBT.Aether.AspNetCore.ExceptionHandling;
@@ -8,7 +7,6 @@ using BBT.Aether.AspNetCore.Tracing;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Options;
 
 namespace Microsoft.Extensions.DependencyInjection;
 

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <Import Project="..\..\..\common.props" />
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <WarningsAsErrors>Nullable</WarningsAsErrors>
+        <AssemblyName>BBT.Aether.Aspects</AssemblyName>
+        <PackageId>BBT.Aether.Aspects</PackageId>
+        <AssetTargetFallback>$(AssetTargetFallback);portable-net45+win8+wp8+wpa81;</AssetTargetFallback>
+        <GenerateAssemblyConfigurationAttribute>false</GenerateAssemblyConfigurationAttribute>
+        <GenerateAssemblyCompanyAttribute>false</GenerateAssemblyCompanyAttribute>
+        <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
+        <RootNamespace />
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="PostSharp" PrivateAssets="none"  />
+        <PackageReference Include="PostSharp.Patterns.Common" PrivateAssets="none"  />
+    </ItemGroup>
+    
+    <ItemGroup>
+        <ProjectReference Include="..\BBT.Aether.Core\BBT.Aether.Core.csproj" />
+        <ProjectReference Include="..\BBT.Aether.Infrastructure\BBT.Aether.Infrastructure.csproj" />
+    </ItemGroup>
+
+</Project>
+

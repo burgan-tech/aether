@@ -42,7 +42,7 @@ public static class AetherOutboxServiceCollectionExtensions
         services.AddScoped<IOutboxStore, EfCoreOutboxStore<TDbContext>>();
 
         // Register background processor
-        services.AddHostedService<OutboxProcessor<TDbContext>>();
+        // services.AddHostedService<OutboxProcessor<TDbContext>>();
 
         return services;
     }
@@ -78,7 +78,7 @@ public static class AetherOutboxServiceCollectionExtensions
         services.AddScoped<IInboxStore, EfCoreInboxStore<TDbContext>>();
 
         // Register cleanup service
-        services.AddHostedService<InboxCleanupService<TDbContext>>();
+        // services.AddHostedService<InboxCleanupService<TDbContext>>();
 
         return services;
     }

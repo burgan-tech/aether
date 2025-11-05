@@ -58,7 +58,7 @@ public interface IRepository<TEntity> : IReadOnlyRepository<TEntity>, IBasicRepo
     /// <param name="cancellationToken">A <see cref="T:System.Threading.CancellationToken" /> to observe while waiting for the task to complete.</param>
     Task DeleteAsync(
         Expression<Func<TEntity, bool>> predicate,
-        bool saveChanges = true,
+        bool saveChanges = false,
         CancellationToken cancellationToken = default
     );
 
@@ -74,7 +74,7 @@ public interface IRepository<TEntity> : IReadOnlyRepository<TEntity>, IBasicRepo
     /// <returns></returns>
     Task DeleteDirectAsync(
         Expression<Func<TEntity, bool>> predicate,
-        bool saveChanges = true,
+        bool saveChanges = false,
         CancellationToken cancellationToken = default
     );
 }

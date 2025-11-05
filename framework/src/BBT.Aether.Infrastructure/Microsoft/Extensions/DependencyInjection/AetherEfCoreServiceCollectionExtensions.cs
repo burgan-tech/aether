@@ -3,9 +3,10 @@ using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.EntityFrameworkCore.Interceptors;
 using BBT.Aether.Domain.Services;
 using BBT.Aether.Events;
+using BBT.Aether.Uow;
+using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
@@ -14,19 +15,40 @@ public static class AetherEfCoreServiceCollectionExtensions
     public static IServiceCollection AddAetherDbContext<TDbContext>(
         this IServiceCollection services,
         Action<DbContextOptionsBuilder> options)
-        where TDbContext : DbContext
+        where TDbContext : AetherDbContext<TDbContext>
     {
         services.AddSingleton<AuditInterceptor>();
 
         services.AddDbContext<TDbContext>((sp, dbContextOptions) =>
         {
-            options?.Invoke(dbContextOptions);
+            options.Invoke(dbContextOptions);
             dbContextOptions.AddInterceptors(
                 sp.GetRequiredService<AuditInterceptor>()
             );
         });
 
-        services.AddScoped<ITransactionService, EfCoreTransactionService<TDbContext>>();
+        // Register Unit of Work services
+        services.AddAetherUnitOfWork<TDbContext>();
+        
+        return services;
+    }
+
+    /// <summary>
+    /// Registers Unit of Work services for the specified DbContext.
+    /// Includes ambient accessor, UoW manager, and EF Core transaction source.
+    /// </summary>
+    public static IServiceCollection AddAetherUnitOfWork<TDbContext>(this IServiceCollection services)
+        where TDbContext : AetherDbContext<TDbContext>
+    {
+        // Register ambient accessor as singleton (AsyncLocal storage)
+        services.TryAddSingleton<IAmbientUnitOfWorkAccessor, AsyncLocalAmbientUowAccessor>();
+
+        // Register UoW manager as scoped
+        services.TryAddScoped<IUnitOfWorkManager, UnitOfWorkManager>();
+
+        // Register EF Core transaction source for this DbContext
+        services.AddScoped<ILocalTransactionSource, EfCoreTransactionSource<TDbContext>>();
+
         return services;
     }
 
@@ -79,10 +101,10 @@ public static class AetherEfCoreServiceCollectionExtensions
         Action<DbContextOptionsBuilder> options)
         where TDbContext : DbContext
     {
-        services.AddSingleton<DbContextOptions<TDbContext>>(sp =>
+        services.AddSingleton<DbContextOptions<TDbContext>>(_ =>
         {
             var builder = new DbContextOptionsBuilder<TDbContext>();
-            options?.Invoke(builder);
+            options.Invoke(builder);
             return builder.Options;
         });
 
