@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Threading;
@@ -43,19 +44,13 @@ public sealed class EfCoreTransactionSource<TDbContext>(TDbContext dbContext) : 
     /// Local transaction implementation for EF Core.
     /// Supports lazy transaction escalation and domain event collection.
     /// </summary>
-    private sealed class EfCoreLocalTransaction : ILocalTransaction, ITransactionalLocal
+    private sealed class EfCoreLocalTransaction(
+        AetherDbContext<TDbContext> context,
+        IDbContextTransaction? transaction)
+        : ILocalTransaction, ITransactionalLocal, ISupportsSaveChanges, IAsyncDisposable
     {
-        private readonly AetherDbContext<TDbContext> _context;
-        private IDbContextTransaction? _transaction;
+        private IDbContextTransaction? _transaction = transaction;
         private List<DomainEventEnvelope> _collectedEvents = new();
-
-        public EfCoreLocalTransaction(
-            AetherDbContext<TDbContext> context,
-            IDbContextTransaction? transaction)
-        {
-            _context = context;
-            _transaction = transaction;
-        }
 
         /// <inheritdoc />
         public IReadOnlyList<DomainEventEnvelope> CollectedEvents => _collectedEvents;
@@ -74,19 +69,19 @@ public sealed class EfCoreTransactionSource<TDbContext>(TDbContext dbContext) : 
 
             // Begin transaction with specified or default isolation level
             _transaction = isolationLevel.HasValue
-                ? await _context.Database.BeginTransactionAsync(isolationLevel.Value, cancellationToken)
-                : await _context.Database.BeginTransactionAsync(cancellationToken);
+                ? await context.Database.BeginTransactionAsync(isolationLevel.Value, cancellationToken)
+                : await context.Database.BeginTransactionAsync(cancellationToken);
+        }
+
+        /// <inheritdoc />
+        public void CollectEvents()
+        {
+            _collectedEvents = context.CollectDomainEvents();
         }
 
         /// <inheritdoc />
         public async Task CommitAsync(CancellationToken cancellationToken = default)
         {
-            // Collect domain events before saving (they'll be dispatched by CompositeUnitOfWork)
-            _collectedEvents = _context.CollectDomainEvents();
-
-            // Save changes without dispatching events (UoW will handle that)
-            await _context.SaveChangesWithoutEventsAsync(true, cancellationToken);
-
             // Commit the transaction if present
             if (_transaction != null)
             {
@@ -106,8 +101,23 @@ public sealed class EfCoreTransactionSource<TDbContext>(TDbContext dbContext) : 
         /// <inheritdoc />
         public void ClearCollectedEvents()
         {
-            _context.ClearDomainEvents();
+            context.ClearDomainEvents();
             _collectedEvents.Clear();
+        }
+
+        public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            await context.SaveChangesAsync(cancellationToken);
+        }
+
+        /// <inheritdoc />
+        public async ValueTask DisposeAsync()
+        {
+            if (_transaction != null)
+            {
+                await _transaction.DisposeAsync();
+                _transaction = null;
+            }
         }
     }
 }

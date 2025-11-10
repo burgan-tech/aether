@@ -17,13 +17,13 @@ public class DefaultTopicNameStrategy(
         string topicName;
 
         // Try to get eventName and version from EventNameAttribute
-        var eventNameAttr = eventType.GetCustomAttributes(typeof(EventNameAttribute), false)
-            .FirstOrDefault() as EventNameAttribute;
 
-        if (eventNameAttr != null)
+        if (eventType.GetCustomAttributes(typeof(EventNameAttribute), false)
+                .FirstOrDefault() is EventNameAttribute eventNameAttr)
         {
-            // Format: EventName.vVersion
-            topicName = $"{eventNameAttr.Name}.v{eventNameAttr.Version}";
+            topicName = !eventNameAttr.Topic.IsNullOrWhiteSpace() 
+                ? eventNameAttr.Topic 
+                : $"{eventNameAttr.Name}.v{eventNameAttr.Version}";
         }
         else
         {

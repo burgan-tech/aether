@@ -46,6 +46,11 @@ public class CloudEventEnvelope
     /// Content type of the data. Default: "application/json"
     /// </summary>
     public string? DataContentType { get; init; } = "application/json";
+    
+    /// <summary>
+    /// URI reference to the schema that the data adheres to.
+    /// </summary>
+    public string? DataSchema { get; init; }
 
     /// <summary>
     /// The event payload data.

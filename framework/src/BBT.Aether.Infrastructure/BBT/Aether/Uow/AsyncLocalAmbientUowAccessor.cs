@@ -16,5 +16,19 @@ public sealed class AsyncLocalAmbientUowAccessor : IAmbientUnitOfWorkAccessor
         get => _current.Value;
         set => _current.Value = value;
     }
+
+    /// <inheritdoc />
+    public IUnitOfWork? GetActiveUnitOfWork()
+    {
+        var uow = Current;
+
+        // Walk the outer chain and skip prepared, completed, or disposed UoWs
+        while (uow != null && (uow.IsPrepared || uow.IsCompleted || uow.IsDisposed))
+        {
+            uow = uow.Outer;
+        }
+
+        return uow;
+    }
 }
 

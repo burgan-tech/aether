@@ -1,26 +1,26 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace BBT.Aether.Events;
 
 public abstract class DistributedEventBusBase(
     ITopicNameStrategy topicNameStrategy,
     IEventSerializer eventSerializer,
-    IServiceScopeFactory serviceScopeFactory,
+    IOutboxStore outboxStore,
     AetherEventBusOptions eventBusOptions)
     : IDistributedEventBus
 {
     protected readonly ITopicNameStrategy TopicNameStrategy = topicNameStrategy;
     protected readonly IEventSerializer EventSerializer = eventSerializer;
-    protected readonly IServiceScopeFactory ServiceScopeFactory = serviceScopeFactory;
+    protected readonly IOutboxStore OutboxStore = outboxStore;
     protected readonly AetherEventBusOptions AetherEventBusOptions = eventBusOptions;
 
     /// <summary>
-    /// Creates a CloudEventEnvelope from the event payload.
+    /// Creates a CloudEventEnvelope from the event payload using EventMeta&lt;T&gt;.
     /// The Type is generated from EventNameAttribute on the event type using TopicNameStrategy.
     /// The Source is populated from AetherEventBusOptions.DefaultSource.
+    /// If subject is null, it will attempt to extract it from properties marked with [EventSubject] attribute.
     /// </summary>
     protected CloudEventEnvelope CreateEnvelope<TEvent>(
         TEvent payload,
@@ -31,11 +31,15 @@ public abstract class DistributedEventBusBase(
             ?? throw new InvalidOperationException(
                 "DefaultSource must be configured in AetherEventBusOptions. Set AetherEventBusOptions.DefaultSource when configuring the EventBus.");
 
+        // If subject is not provided, try to extract it from [EventSubject] attribute
+        subject ??= EventSubjectExtractor.ExtractSubject(payload);
+
         return new CloudEventEnvelope
         {
             Type = type,
             Source = source,
             Subject = subject,
+            DataSchema = EventMeta<TEvent>.DataSchema,
             Data = payload
             // Other properties (SpecVersion, Id, Time, DataContentType) use defaults from CloudEventEnvelope class
         };
@@ -82,9 +86,6 @@ public abstract class DistributedEventBusBase(
         // Create envelope using metadata - no reflection needed
         var envelope = CreateEnvelopeFromMetadata(@event, metadata, subject);
         
-        // Get topic name using TopicNameStrategy (handles environment prefixing)
-        var topicName = TopicNameStrategy.GetTopicName(metadata.EventType);
-
         if (useOutbox)
         {
             await StoreInOutboxAsync(envelope, cancellationToken);
@@ -94,13 +95,14 @@ public abstract class DistributedEventBusBase(
             var serialized = EventSerializer.Serialize(envelope);
             // Use PubSubName from metadata or fall back to default from options
             var pubSubName = metadata.PubSubName ?? AetherEventBusOptions.PubSubName;
-            await PublishToBrokerAsync(topicName, pubSubName, serialized, cancellationToken);
+            await PublishToBrokerAsync(envelope.Type, pubSubName, serialized, cancellationToken);
         }
     }
 
     /// <summary>
     /// Creates a CloudEventEnvelope from an event and its pre-extracted metadata.
     /// No reflection needed - directly constructs the envelope.
+    /// If subject is null, it will attempt to extract it from properties marked with [EventSubject] attribute.
     /// </summary>
     private CloudEventEnvelope CreateEnvelopeFromMetadata(IDistributedEvent @event, EventMetadata metadata, string? subject)
     {
@@ -110,25 +112,28 @@ public abstract class DistributedEventBusBase(
             ?? throw new InvalidOperationException(
                 "DefaultSource must be configured in AetherEventBusOptions. Set AetherEventBusOptions.DefaultSource when configuring the EventBus.");
 
+        // If subject is not provided, try to extract it from [EventSubject] attribute
+        subject ??= EventSubjectExtractor.ExtractSubject(@event);
+
         return new CloudEventEnvelope
         {
             Type = type,
             Source = source,
             Subject = subject,
+            DataSchema = metadata.DataSchema,
             Data = @event
             // Other properties (SpecVersion, Id, Time, DataContentType) use defaults from CloudEventEnvelope class
         };
     }
 
     /// <summary>
-    /// Stores the event in outbox using a scoped IOutboxStore instance.
-    /// This ensures that scoped services (like DbContext) are properly resolved per operation.
+    /// Stores the event in outbox using the injected IOutboxStore instance.
+    /// Store only tracks the entity; SaveChanges will be called by UoW or calling code.
     /// </summary>
     private async Task StoreInOutboxAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken)
     {
-        await using var scope = ServiceScopeFactory.CreateAsyncScope();
-        var outboxStore = scope.ServiceProvider.GetRequiredService<IOutboxStore>();
-        await outboxStore.StoreAsync(envelope, cancellationToken);
+        await OutboxStore.StoreAsync(envelope, cancellationToken);
+        // No SaveChanges here - will be flushed by UoW Commit or calling code
     }
     
     /// <summary>

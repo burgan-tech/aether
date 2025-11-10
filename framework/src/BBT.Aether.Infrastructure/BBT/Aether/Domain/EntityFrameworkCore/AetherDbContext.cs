@@ -57,24 +57,7 @@ public abstract class AetherDbContext<TDbContext>(
      public override int SaveChanges()
     {
         TrackEntityStates();
-        
-        // Collect domain events before saving
-        var domainEvents = CollectDomainEvents();
-        
-        var result = base.SaveChanges();
-        
-        // Dispatch domain events after successful save (synchronously, which is not ideal but follows the pattern)
-        if (domainEvents.Any() && serviceProvider != null)
-        {
-            var dispatcher = serviceProvider.GetService<IDomainEventDispatcher>();
-            if (dispatcher != null)
-            {
-                dispatcher.DispatchEventsAsync(domainEvents).GetAwaiter().GetResult();
-                ClearDomainEvents();
-            }
-        }
-        
-        return result;
+        return base.SaveChanges();
     }
 
     public async override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess,
@@ -83,61 +66,7 @@ public abstract class AetherDbContext<TDbContext>(
         try
         {
             TrackEntityStates();
-            
-            // Collect domain events before saving
-            var domainEvents = CollectDomainEvents();
-            
-            // Commit the transaction first
-            var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
-            
-            // Dispatch domain events after successful save
-            // NOTE: This only happens when SaveChangesAsync is called directly (not through UoW)
-            // When using UoW, events are dispatched by CompositeUnitOfWork after all sources commit
-            if (domainEvents.Any() && serviceProvider != null)
-            {
-                var dispatcher = serviceProvider.GetService<IDomainEventDispatcher>();
-                if (dispatcher != null)
-                {
-                    await dispatcher.DispatchEventsAsync(domainEvents, cancellationToken);
-                    ClearDomainEvents();
-                }
-            }
-            
-            return result;
-        }
-        catch (DbUpdateConcurrencyException ex)
-        {
-            if (ex.Entries.Count > 0)
-            {
-                var sb = new StringBuilder();
-                sb.AppendLine(ex.Entries.Count > 1
-                    ? "There are some entries which are not saved due to concurrency exception:"
-                    : "There is an entry which is not saved due to concurrency exception:");
-                foreach (var entry in ex.Entries)
-                {
-                    sb.AppendLine(entry.ToString());
-                }
-            }
-
-            throw new AetherDbConcurrencyException(ex.Message, ex);
-        }
-        finally
-        {
-            ChangeTracker.AutoDetectChangesEnabled = true;
-        }
-    }
-
-    /// <summary>
-    /// Saves changes to the database without dispatching domain events.
-    /// Used by UoW to save changes; events are dispatched after all transaction sources commit.
-    /// </summary>
-    public virtual async Task<int> SaveChangesWithoutEventsAsync(
-        bool acceptAllChangesOnSuccess,
-        CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            TrackEntityStates();
+            // Domain event collection and dispatch handled by UoW or calling code
             return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
         }
         catch (DbUpdateConcurrencyException ex)

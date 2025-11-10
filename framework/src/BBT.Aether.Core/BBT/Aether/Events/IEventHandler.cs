@@ -4,10 +4,12 @@ using System.Threading.Tasks;
 namespace BBT.Aether.Events;
 
 /// <summary>
-/// Defines a handler for distributed events with strongly-typed access to event data.
+/// Unified handler interface for distributed events.
+/// All event handlers must implement this interface.
+/// Handlers receive strongly-typed CloudEventEnvelope&lt;T&gt; with event data and metadata.
 /// </summary>
-/// <typeparam name="TEvent">The type of event to handle</typeparam>
-public interface IDistributedEventHandler<TEvent>
+/// <typeparam name="T">The event data type</typeparam>
+public interface IEventHandler<T>
 {
     /// <summary>
     /// Handles a distributed event wrapped in a CloudEvent envelope.
@@ -15,5 +17,6 @@ public interface IDistributedEventHandler<TEvent>
     /// <param name="envelope">The strongly-typed CloudEvent envelope containing event data and metadata</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>A task representing the asynchronous operation</returns>
-    Task HandleAsync(CloudEventEnvelope<TEvent> envelope, CancellationToken cancellationToken);
+    Task HandleAsync(CloudEventEnvelope<T> envelope, CancellationToken cancellationToken);
 }
+

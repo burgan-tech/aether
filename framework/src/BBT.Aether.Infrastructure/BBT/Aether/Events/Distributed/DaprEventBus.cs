@@ -11,8 +11,8 @@ public class DaprEventBus(
     AetherEventBusOptions options,
     ITopicNameStrategy topicNameStrategy,
     IEventSerializer eventSerializer,
-    IServiceScopeFactory serviceScopeFactory)
-    : DistributedEventBusBase(topicNameStrategy, eventSerializer, serviceScopeFactory, options)
+    IOutboxStore outboxStore)
+    : DistributedEventBusBase(topicNameStrategy, eventSerializer, outboxStore, options)
 {
     private readonly AetherEventBusOptions _options = options;
 

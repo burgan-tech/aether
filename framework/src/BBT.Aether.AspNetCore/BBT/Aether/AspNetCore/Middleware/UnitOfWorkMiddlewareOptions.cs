@@ -42,7 +42,8 @@ public sealed class UnitOfWorkMiddlewareOptions
         "/healthz",
         "/metrics",
         "/_framework/*",
-        "/swagger/*"
+        "/swagger/*",
+        "/dapr/*"
     };
 
     /// <summary>
@@ -52,20 +53,5 @@ public sealed class UnitOfWorkMiddlewareOptions
     /// Example: opt.ExcludeWhen = ctx => ctx.Request.Path.StartsWithSegments("/hangfire");
     /// </summary>
     public Func<HttpContext, bool>? ExcludeWhen { get; set; }
-
-    /// <summary>
-    /// HTTP method-specific Unit of Work behaviors (backward compatibility).
-    /// Key: HTTP method (case-insensitive), Value: UoW behavior configuration.
-    /// Note: This is kept for backward compatibility but is superseded by DefaultOptions.
-    /// </summary>
-    [Obsolete("Use DefaultOptions instead. This property is kept for backward compatibility.")]
-    public Dictionary<string, HttpMethodUnitOfWorkBehavior> HttpMethodBehaviors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-
-    /// <summary>
-    /// Default Unit of Work behavior for HTTP methods (backward compatibility).
-    /// Note: This is kept for backward compatibility but is superseded by DefaultOptions.
-    /// </summary>
-    [Obsolete("Use DefaultOptions instead. This property is kept for backward compatibility.")]
-    public HttpMethodUnitOfWorkBehavior? DefaultBehavior { get; set; }
 }
 

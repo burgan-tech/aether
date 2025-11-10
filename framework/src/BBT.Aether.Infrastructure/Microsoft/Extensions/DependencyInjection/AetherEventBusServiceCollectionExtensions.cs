@@ -29,18 +29,18 @@ public static class AetherEventBusServiceCollectionExtensions
         // Get environment name for topic prefixing
         var environmentName = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
 
-        // Register handlers and build descriptors immediately
-        var descriptors = EventHandlerAutoDiscovery.RegisterHandlersAndBuildDescriptors(
+        // Register handlers and build invokers immediately
+        var invokers = EventHandlerAutoDiscovery.RegisterHandlersAndBuildInvokers(
             services,
             options,
             environmentName);
 
-        // Create and register event type registry
-        var registry = new EventTypeRegistry(descriptors);
-        services.AddSingleton<IEventTypeRegistry>(registry);
+        // Create and register invoker registry
+        var registry = new DistributedEventInvokerRegistry(invokers);
+        services.AddSingleton<IDistributedEventInvokerRegistry>(registry);
 
-        // Register DaprEventBus as the distributed event bus
-        services.AddSingleton<IDistributedEventBus, DaprEventBus>();
+        // Register DaprEventBus as scoped (requires IOutboxStore which is scoped)
+        services.AddScoped<IDistributedEventBus, DaprEventBus>();
 
         return services;
     }

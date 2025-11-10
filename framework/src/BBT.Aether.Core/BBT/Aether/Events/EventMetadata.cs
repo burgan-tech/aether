@@ -10,7 +10,9 @@ public sealed class EventMetadata(
     Type eventType,
     string eventName,
     int version,
-    string? pubSubName = null)
+    string? pubSubName = null,
+    string? topic = null,
+    string? dataSchema = null)
 {
     /// <summary>
     /// Gets the event type (CLR type).
@@ -31,5 +33,15 @@ public sealed class EventMetadata(
     /// Gets the PubSub component name (null if default should be used).
     /// </summary>
     public string? PubSubName { get; } = pubSubName;
+    
+    /// <summary>
+    /// Gets the topic override (null if should be auto-generated).
+    /// </summary>
+    public string? Topic { get; } = topic;
+    
+    /// <summary>
+    /// Gets the data schema URI.
+    /// </summary>
+    public string? DataSchema { get; } = dataSchema;
 }
 

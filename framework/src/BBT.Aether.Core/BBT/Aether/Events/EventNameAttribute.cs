@@ -15,7 +15,7 @@ public sealed record EventNameInfo(string EventName, int Version, string? PubSub
 /// Specifies the event name and version for a distributed event.
 /// </summary>
 [AttributeUsage(AttributeTargets.Class)]
-public sealed class EventNameAttribute(string name, int version = 1, string? pubSubName = null) : Attribute
+public sealed class EventNameAttribute(string name, int version = 1, string? pubSubName = null, string? topic = null, string? dataSchema = null) : Attribute
 {
     public string Name { get; } = name;
     public int Version { get; } = version;
@@ -25,6 +25,17 @@ public sealed class EventNameAttribute(string name, int version = 1, string? pub
     /// If null, the default PubSubName from AetherEventBusOptions will be used.
     /// </summary>
     public string? PubSubName { get; } = pubSubName;
+    
+    /// <summary>
+    /// Gets the optional topic override for this event.
+    /// If null, topic will be auto-generated from name and version.
+    /// </summary>
+    public string? Topic { get; } = topic;
+    
+    /// <summary>
+    /// Gets the optional data schema URI for this event.
+    /// </summary>
+    public string? DataSchema { get; } = dataSchema;
 
     /// <summary>
     /// Gets the event name information from an event type.

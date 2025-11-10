@@ -46,7 +46,7 @@ public class EfCoreInboxStore<TDbContext>(
         }
 
         await dbContext.InboxMessages.AddAsync(inboxMessage, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        // SaveChanges removed - will be flushed by UoW Commit or calling code
     }
 }
 

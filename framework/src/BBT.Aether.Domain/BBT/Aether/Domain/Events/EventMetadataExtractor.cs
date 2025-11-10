@@ -1,6 +1,5 @@
 using System;
 using System.Linq;
-using BBT.Aether.Events;
 
 namespace BBT.Aether.Events;
 
@@ -34,7 +33,9 @@ public static class EventMetadataExtractor
             eventType: eventType,
             eventName: attribute.Name,
             version: attribute.Version,
-            pubSubName: attribute.PubSubName
+            pubSubName: attribute.PubSubName,
+            topic: attribute.Topic,
+            dataSchema: attribute.DataSchema
         );
     }
 }

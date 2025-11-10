@@ -5,23 +5,27 @@ using System.Threading.Tasks;
 namespace BBT.Aether.Uow;
 
 /// <summary>
-/// Represents a unit of work scope with ownership and participation semantics.
+/// Represents a unit of work scope that acts as a delegating wrapper over CompositeUnitOfWork.
 /// Manages ambient context and ensures proper cleanup.
+/// Supports prepare/initialize pattern for deferred UoW activation.
 /// </summary>
 public sealed class UnitOfWorkScope : IUnitOfWork
 {
     private readonly CompositeUnitOfWork _root;
-    private readonly bool _isOwner;
     private readonly IAmbientUnitOfWorkAccessor _accessor;
     private readonly IUnitOfWork? _previousAmbient;
 
+    private UnitOfWorkOptions? _options;
+    private IUnitOfWork? _outer;
+    private bool _isPrepared;
+    private string? _preparationName;
+    private bool _isDisposed;
+
     public UnitOfWorkScope(
         CompositeUnitOfWork root,
-        bool isOwner,
         IAmbientUnitOfWorkAccessor accessor)
     {
         _root = root;
-        _isOwner = isOwner;
         _accessor = accessor;
         _previousAmbient = accessor.Current;
 
@@ -33,10 +37,25 @@ public sealed class UnitOfWorkScope : IUnitOfWork
     public Guid Id => _root.Id;
 
     /// <inheritdoc />
+    public UnitOfWorkOptions? Options => _options;
+
+    /// <inheritdoc />
+    public IUnitOfWork? Outer => _outer;
+
+    /// <inheritdoc />
+    public bool IsPrepared => _isPrepared;
+
+    /// <inheritdoc />
+    public string? PreparationName => _preparationName;
+
+    /// <inheritdoc />
     public bool IsAborted => _root.IsAborted;
 
     /// <inheritdoc />
     public bool IsCompleted => _root.IsCompleted;
+
+    /// <inheritdoc />
+    public bool IsDisposed => _isDisposed;
 
     /// <summary>
     /// Gets the root composite unit of work.
@@ -45,53 +64,125 @@ public sealed class UnitOfWorkScope : IUnitOfWork
     public CompositeUnitOfWork Root => _root;
 
     /// <inheritdoc />
+    public void Prepare(string preparationName)
+    {
+        if (_options is not null)
+        {
+            throw new InvalidOperationException("Cannot prepare an already initialized unit of work.");
+        }
+
+        _preparationName = preparationName;
+        _isPrepared = true;
+    }
+
+    /// <inheritdoc />
+    public void Initialize(UnitOfWorkOptions options)
+    {
+        if (_options is not null)
+        {
+            throw new InvalidOperationException("Unit of work is already initialized.");
+        }
+
+        _options = options;
+        _isPrepared = false;
+
+        // Initialize the root composite unit of work
+        // This will be called by the manager when needed
+    }
+
+    /// <inheritdoc />
+    public bool IsPreparedFor(string preparationName)
+    {
+        return _isPrepared && string.Equals(_preparationName, preparationName, StringComparison.Ordinal);
+    }
+
+    /// <inheritdoc />
+    public void SetOuter(IUnitOfWork? outer)
+    {
+        _outer = outer;
+    }
+
+    /// <inheritdoc />
     public void Abort()
     {
         _root.Abort();
     }
 
     /// <inheritdoc />
+    public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        // No-op if still in prepared state
+        if (_isPrepared)
+        {
+            return;
+        }
+
+        // Delegate to root
+        await _root.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <inheritdoc />
     public async Task CommitAsync(CancellationToken cancellationToken = default)
     {
-        // Only the owner can commit
-        if (_isOwner)
+        // No-op if still in prepared state
+        if (_isPrepared)
         {
-            await _root.CommitAsync(cancellationToken);
+            return;
         }
-        // Participants do nothing on commit - they rely on the owner
+
+        // Delegate to root
+        await _root.CommitAsync(cancellationToken);
     }
 
     /// <inheritdoc />
     public async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
-        // Only the owner can rollback
-        if (_isOwner)
+        // No-op if still in prepared state
+        if (_isPrepared)
         {
-            await _root.RollbackAsync(cancellationToken);
+            return;
         }
-        else
-        {
-            // Participants abort the root to prevent commit
-            _root.Abort();
-        }
+
+        // Delegate to root
+        await _root.RollbackAsync(cancellationToken);
     }
 
     /// <inheritdoc />
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        try
+        if (_isDisposed)
         {
-            // Owner disposes the root (which auto-rolls back if not completed)
-            if (_isOwner)
-            {
-                await _root.DisposeAsync();
-            }
+            return ValueTask.CompletedTask;
         }
-        finally
-        {
-            // Restore previous ambient context
-            _accessor.Current = _previousAmbient;
-        }
+
+        _isDisposed = true;
+        
+        // Only restore ambient context - never dispose root
+        // CompositeUnitOfWork manages its own lifecycle
+        _accessor.Current = _previousAmbient;
+        
+        return ValueTask.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public IDisposable OnCompleted(Func<IUnitOfWork, Task> handler)
+    {
+        // Forward to root so hooks fire once when root completes
+        return _root.OnCompleted(handler);
+    }
+
+    /// <inheritdoc />
+    public IDisposable OnFailed(Func<IUnitOfWork, Exception?, Task> handler)
+    {
+        // Forward to root so hooks fire once when root fails
+        return _root.OnFailed(handler);
+    }
+
+    /// <inheritdoc />
+    public IDisposable OnDisposed(Action<IUnitOfWork> handler)
+    {
+        // Forward to root so hooks fire once when root is disposed
+        return _root.OnDisposed(handler);
     }
 }
 

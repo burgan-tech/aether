@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.DependencyInjection;
 using PostSharp.Aspects;
+using PostSharp.Extensibility;
 using PostSharp.Serialization;
 
 namespace BBT.Aether.Aspects;
@@ -14,14 +15,17 @@ namespace BBT.Aether.Aspects;
 /// This class can be extended to customize UoW behavior via OnBeforeAsync, OnAfterAsync, and OnExceptionAsync.
 /// </summary>
 [PSerializable]
-[AttributeUsage(AttributeTargets.Method | AttributeTargets.Class, AllowMultiple = false, Inherited = true)]
+[MulticastAttributeUsage(
+    MulticastTargets.Method,
+    AllowMultiple = false,
+    Inheritance = MulticastInheritance.Strict)]
 public class UnitOfWorkAttribute : AetherMethodInterceptionAspect
 {
     /// <summary>
     /// Gets or sets whether the unit of work should use transactions.
     /// Default is true.
     /// </summary>
-    public bool IsTransactional { get; set; } = true;
+    public bool IsTransactional { get; set; } = false;
 
     /// <summary>
     /// Gets or sets the scope behavior for this unit of work.
@@ -33,11 +37,11 @@ public class UnitOfWorkAttribute : AetherMethodInterceptionAspect
     /// Gets or sets the isolation level for the transaction.
     /// Default is ReadCommitted.
     /// </summary>
-    public IsolationLevel IsolationLevel { get; set; } = IsolationLevel.ReadCommitted;
+    public IsolationLevel? IsolationLevel { get; set; }
 
     /// <summary>
     /// Intercepts async method execution to wrap it in a Unit of Work.
-    /// Supports lazy transaction escalation and RequiresNew isolation via new DI scope.
+    /// Supports prepare/initialize pattern and RequiresNew isolation via new DI scope.
     /// </summary>
     public async override Task OnInvokeAsync(MethodInterceptionArgs args)
     {
@@ -47,69 +51,33 @@ public class UnitOfWorkAttribute : AetherMethodInterceptionAspect
         // Get dependencies from ambient service provider
         var serviceProvider = GetServiceProvider();
         var cancellationToken = ExtractCancellationToken(args);
-
-        // Handle RequiresNew scope - create new DI scope for complete isolation
-        if (Scope == UnitOfWorkScopeOption.RequiresNew)
-        {
-            var scopeFactory = serviceProvider.GetRequiredService<IServiceScopeFactory>();
-            using var childScope = scopeFactory.CreateScope();
-            var childUowManager = childScope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
-
-            var options = new UnitOfWorkOptions
-            {
-                IsTransactional = IsTransactional,
-                Scope = UnitOfWorkScopeOption.Required, // Use Required in new scope
-                IsolationLevel = IsolationLevel
-            };
-
-            await using var uow = await childUowManager.BeginAsync(options, cancellationToken);
-
-            try
-            {
-                await args.ProceedAsync();
-                await uow.CommitAsync(cancellationToken);
-                await OnAfterAsync(args);
-            }
-            catch (Exception ex)
-            {
-                await uow.RollbackAsync(cancellationToken);
-                await OnExceptionAsync(args, ex);
-                throw;
-            }
-
-            return;
-        }
-
-        // Handle Required scope with potential escalation
         var uowManager = serviceProvider.GetRequiredService<IUnitOfWorkManager>();
 
-        if (Scope == UnitOfWorkScopeOption.Required && IsTransactional)
+        var options = CreateOptions();
+
+        if (await uowManager.TryBeginPreparedAsync(UnitOfWorkOptions.PrepareName, options, cancellationToken))
         {
-            // Join existing UoW without starting transaction (reserve pattern)
-            var joinOptions = new UnitOfWorkOptions
-            {
-                IsTransactional = false, // Join only, don't start transaction yet
-                Scope = UnitOfWorkScopeOption.Required,
-                IsolationLevel = null
-            };
-
-            await using var uow = await uowManager.BeginAsync(joinOptions, cancellationToken);
-
-            // Escalate to transactional if we're in a UoW scope
-            if (uow is UnitOfWorkScope scope && scope.Root is ITransactionalRoot root)
-            {
-                await root.EnsureTransactionAsync(IsolationLevel, cancellationToken);
-            }
-
+            // Prepared UoW was found and initialized
+            // Just save changes - middleware will handle commit
             try
             {
                 await args.ProceedAsync();
-                await uow.CommitAsync(cancellationToken);
+
+                if (uowManager.Current != null)
+                {
+                    await uowManager.Current.SaveChangesAsync(cancellationToken);
+                    await uowManager.Current.CommitAsync(cancellationToken);
+                }
+
                 await OnAfterAsync(args);
             }
             catch (Exception ex)
             {
-                await uow.RollbackAsync(cancellationToken);
+                if (uowManager.Current != null)
+                {
+                    await uowManager.Current.RollbackAsync(cancellationToken);
+                }
+
                 await OnExceptionAsync(args, ex);
                 throw;
             }
@@ -117,28 +85,30 @@ public class UnitOfWorkAttribute : AetherMethodInterceptionAspect
             return;
         }
 
-        // Default behavior (Required non-transactional or Suppress)
-        var defaultOptions = new UnitOfWorkOptions
-        {
-            IsTransactional = IsTransactional,
-            Scope = Scope,
-            IsolationLevel = IsolationLevel
-        };
-
-        await using var defaultUow = await uowManager.BeginAsync(defaultOptions, cancellationToken);
-
+        // No prepared UoW, create a new one
+        await using var uow = await uowManager.BeginAsync(options, cancellationToken);
         try
         {
             await args.ProceedAsync();
-            await defaultUow.CommitAsync(cancellationToken);
+            await uow.CommitAsync(cancellationToken);
             await OnAfterAsync(args);
         }
         catch (Exception ex)
         {
-            await defaultUow.RollbackAsync(cancellationToken);
+            await uow.RollbackAsync(cancellationToken);
             await OnExceptionAsync(args, ex);
             throw;
         }
+    }
+
+    private UnitOfWorkOptions CreateOptions()
+    {
+        var options = new UnitOfWorkOptions
+        {
+            IsTransactional = IsTransactional, Scope = Scope, IsolationLevel = IsolationLevel
+        };
+
+        return options;
     }
 
     /// <summary>
@@ -151,4 +121,3 @@ public class UnitOfWorkAttribute : AetherMethodInterceptionAspect
         OnInvokeAsync(args).GetAwaiter().GetResult();
     }
 }
-

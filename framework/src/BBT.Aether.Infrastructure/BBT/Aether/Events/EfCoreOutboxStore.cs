@@ -40,7 +40,7 @@ public class EfCoreOutboxStore<TDbContext>(
         }
 
         await dbContext.OutboxMessages.AddAsync(outboxMessage, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        // SaveChanges removed - will be flushed by UoW Commit or calling code
     }
 }
 

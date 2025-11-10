@@ -18,7 +18,7 @@ public static class UnitOfWorkManagerExtensions
     /// <param name="action">The action to execute</param>
     /// <param name="options">Optional UoW configuration options</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    public static async Task ExecuteInUowAsync(
+    public async static Task ExecuteInUowAsync(
         this IUnitOfWorkManager uowManager,
         Func<CancellationToken, Task> action,
         UnitOfWorkOptions? options = null,
@@ -40,7 +40,7 @@ public static class UnitOfWorkManagerExtensions
     /// <param name="options">Optional UoW configuration options</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>The result of the function</returns>
-    public static async Task<T> ExecuteInUowAsync<T>(
+    public async static Task<T> ExecuteInUowAsync<T>(
         this IUnitOfWorkManager uowManager,
         Func<CancellationToken, Task<T>> action,
         UnitOfWorkOptions? options = null,
@@ -52,41 +52,15 @@ public static class UnitOfWorkManagerExtensions
         return result;
     }
 
-    /// <summary>
-    /// Creates UnitOfWorkOptions for a transactional UoW that participates in existing scope or creates new one.
-    /// </summary>
-    /// <param name="isolationLevel">Optional isolation level, defaults to ReadCommitted</param>
-    /// <returns>Configured UnitOfWorkOptions</returns>
-    public static UnitOfWorkOptions RequiredTransactional(IsolationLevel isolationLevel = IsolationLevel.ReadCommitted)
-        => new()
-        {
-            IsTransactional = true,
-            Scope = UnitOfWorkScopeOption.Required,
-            IsolationLevel = isolationLevel
-        };
-
-    /// <summary>
-    /// Creates UnitOfWorkOptions for a transactional UoW that always creates a new scope.
-    /// </summary>
-    /// <param name="isolationLevel">Optional isolation level, defaults to ReadCommitted</param>
-    /// <returns>Configured UnitOfWorkOptions</returns>
-    public static UnitOfWorkOptions RequiresNewTransactional(IsolationLevel isolationLevel = IsolationLevel.ReadCommitted)
-        => new()
-        {
-            IsTransactional = true,
-            Scope = UnitOfWorkScopeOption.RequiresNew,
-            IsolationLevel = isolationLevel
-        };
-
-    /// <summary>
-    /// Creates UnitOfWorkOptions that suppresses transactional behavior.
-    /// </summary>
-    /// <returns>Configured UnitOfWorkOptions for suppressed scope</returns>
-    public static UnitOfWorkOptions Suppressed()
-        => new()
-        {
-            Scope = UnitOfWorkScopeOption.Suppress,
-            IsTransactional = false
-        };
+    public async static Task<IUnitOfWork> BeginRequiresNew(this IUnitOfWorkManager uowManager, CancellationToken cancellationToken)
+    {
+       return await uowManager.BeginAsync(
+            new UnitOfWorkOptions
+            {
+                IsTransactional = true,
+                Scope = UnitOfWorkScopeOption.RequiresNew
+            }, 
+            cancellationToken);
+    }
 }
 

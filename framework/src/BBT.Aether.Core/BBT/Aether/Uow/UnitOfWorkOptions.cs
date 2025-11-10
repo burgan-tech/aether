@@ -7,6 +7,7 @@ namespace BBT.Aether.Uow;
 /// </summary>
 public class UnitOfWorkOptions
 {
+    public const string PrepareName = "AetherUow";
     /// <summary>
     /// Gets or sets whether this unit of work should use transactions.
     /// Default is false (reserve pattern - transaction can be escalated later).

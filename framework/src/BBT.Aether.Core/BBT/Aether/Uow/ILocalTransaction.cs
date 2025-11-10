@@ -18,6 +18,12 @@ public interface ILocalTransaction
     IReadOnlyList<DomainEventEnvelope> CollectedEvents { get; }
 
     /// <summary>
+    /// Collects domain events from the transaction source.
+    /// Should be called before commit to make events available for processing (e.g., outbox).
+    /// </summary>
+    void CollectEvents();
+
+    /// <summary>
     /// Commits the local transaction, persisting all changes.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token</param>

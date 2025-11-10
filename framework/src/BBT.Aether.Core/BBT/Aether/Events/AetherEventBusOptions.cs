@@ -20,7 +20,7 @@ public class AetherEventBusOptions
 
     /// <summary>
     /// Gets or sets the default name of the Dapr PubSub component.
-    /// This can be overridden per event using the PubSubName parameter in EventNameAttribute or EventSubscriptionAttribute.
+    /// This can be overridden per event using the PubSubName parameter in EventNameAttribute.
     /// Default: "pubsub"
     /// </summary>
     public string PubSubName { get; set; } = "pubsub";

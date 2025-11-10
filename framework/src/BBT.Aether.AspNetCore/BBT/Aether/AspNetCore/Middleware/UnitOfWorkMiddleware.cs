@@ -42,14 +42,14 @@ public sealed class UnitOfWorkMiddleware : IMiddleware
             return;
         }
 
-        // Start UoW with configured default options (reserve pattern)
-        await using var scope = await _uowManager.BeginAsync(_options.DefaultOptions, context.RequestAborted);
+        // Prepare UoW (creates placeholder without initializing)
+        await using var scope = _uowManager.Prepare(UnitOfWorkOptions.PrepareName);
 
         // Process request
         await next(context);
 
-        // Auto-commit on success (exception triggers auto-rollback via DisposeAsync)
-        await scope.CommitAsync(context.RequestAborted);
+        // // Auto-commit on success (no-op if not initialized, exception triggers auto-rollback via DisposeAsync)
+        // await scope.CommitAsync(context.RequestAborted);
     }
 
     /// <summary>
