@@ -21,6 +21,8 @@ public class DaprDistributedLockService(
     public async Task<bool> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
         CancellationToken cancellationToken = default)
     {
+        try
+        {
             var lockOwner = $"{GetClientIdentifier()}";
             await using var resourceLock =
                 await daprClient.Lock(storeName, resourceId, lockOwner, expiryInSeconds, cancellationToken);
@@ -32,6 +34,12 @@ public class DaprDistributedLockService(
 
             logger.LogWarning("Failed to acquire lock for resource {ResourceId}", resourceId);
             return false;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error acquiring lock for resource {ResourceId}", resourceId);
+            return false;
+        }
     }
 
     public async Task<bool> ReleaseLockAsync(string resourceId, CancellationToken cancellationToken = default)
@@ -41,7 +49,7 @@ public class DaprDistributedLockService(
             var lockOwner = $"{GetClientIdentifier()}";
             await daprClient.Unlock(storeName, resourceId, lockOwner, cancellationToken);
             return true;
-             }
+        }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error releasing lock for resource {ResourceId}", resourceId);
@@ -109,6 +117,7 @@ public class DaprDistributedLockService(
     private string GetClientIdentifier()
     {
         return
-            ($"{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")}.{applicationInfoAccessor.ApplicationName}").ToLowerInvariant();
+            ($"{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")}.{applicationInfoAccessor.ApplicationName}")
+            .ToLowerInvariant();
     }
 }

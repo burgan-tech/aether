@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Events;
+using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 
 namespace BBT.Aether.Events;
@@ -12,7 +13,7 @@ namespace BBT.Aether.Events;
 public class EfCoreInboxStore<TDbContext>(
     TDbContext dbContext,
     IEventSerializer eventSerializer) : IInboxStore
-    where TDbContext : DbContext, IHasInbox
+    where TDbContext : DbContext, IHasEfCoreInbox
 {
     public async Task<bool> HasProcessedAsync(string eventId, CancellationToken cancellationToken = default)
     {

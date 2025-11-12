@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Events;
+using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -18,7 +19,7 @@ public class InboxCleanupService<TDbContext>(
     ILogger<InboxCleanupService<TDbContext>> logger,
     AetherInboxOptions options)
     : BackgroundService
-    where TDbContext : DbContext, IHasInbox
+    where TDbContext : DbContext, IHasEfCoreInbox
 {
     protected async override Task ExecuteAsync(CancellationToken stoppingToken)
     {

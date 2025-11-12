@@ -17,7 +17,6 @@
 
     <ItemGroup>
         <ProjectReference Include="..\BBT.Aether.Core\BBT.Aether.Core.csproj"/>
-        <PackageReference Include="Microsoft.EntityFrameworkCore"/>
     </ItemGroup>
 
 </Project>

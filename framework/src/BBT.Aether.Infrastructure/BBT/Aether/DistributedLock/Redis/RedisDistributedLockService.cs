@@ -15,8 +15,11 @@ public class RedisDistributedLockService(
     IApplicationInfoAccessor applicationInfoAccessor)
     : IDistributedLockService
 {
-    public async Task<bool> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60, CancellationToken cancellationToken = default)
+    public async Task<bool> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
+        CancellationToken cancellationToken = default)
     {
+        try
+        {
             var database = redisConnection.GetDatabase();
             var lockOwner = GetClientIdentifier();
             var expiry = TimeSpan.FromSeconds(expiryInSeconds);
@@ -32,12 +35,19 @@ public class RedisDistributedLockService(
 
             if (acquired)
             {
-                logger.LogDebug("Successfully acquired Redis lock for resource {ResourceId} with owner {LockOwner}", resourceId, lockOwner);
+                logger.LogDebug("Successfully acquired Redis lock for resource {ResourceId} with owner {LockOwner}",
+                    resourceId, lockOwner);
                 return true;
             }
 
             logger.LogWarning("Failed to acquire Redis lock for resource {ResourceId}", resourceId);
             return false;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error acquiring Redis lock for resource {ResourceId}", resourceId);
+            return false;
+        }
     }
 
     public async Task<bool> ReleaseLockAsync(string resourceId, CancellationToken cancellationToken = default)
@@ -64,11 +74,14 @@ public class RedisDistributedLockService(
 
             if (released)
             {
-                logger.LogDebug("Successfully released Redis lock for resource {ResourceId} with owner {LockOwner}", resourceId, lockOwner);
+                logger.LogDebug("Successfully released Redis lock for resource {ResourceId} with owner {LockOwner}",
+                    resourceId, lockOwner);
             }
             else
             {
-                logger.LogWarning("Failed to release Redis lock for resource {ResourceId} - lock not owned by {LockOwner}", resourceId, lockOwner);
+                logger.LogWarning(
+                    "Failed to release Redis lock for resource {ResourceId} - lock not owned by {LockOwner}",
+                    resourceId, lockOwner);
             }
 
             return released;
@@ -80,7 +93,8 @@ public class RedisDistributedLockService(
         }
     }
 
-    public async Task<T?> ExecuteWithLockAsync<T>(string resourceId, Func<Task<T>> function, int expiryInSeconds = 60, CancellationToken cancellationToken = default)
+    public async Task<T?> ExecuteWithLockAsync<T>(string resourceId, Func<Task<T>> function, int expiryInSeconds = 60,
+        CancellationToken cancellationToken = default)
     {
         if (function == null)
         {
@@ -110,7 +124,8 @@ public class RedisDistributedLockService(
         }
     }
 
-    public async Task<bool> ExecuteWithLockAsync(string resourceId, Func<Task> action, int expiryInSeconds = 60, CancellationToken cancellationToken = default)
+    public async Task<bool> ExecuteWithLockAsync(string resourceId, Func<Task> action, int expiryInSeconds = 60,
+        CancellationToken cancellationToken = default)
     {
         if (action == null)
         {
@@ -140,9 +155,11 @@ public class RedisDistributedLockService(
             await ReleaseLockAsync(resourceId, cancellationToken);
         }
     }
-    
+
     private string GetClientIdentifier()
     {
-        return ($"{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")}.{applicationInfoAccessor.ApplicationName}.{applicationInfoAccessor.InstanceId}").ToLowerInvariant();
+        return
+            ($"{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")}.{applicationInfoAccessor.ApplicationName}.{applicationInfoAccessor.InstanceId}")
+            .ToLowerInvariant();
     }
 }

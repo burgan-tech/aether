@@ -155,7 +155,3 @@ dotnet run --project BBT.Aether.Cli create PROJECT_NAME -tm TEAM_NAME -t api -o 
 ## Contributing
 
 Contributions are welcome! Please follow the contribution guidelines and refer to the detailed documentation for understanding the architecture and patterns used in the framework.
-
-## License
-
-[Your License Information]

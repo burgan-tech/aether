@@ -47,7 +47,9 @@ public interface IOutboxStore
 ### DbContext Setup
 
 ```csharp
-public class MyDbContext : AetherDbContext<MyDbContext>, IHasOutbox, IHasInbox
+using BBT.Aether.Persistence;
+
+public class MyDbContext : AetherDbContext<MyDbContext>, IHasEfCoreOutbox, IHasEfCoreInbox
 {
     public DbSet<OutboxMessage> OutboxMessages { get; set; }
     public DbSet<InboxMessage> InboxMessages { get; set; }
@@ -61,6 +63,8 @@ public class MyDbContext : AetherDbContext<MyDbContext>, IHasOutbox, IHasInbox
     }
 }
 ```
+
+**Note**: `IHasEfCoreOutbox` and `IHasEfCoreInbox` are marker interfaces defined in the Infrastructure layer (`BBT.Aether.Persistence` namespace) to maintain clean architecture principles. The Domain layer remains persistence-ignorant and doesn't have any direct dependency on Entity Framework Core.
 
 ### Service Registration
 

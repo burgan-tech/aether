@@ -417,10 +417,6 @@ Aether Framework is built on these principles:
 |---------------|--------------|---------|------|
 | 1.x | 8.0, 9.0 | 8.x, 9.x | 1.13+ |
 
-## License
-
-[Your License Information]
-
 ---
 
 **Next Steps:**

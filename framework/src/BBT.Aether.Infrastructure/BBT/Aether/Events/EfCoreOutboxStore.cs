@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Events;
 using BBT.Aether.Guids;
+using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 
 namespace BBT.Aether.Events;
@@ -14,7 +15,7 @@ public class EfCoreOutboxStore<TDbContext>(
     TDbContext dbContext,
     IEventSerializer eventSerializer,
     IGuidGenerator guidGenerator) : IOutboxStore
-    where TDbContext : DbContext, IHasOutbox
+    where TDbContext : DbContext, IHasEfCoreOutbox
 {
     public async Task StoreAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default)
     {

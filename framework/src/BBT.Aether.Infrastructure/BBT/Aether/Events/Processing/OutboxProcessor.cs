@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Events;
+using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -20,7 +21,7 @@ public class OutboxProcessor<TDbContext>(
     ILogger<OutboxProcessor<TDbContext>> logger,
     AetherOutboxOptions options)
     : BackgroundService
-    where TDbContext : DbContext, IHasOutbox
+    where TDbContext : DbContext, IHasEfCoreOutbox
 {
     protected async override Task ExecuteAsync(CancellationToken stoppingToken)
     {
