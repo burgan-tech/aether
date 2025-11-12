@@ -7,14 +7,15 @@ using Microsoft.AspNetCore.Mvc;
 namespace BBT.Aether.AspNetCore.Events;
 
 /// <summary>
-/// Dapr subscription discovery endpoint.
+/// Abstract base class for Dapr subscription discovery endpoint.
 /// Returns subscription configuration for all registered event handlers.
+/// Developers should inherit from this class and create their own controller action with custom route.
 /// </summary>
-[ApiController]
-[Route("dapr")]
-public sealed class DaprDiscoveryController(IDistributedEventInvokerRegistry invokerRegistry) : ControllerBase
+public abstract class DaprDiscoveryController(IDistributedEventInvokerRegistry invokerRegistry) : ControllerBase
 {
-    private readonly static JsonSerializerOptions JsonOptions = new()
+    protected readonly IDistributedEventInvokerRegistry InvokerRegistry = invokerRegistry;
+
+    protected static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
@@ -22,14 +23,14 @@ public sealed class DaprDiscoveryController(IDistributedEventInvokerRegistry inv
 
     /// <summary>
     /// Returns Dapr subscription configuration for all registered event handlers.
-    /// This endpoint is called by Dapr runtime to discover subscriptions.
-    /// Dapr expects this endpoint at /dapr/subscribe.
+    /// This method is called by Dapr runtime to discover subscriptions.
+    /// Dapr expects this endpoint at /dapr/subscribe by default.
+    /// Developers should call this method from their controller action.
     /// </summary>
-    [HttpGet("subscribe", Order =int.MinValue)]
-    [ApiExplorerSettings(IgnoreApi = true)]
-    public IActionResult Subscribe()
+    /// <returns>JSON result containing subscription configuration</returns>
+    protected virtual IActionResult GetSubscriptions()
     {
-        var subscriptions = invokerRegistry.All
+        var subscriptions = InvokerRegistry.All
             .Select(invoker => new
             {
                 pubsubname = invoker.PubSubName,

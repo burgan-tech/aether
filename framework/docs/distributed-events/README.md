@@ -267,6 +267,195 @@ Aether automatically generates Dapr subscriptions:
 ]
 ```
 
+## Custom Controller Implementation
+
+Aether provides abstract base classes for event receiving and discovery endpoints, allowing you to implement them with custom routes in your own project. This plug-and-play architecture gives you full control over endpoint configuration while leveraging the framework's event processing logic.
+
+### EventsController
+
+The `EventsController` is an abstract base class that handles incoming events from Dapr. You can inherit from it and create your own controller with custom routes.
+
+#### Abstract Base Class
+
+The base class provides:
+- `ProcessEventAsync()` - Main event processing method
+- `ReadRequestBodyAsync()` - Request body reading (virtual, can be overridden)
+- `TryExtractEventId()` - CloudEvent ID extraction (virtual, can be overridden)
+- `TryMarkEventAsProcessedAsync()` - Inbox marking (virtual, can be overridden)
+- Protected access to all dependencies (InvokerRegistry, InboxStore, etc.)
+
+#### Example Implementation
+
+```csharp
+using System.Threading;
+using System.Threading.Tasks;
+using BBT.Aether.Events;
+using BBT.Aether.Uow;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
+
+[ApiController]
+[Route("api/events/{name}/v{version:int}")]
+public sealed class MyEventsController(
+    IDistributedEventInvokerRegistry invokerRegistry,
+    IInboxStore inboxStore,
+    IUnitOfWorkManager unitOfWorkManager,
+    IServiceProvider serviceProvider,
+    IEventSerializer serializer,
+    ILogger<MyEventsController> logger) 
+    : EventsController(invokerRegistry, inboxStore, unitOfWorkManager, serviceProvider, serializer, logger)
+{
+    /// <summary>
+    /// Handles incoming events from Dapr.
+    /// </summary>
+    [HttpPost]
+    public async Task<IActionResult> Post(
+        [FromRoute] string name,
+        [FromRoute] int version,
+        CancellationToken cancellationToken)
+    {
+        return await ProcessEventAsync(name, version, cancellationToken);
+    }
+}
+```
+
+#### Customizing Behavior
+
+You can override virtual methods to customize event processing:
+
+```csharp
+[ApiController]
+[Route("api/events/{name}/v{version:int}")]
+public sealed class CustomEventsController : EventsController
+{
+    // Override to add custom logging or validation
+    protected override async Task<IActionResult> ProcessEventAsync(
+        string name, 
+        int version, 
+        CancellationToken cancellationToken)
+    {
+        Logger.LogInformation("Custom pre-processing for {Name} v{Version}", name, version);
+        
+        var result = await base.ProcessEventAsync(name, version, cancellationToken);
+        
+        Logger.LogInformation("Custom post-processing completed");
+        return result;
+    }
+    
+    // Override to customize event ID extraction
+    protected override string? TryExtractEventId(byte[] payload, string name, int version)
+    {
+        // Custom logic for extracting event ID
+        return base.TryExtractEventId(payload, name, version);
+    }
+    
+    // Override to customize request body reading
+    protected override async Task<byte[]> ReadRequestBodyAsync(CancellationToken cancellationToken)
+    {
+        // Custom body reading logic (e.g., size limits, validation)
+        return await base.ReadRequestBodyAsync(cancellationToken);
+    }
+}
+```
+
+### DaprDiscoveryController
+
+The `DaprDiscoveryController` is an abstract base class for the Dapr subscription discovery endpoint. Dapr calls this endpoint to discover which events your service subscribes to.
+
+#### Abstract Base Class
+
+The base class provides:
+- `GetSubscriptions()` - Returns subscription configuration (virtual, can be overridden)
+- Protected access to `InvokerRegistry`
+- Protected `JsonOptions` for serialization
+
+#### Example Implementation
+
+```csharp
+using BBT.Aether.Events;
+using Microsoft.AspNetCore.Mvc;
+
+[ApiController]
+[Route("api/dapr")]
+public sealed class MyDaprDiscoveryController(IDistributedEventInvokerRegistry invokerRegistry) 
+    : DaprDiscoveryController(invokerRegistry)
+{
+    /// <summary>
+    /// Returns Dapr subscription configuration.
+    /// Dapr runtime calls this endpoint to discover subscriptions.
+    /// </summary>
+    [HttpGet("subscribe", Order = int.MinValue)]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public IActionResult Subscribe()
+    {
+        return GetSubscriptions();
+    }
+}
+```
+
+#### Customizing Subscriptions
+
+You can override `GetSubscriptions()` to customize the subscription response:
+
+```csharp
+[ApiController]
+[Route("api/dapr")]
+public sealed class CustomDaprDiscoveryController : DaprDiscoveryController
+{
+    [HttpGet("subscribe")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public IActionResult Subscribe()
+    {
+        return GetSubscriptions();
+    }
+    
+    protected override IActionResult GetSubscriptions()
+    {
+        // Add custom logic before returning subscriptions
+        Logger.LogInformation("Dapr requesting subscriptions");
+        
+        var result = base.GetSubscriptions();
+        
+        // Add custom logic after generating subscriptions
+        return result;
+    }
+    
+    // Alternative: Create multiple endpoints
+    [HttpGet("subscriptions")]
+    public IActionResult AlternativeRoute()
+    {
+        return GetSubscriptions();
+    }
+}
+```
+
+#### Important Notes
+
+- **Dapr Default Route**: Dapr expects the discovery endpoint at `/dapr/subscribe` by default, but you can configure a custom route in your Dapr configuration.
+- **Route Matching**: Ensure your event routes in `EventsController` match the routes returned by `GetSubscriptions()`.
+- **Order Attribute**: Use `Order = int.MinValue` to ensure this endpoint is matched before other routes.
+
+### Complete Setup Example
+
+```csharp
+// Program.cs or Startup.cs
+services.AddAetherEventBus(options =>
+{
+    options.PubSubName = "pubsub";
+    options.DefaultSource = "my-service";
+    options.RegisterHandlers(typeof(Program).Assembly);
+});
+
+// Controllers are automatically discovered by ASP.NET Core
+// No need to manually map endpoints
+```
+
+With this approach:
+1. Define your event handlers with `[EventName]` attributes
+2. Create your concrete `EventsController` with your desired route
+3. Create your concrete `DaprDiscoveryController` with your desired route
+4. Dapr will automatically discover and subscribe to your events
+
 ## Usage Examples
 
 ### Complete Example
