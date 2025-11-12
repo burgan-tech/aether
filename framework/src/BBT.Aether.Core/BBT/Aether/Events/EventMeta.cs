@@ -1,4 +1,3 @@
-using System;
 using System.Linq;
 
 namespace BBT.Aether.Events;
@@ -14,27 +13,27 @@ public static class EventMeta<T>
     /// <summary>
     /// Event name from [EventName] attribute.
     /// </summary>
-    public static readonly string Name;
+    public readonly static string Name;
     
     /// <summary>
     /// Event version from [EventName] attribute.
     /// </summary>
-    public static readonly int Version;
+    public readonly static int Version;
     
     /// <summary>
     /// PubSub component name from [EventName] attribute (null if default should be used).
     /// </summary>
-    public static readonly string? PubSub;
+    public readonly static string? PubSub;
     
     /// <summary>
     /// Topic override from [EventName] attribute (null if should be auto-generated).
     /// </summary>
-    public static readonly string? Topic;
+    public readonly static string? Topic;
     
     /// <summary>
     /// Data schema URI from [EventName] attribute.
     /// </summary>
-    public static readonly string? DataSchema;
+    public readonly static string? DataSchema;
 
     /// <summary>
     /// Static constructor - extracts metadata once per event type.

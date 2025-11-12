@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.DependencyInjection;
 using PostSharp.Aspects;
+using PostSharp.Aspects.Dependencies;
 using PostSharp.Extensibility;
 using PostSharp.Serialization;
 
@@ -13,8 +14,11 @@ namespace BBT.Aether.Aspects;
 /// Aspect that automatically manages Unit of Work for intercepted methods.
 /// Begins a UoW before method execution, commits on success, and rolls back on exception.
 /// This class can be extended to customize UoW behavior via OnBeforeAsync, OnAfterAsync, and OnExceptionAsync.
+/// Execution order: Runs LAST (innermost layer, closest to method) - after Trace and Log.
 /// </summary>
 [PSerializable]
+[AspectTypeDependency(AspectDependencyAction.Order, AspectDependencyPosition.After, typeof(TraceAttribute))]
+[AspectTypeDependency(AspectDependencyAction.Order, AspectDependencyPosition.After, typeof(LogAttribute))]
 [MulticastAttributeUsage(
     MulticastTargets.Method,
     AllowMultiple = false,

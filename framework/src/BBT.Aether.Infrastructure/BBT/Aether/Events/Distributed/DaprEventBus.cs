@@ -1,8 +1,6 @@
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Dapr.Client;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace BBT.Aether.Events;
 

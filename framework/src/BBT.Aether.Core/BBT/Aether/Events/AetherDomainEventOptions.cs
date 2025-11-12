@@ -1,5 +1,3 @@
-using System;
-
 namespace BBT.Aether.Events;
 
 /// <summary>

@@ -9,11 +9,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.EntityFrameworkCore.Modeling;
-using BBT.Aether.Domain.Services;
 using BBT.Aether.Events;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace BBT.Aether.Domain.EntityFrameworkCore;
 

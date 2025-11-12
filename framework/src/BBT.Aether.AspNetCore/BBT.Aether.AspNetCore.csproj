@@ -33,12 +33,6 @@
         <PackageReference Include="OpenTelemetry.Instrumentation.Runtime"/>
         <PackageReference Include="OpenTelemetry.Instrumentation.Process"/>
         <PackageReference Include="OpenTelemetry.Exporter.Console"/>
-        <PackageReference Include="Serilog"/>
-        <PackageReference Include="Serilog.Extensions.Logging"/>
-        <PackageReference Include="Serilog.Formatting.Compact"/>
-        <PackageReference Include="Serilog.Sinks.Console"/>
-        <PackageReference Include="Serilog.Sinks.File"/>
-        <PackageReference Include="Serilog.Sinks.OpenTelemetry"/>
         <PackageReference Include="Microsoft.Extensions.Diagnostics"/>
         <PackageReference Include="Microsoft.AspNetCore.ResponseCompression"/>
         <ProjectReference Include="..\BBT.Aether.Application\BBT.Aether.Application.csproj"/>

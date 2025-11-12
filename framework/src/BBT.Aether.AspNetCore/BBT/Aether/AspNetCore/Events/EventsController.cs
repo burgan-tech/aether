@@ -1,5 +1,4 @@
 using System;
-using System.Data;
 using System.IO;
 using System.Text.Json;
 using System.Threading;
@@ -7,7 +6,6 @@ using System.Threading.Tasks;
 using BBT.Aether.Events;
 using BBT.Aether.Uow;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace BBT.Aether.AspNetCore.Events;
