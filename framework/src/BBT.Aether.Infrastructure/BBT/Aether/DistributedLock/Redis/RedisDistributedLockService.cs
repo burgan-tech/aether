@@ -15,7 +15,7 @@ public class RedisDistributedLockService(
     IApplicationInfoAccessor applicationInfoAccessor)
     : IDistributedLockService
 {
-    public async Task<bool> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
+    public async Task<IAsyncDisposable?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
         CancellationToken cancellationToken = default)
     {
         try
@@ -37,16 +37,16 @@ public class RedisDistributedLockService(
             {
                 logger.LogDebug("Successfully acquired Redis lock for resource {ResourceId} with owner {LockOwner}",
                     resourceId, lockOwner);
-                return true;
+                return new RedisLockHandle(database, resourceId, lockOwner, logger);
             }
 
             logger.LogWarning("Failed to acquire Redis lock for resource {ResourceId}", resourceId);
-            return false;
+            return null;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error acquiring Redis lock for resource {ResourceId}", resourceId);
-            return false;
+            return null;
         }
     }
 
@@ -101,9 +101,9 @@ public class RedisDistributedLockService(
             throw new ArgumentNullException(nameof(function));
         }
 
-        var lockAcquired = await TryAcquireLockAsync(resourceId, expiryInSeconds, cancellationToken);
+        await using var lockAcquired = await TryAcquireLockAsync(resourceId, expiryInSeconds, cancellationToken);
 
-        if (!lockAcquired)
+        if (lockAcquired == null)
         {
             logger.LogWarning("Could not acquire lock for resource {ResourceId}", resourceId);
             return default;
@@ -118,10 +118,6 @@ public class RedisDistributedLockService(
             logger.LogError(ex, "Error executing function with Redis lock for resource {ResourceId}", resourceId);
             throw;
         }
-        finally
-        {
-            await ReleaseLockAsync(resourceId, cancellationToken);
-        }
     }
 
     public async Task<bool> ExecuteWithLockAsync(string resourceId, Func<Task> action, int expiryInSeconds = 60,
@@ -132,9 +128,9 @@ public class RedisDistributedLockService(
             throw new ArgumentNullException(nameof(action));
         }
 
-        var lockAcquired = await TryAcquireLockAsync(resourceId, expiryInSeconds, cancellationToken);
+        await using var lockAcquired = await TryAcquireLockAsync(resourceId, expiryInSeconds, cancellationToken);
 
-        if (!lockAcquired)
+        if (lockAcquired == null)
         {
             logger.LogWarning("Could not acquire lock for resource {ResourceId}", resourceId);
             return false;
@@ -149,10 +145,6 @@ public class RedisDistributedLockService(
         {
             logger.LogError(ex, "Error executing action with Redis lock for resource {ResourceId}", resourceId);
             throw;
-        }
-        finally
-        {
-            await ReleaseLockAsync(resourceId, cancellationToken);
         }
     }
 

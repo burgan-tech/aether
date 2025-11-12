@@ -18,27 +18,27 @@ public class DaprDistributedLockService(
     string storeName)
     : IDistributedLockService
 {
-    public async Task<bool> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
+    public async Task<IAsyncDisposable?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
         CancellationToken cancellationToken = default)
     {
         try
         {
             var lockOwner = $"{GetClientIdentifier()}";
-            await using var resourceLock =
+            var resourceLock =
                 await daprClient.Lock(storeName, resourceId, lockOwner, expiryInSeconds, cancellationToken);
             if (resourceLock != null && resourceLock.Success)
             {
                 logger.LogDebug("Successfully acquired lock for resource {ResourceId}", resourceId);
-                return true;
+                return resourceLock;
             }
 
             logger.LogWarning("Failed to acquire lock for resource {ResourceId}", resourceId);
-            return false;
+            return null;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error acquiring lock for resource {ResourceId}", resourceId);
-            return false;
+            return null;
         }
     }
 
@@ -79,10 +79,6 @@ public class DaprDistributedLockService(
             logger.LogError(ex, "Error executing function with Redis lock for resource {ResourceId}", resourceId);
             throw;
         }
-        finally
-        {
-            await ReleaseLockAsync(resourceId, cancellationToken);
-        }
     }
 
     public async Task<bool> ExecuteWithLockAsync(string resourceId, Func<Task> action, int expiryInSeconds = 60,
@@ -107,10 +103,6 @@ public class DaprDistributedLockService(
         {
             logger.LogError(ex, "Error executing action with Redis lock for resource {ResourceId}", resourceId);
             throw;
-        }
-        finally
-        {
-            await ReleaseLockAsync(resourceId, cancellationToken);
         }
     }
 
