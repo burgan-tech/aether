@@ -57,7 +57,7 @@ public class DaprDistributedLockService(
         }
     }
 
-    public async Task<T?> ExecuteWithLockAsync<T>(string resourceId, Func<Task<T>> function, int expiryInSeconds = 60,
+    public async Task<(bool Acquired, T? Result)> ExecuteWithLockAsync<T>(string resourceId, Func<Task<T>> function, int expiryInSeconds = 60,
         CancellationToken cancellationToken = default)
     {
         try
@@ -68,11 +68,12 @@ public class DaprDistributedLockService(
             if (resourceLock == null || !resourceLock.Success)
             {
                 logger.LogWarning("Failed to acquire lock for resource {ResourceId}", resourceId);
-                return default;
+                return (false, default);
             }
 
             logger.LogDebug("Successfully acquired lock for resource {ResourceId}", resourceId);
-            return await function();
+            var result = await function();
+            return (true, result);
         }
         catch (Exception ex)
         {
