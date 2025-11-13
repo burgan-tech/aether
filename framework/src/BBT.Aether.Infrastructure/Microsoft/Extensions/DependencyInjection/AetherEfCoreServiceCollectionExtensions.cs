@@ -1,12 +1,12 @@
 using System;
 using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.EntityFrameworkCore.Interceptors;
-using BBT.Aether.Domain.Events;
-using BBT.Aether.Domain.Events.Distributed;
 using BBT.Aether.Domain.Services;
+using BBT.Aether.Events;
+using BBT.Aether.Uow;
+using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
@@ -15,33 +15,69 @@ public static class AetherEfCoreServiceCollectionExtensions
     public static IServiceCollection AddAetherDbContext<TDbContext>(
         this IServiceCollection services,
         Action<DbContextOptionsBuilder> options)
-        where TDbContext : DbContext
+        where TDbContext : AetherDbContext<TDbContext>
     {
         services.AddSingleton<AuditInterceptor>();
 
-        // Register domain event dispatcher if not already registered
-        services.TryAddScoped<IDomainEventDispatcher, DomainEventDispatcher>();
-
-        // Register distributed event publisher if not already registered
-        services.TryAddScoped<IDistributedDomainEventPublisher, NullDistributedDomainEventPublisher>();
-        
-        // Register the unified event context
-        services.TryAddScoped<IEventContext, EventContext>();
-
         services.AddDbContext<TDbContext>((sp, dbContextOptions) =>
         {
-            options?.Invoke(dbContextOptions);
+            options.Invoke(dbContextOptions);
             dbContextOptions.AddInterceptors(
                 sp.GetRequiredService<AuditInterceptor>()
             );
         });
 
-        services.AddScoped<ITransactionService, EfCoreTransactionService<TDbContext>>();
+        // Register Unit of Work services
+        services.AddAetherUnitOfWork<TDbContext>();
+        
         return services;
     }
 
     /// <summary>
-    /// Adds IDbContextFactory with domain events support.
+    /// Registers Unit of Work services for the specified DbContext.
+    /// Includes ambient accessor, UoW manager, and EF Core transaction source.
+    /// </summary>
+    public static IServiceCollection AddAetherUnitOfWork<TDbContext>(this IServiceCollection services)
+        where TDbContext : AetherDbContext<TDbContext>
+    {
+        // Register ambient accessor as singleton (AsyncLocal storage)
+        services.TryAddSingleton<IAmbientUnitOfWorkAccessor, AsyncLocalAmbientUowAccessor>();
+
+        // Register UoW manager as scoped
+        services.TryAddScoped<IUnitOfWorkManager, UnitOfWorkManager>();
+
+        // Register EF Core transaction source for this DbContext
+        services.AddScoped<ILocalTransactionSource, EfCoreTransactionSource<TDbContext>>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// Adds domain event dispatching support for the specified DbContext.
+    /// Enables aggregates to raise distributed events via AddDistributedEvent().
+    /// </summary>
+    /// <typeparam name="TDbContext">The DbContext type</typeparam>
+    /// <param name="services">The service collection</param>
+    /// <param name="configure">Optional configuration action for domain event options</param>
+    /// <returns>The service collection for method chaining</returns>
+    public static IServiceCollection AddAetherDomainEvents<TDbContext>(
+        this IServiceCollection services,
+        Action<AetherDomainEventOptions>? configure = null)
+        where TDbContext : DbContext
+    {
+        // Configure options
+        var options = new AetherDomainEventOptions();
+        configure?.Invoke(options);
+        services.AddSingleton(options);
+
+        // Register domain event dispatcher
+        services.AddScoped<IDomainEventDispatcher, DomainEventDispatcher>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// Adds IDbContextFactory.
     /// </summary>
     public static IServiceCollection AddAetherDbContextFactory<TDbContext, TFactory>(
         this IServiceCollection services,
@@ -51,21 +87,11 @@ public static class AetherEfCoreServiceCollectionExtensions
     {
         services.AddSingleton<AuditInterceptor>();
         
-        // Register domain event dispatcher if not already registered
-        services.TryAddScoped<IDomainEventDispatcher, DomainEventDispatcher>();
-
-        // Register distributed event publisher if not already registered
-        services.TryAddScoped<IDistributedDomainEventPublisher, NullDistributedDomainEventPublisher>();
-        
-        // Register the unified event context
-        services.TryAddScoped<IEventContext, EventContext>();
-        
         // Configure DbContextOptions
         services.AddDbContextOptions<TDbContext>(options);
         
         // Register the factory
         services.AddScoped<IDbContextFactory<TDbContext>, TFactory>();
-        services.AddScoped<TFactory>();
 
         return services;
     }
@@ -75,27 +101,13 @@ public static class AetherEfCoreServiceCollectionExtensions
         Action<DbContextOptionsBuilder> options)
         where TDbContext : DbContext
     {
-        services.AddSingleton<DbContextOptions<TDbContext>>(sp =>
+        services.AddSingleton<DbContextOptions<TDbContext>>(_ =>
         {
             var builder = new DbContextOptionsBuilder<TDbContext>();
-            options?.Invoke(builder);
+            options.Invoke(builder);
             return builder.Options;
         });
 
-        return services;
-    }
-
-    /// <summary>
-    /// Adds a custom distributed domain event publisher implementation.
-    /// </summary>
-    /// <typeparam name="TPublisher">The type of the distributed event publisher.</typeparam>
-    /// <param name="services">The service collection.</param>
-    /// <returns>The service collection for chaining.</returns>
-    public static IServiceCollection AddDistributedDomainEventPublisher<TPublisher>(
-        this IServiceCollection services)
-        where TPublisher : class, IDistributedDomainEventPublisher
-    {
-        services.Replace(ServiceDescriptor.Scoped<IDistributedDomainEventPublisher, TPublisher>());
         return services;
     }
 }

@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using BBT.Aether.Domain.Events;
-using BBT.Aether.Domain.Events.Distributed;
+using BBT.Aether.Events;
 
 namespace BBT.Aether.Domain.Entities;
 
@@ -11,73 +9,36 @@ namespace BBT.Aether.Domain.Entities;
 /// </summary>
 [Serializable]
 public abstract class BasicAggregateRoot : Entity,
-    IAggregateRoot
+    IAggregateRoot,
+    IHasDomainEvents
 {
-    private readonly List<IDomainEvent> _domainEvents = new();
-    private readonly List<IDistributedDomainEvent> _distributedEvents = new();
-    private long _version = 0;
+    private readonly List<DomainEventEnvelope> _domainEvents = new();
 
     /// <summary>
-    /// Gets the domain events that have been raised by this aggregate root.
+    /// Adds a distributed event to be published after the aggregate is persisted.
+    /// Events are dispatched after SaveChanges completes successfully.
+    /// Event metadata (EventName, Version, PubSubName) is extracted from EventNameAttribute at this point.
     /// </summary>
-    public IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents.AsReadOnly();
-
-    /// <summary>
-    /// Gets the distributed domain events that have been raised by this aggregate root.
-    /// </summary>
-    public IReadOnlyCollection<IDistributedDomainEvent> DistributedEvents => _distributedEvents.AsReadOnly();
-
-    /// <summary>
-    /// Gets the current version of this aggregate root.
-    /// </summary>
-    public long EventVersion => _version;
-
-    /// <summary>
-    /// Raises a local domain event.
-    /// </summary>
-    /// <param name="domainEvent">The domain event to raise.</param>
-    protected void Raise(IDomainEvent domainEvent)
+    /// <param name="event">The distributed event to add</param>
+    /// <exception cref="InvalidOperationException">Thrown if the event doesn't have EventNameAttribute</exception>
+    protected void AddDistributedEvent(IDistributedEvent @event)
     {
-        ArgumentNullException.ThrowIfNull(domainEvent);
-
-        _domainEvents.Add(domainEvent);
+        // Extract metadata once at the time of adding the event
+        var metadata = EventMetadataExtractor.Extract(@event);
+        var envelope = new DomainEventEnvelope(@event, metadata);
+        _domainEvents.Add(envelope);
     }
 
-    /// <summary>
-    /// Raises a distributed domain event.
-    /// </summary>
-    /// <param name="distributedEvent">The distributed domain event to raise.</param>
-    protected void RaiseDistributed(IDistributedDomainEvent distributedEvent)
+    /// <inheritdoc />
+    public IReadOnlyCollection<DomainEventEnvelope> GetDomainEvents()
     {
-        ArgumentNullException.ThrowIfNull(distributedEvent);
-
-        _distributedEvents.Add(distributedEvent);
-        _version++; // Increment version for each distributed event
+        return _domainEvents.AsReadOnly();
     }
 
-    /// <summary>
-    /// Clears all domain events from this aggregate root.
-    /// </summary>
+    /// <inheritdoc />
     public void ClearDomainEvents()
     {
         _domainEvents.Clear();
-    }
-
-    /// <summary>
-    /// Clears all distributed events from this aggregate root.
-    /// </summary>
-    public void ClearDistributedEvents()
-    {
-        _distributedEvents.Clear();
-    }
-
-    /// <summary>
-    /// Clears all events (both local and distributed) from this aggregate root.
-    /// </summary>
-    public void ClearAllEvents()
-    {
-        _domainEvents.Clear();
-        _distributedEvents.Clear();
     }
 }
 
@@ -87,26 +48,10 @@ public abstract class BasicAggregateRoot : Entity,
 /// <typeparam name="TKey">The type of the primary key.</typeparam>
 [Serializable]
 public abstract class BasicAggregateRoot<TKey> : Entity<TKey>,
-    IAggregateRoot<TKey>
+    IAggregateRoot<TKey>,
+    IHasDomainEvents
 {
-    private readonly List<IDomainEvent> _domainEvents = new();
-    private readonly List<IDistributedDomainEvent> _distributedEvents = new();
-    private long _version = 0;
-
-    /// <summary>
-    /// Gets the domain events that have been raised by this aggregate root.
-    /// </summary>
-    public IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents.AsReadOnly();
-
-    /// <summary>
-    /// Gets the distributed domain events that have been raised by this aggregate root.
-    /// </summary>
-    public IReadOnlyCollection<IDistributedDomainEvent> DistributedEvents => _distributedEvents.AsReadOnly();
-
-    /// <summary>
-    /// Gets the current version of this aggregate root.
-    /// </summary>
-    public long EventVersion => _version;
+    private readonly List<DomainEventEnvelope> _domainEvents = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="BasicAggregateRoot{TKey}"/> class.
@@ -125,50 +70,29 @@ public abstract class BasicAggregateRoot<TKey> : Entity<TKey>,
     }
 
     /// <summary>
-    /// Raises a local domain event.
+    /// Adds a distributed event to be published after the aggregate is persisted.
+    /// Events are dispatched after SaveChanges completes successfully.
+    /// Event metadata (EventName, Version, PubSubName) is extracted from EventNameAttribute at this point.
     /// </summary>
-    /// <param name="domainEvent">The domain event to raise.</param>
-    protected void Raise(IDomainEvent domainEvent)
+    /// <param name="event">The distributed event to add</param>
+    /// <exception cref="InvalidOperationException">Thrown if the event doesn't have EventNameAttribute</exception>
+    protected void AddDistributedEvent(IDistributedEvent @event)
     {
-        ArgumentNullException.ThrowIfNull(domainEvent);
-
-        _domainEvents.Add(domainEvent);
+        // Extract metadata once at the time of adding the event
+        var metadata = EventMetadataExtractor.Extract(@event);
+        var envelope = new DomainEventEnvelope(@event, metadata);
+        _domainEvents.Add(envelope);
     }
 
-    /// <summary>
-    /// Raises a distributed domain event.
-    /// </summary>
-    /// <param name="distributedEvent">The distributed domain event to raise.</param>
-    protected void RaiseDistributed(IDistributedDomainEvent distributedEvent)
+    /// <inheritdoc />
+    public IReadOnlyCollection<DomainEventEnvelope> GetDomainEvents()
     {
-        ArgumentNullException.ThrowIfNull(distributedEvent);
-
-        _distributedEvents.Add(distributedEvent);
-        _version++; // Increment version for each distributed event
+        return _domainEvents.AsReadOnly();
     }
 
-    /// <summary>
-    /// Clears all domain events from this aggregate root.
-    /// </summary>
+    /// <inheritdoc />
     public void ClearDomainEvents()
     {
         _domainEvents.Clear();
-    }
-
-    /// <summary>
-    /// Clears all distributed events from this aggregate root.
-    /// </summary>
-    public void ClearDistributedEvents()
-    {
-        _distributedEvents.Clear();
-    }
-
-    /// <summary>
-    /// Clears all events (both local and distributed) from this aggregate root.
-    /// </summary>
-    public void ClearAllEvents()
-    {
-        _domainEvents.Clear();
-        _distributedEvents.Clear();
     }
 }

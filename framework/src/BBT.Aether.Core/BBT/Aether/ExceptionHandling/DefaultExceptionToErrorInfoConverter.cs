@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Http;
+using BBT.Aether.Results;
 using BBT.Aether.Validation;
 
 namespace BBT.Aether.ExceptionHandling;
@@ -27,6 +28,101 @@ public class DefaultExceptionToErrorInfoConverter(IServiceProvider serviceProvid
         return errorInfo;
     }
 
+    public Error ConvertToError(Exception exception, Action<AetherExceptionHandlingOptions>? options = null)
+    {
+        var exceptionHandlingOptions = CreateDefaultOptions();
+        options?.Invoke(exceptionHandlingOptions);
+
+        var error = CreateErrorWithoutCode(exception, exceptionHandlingOptions);
+
+        if (exception is IHasErrorCode hasErrorCodeException)
+        {
+            // If the exception has a specific error code, we need to create a new Error with that code
+            // but preserve the prefix and other properties from the original error
+            error = new Error(
+                error.Prefix,
+                hasErrorCodeException.Code ?? error.Code,
+                error.Message,
+                error.Detail,
+                error.Target,
+                error.ValidationErrors);
+        }
+
+        return error;
+    }
+
+    protected virtual Error CreateErrorWithoutCode(Exception exception, AetherExceptionHandlingOptions options)
+    {
+        exception = TryToGetActualException(exception);
+
+        if (exception is AetherDbConcurrencyException)
+        {
+            return Error.Conflict("concurrency", "The data you have submitted has already changed by another user/client. Please discard the changes you've done and try from the beginning.");
+        }
+
+        if (exception is EntityNotFoundException entityNotFoundException)
+        {
+            return CreateEntityNotFoundError(entityNotFoundException);
+        }
+
+        if (exception is AetherValidationException validationException)
+        {
+            return CreateValidationError(validationException);
+        }
+
+        if (exception is IUserFriendlyException)
+        {
+            var message = exception.Message;
+            var details = (exception as IHasErrorDetails)?.Details;
+            
+            return Error.Failure("user_friendly", message, details);
+        }
+
+        if (exception is IBusinessException)
+        {
+            return Error.Forbidden("business_rule", exception.Message);
+        }
+
+        if (exception is NotImplementedException)
+        {
+            return Error.Failure("not_implemented", "The requested functionality is not implemented.");
+        }
+
+        // Default case for unexpected errors
+        var errorMessage = options.SendExceptionsDetailsToClients 
+            ? exception.Message 
+            : "An internal error occurred during your request!";
+
+        var errorDetail = options.SendExceptionsDetailsToClients 
+            ? CreateDetailedErrorFromException(exception, options.SendStackTraceToClients)
+            : null;
+
+        return Error.Failure("internal_error", errorMessage, errorDetail);
+    }
+    
+    protected virtual Error CreateEntityNotFoundError(EntityNotFoundException exception)
+    {
+        if (exception.EntityType != null)
+        {
+            var message = string.Format(
+                "There is no entity {0} with id = {1}!",
+                exception.EntityType.Name,
+                exception.Id
+            );
+            return Error.NotFound("entity_not_found", message, exception.Id?.ToString());
+        }
+
+        return Error.NotFound("entity_not_found", exception.Message);
+    }
+
+    protected virtual Error CreateValidationError(AetherValidationException validationException)
+    {
+        return Error.Validation(
+            "validation_failed",
+            validationException.Message,
+            validationException.ValidationErrors);
+    }
+
     protected virtual ServiceErrorInfo CreateErrorInfoWithoutCode(Exception exception, AetherExceptionHandlingOptions options)
     {
         if (options.SendExceptionsDetailsToClients)
@@ -43,7 +139,8 @@ public class DefaultExceptionToErrorInfoConverter(IServiceProvider serviceProvid
 
         if (exception is EntityNotFoundException)
         {
-            return CreateEntityNotFoundError((exception as EntityNotFoundException)!);
+            var error = CreateEntityNotFoundError((exception as EntityNotFoundException)!);
+            return new ServiceErrorInfo(error.Message ?? "Entity not found", error.Detail, error.Code);
         }
 
         var errorInfo = new ServiceErrorInfo();
@@ -83,22 +180,6 @@ public class DefaultExceptionToErrorInfoConverter(IServiceProvider serviceProvid
         return errorInfo;
     }
     
-    protected virtual ServiceErrorInfo CreateEntityNotFoundError(EntityNotFoundException exception)
-    {
-        if (exception.EntityType != null)
-        {
-            return new ServiceErrorInfo(
-                string.Format(
-                    "There is no entity {0} with id = {1}!",
-                    exception.EntityType.Name,
-                    exception.Id
-                )
-            );
-        }
-
-        return new ServiceErrorInfo(exception.Message);
-    }
-
     protected virtual Exception TryToGetActualException(Exception exception)
     {
         if (exception is AggregateException aggException && aggException.InnerException != null)
@@ -128,6 +209,15 @@ public class DefaultExceptionToErrorInfoConverter(IServiceProvider serviceProvid
         }
 
         return errorInfo;
+    }
+
+    protected virtual string CreateDetailedErrorFromException(Exception exception, bool sendStackTraceToClients)
+    {
+        var detailBuilder = new StringBuilder();
+
+        AddExceptionToDetails(exception, detailBuilder, sendStackTraceToClients);
+
+        return detailBuilder.ToString();
     }
 
     protected virtual void AddExceptionToDetails(Exception exception, StringBuilder detailBuilder, bool sendStackTraceToClients)

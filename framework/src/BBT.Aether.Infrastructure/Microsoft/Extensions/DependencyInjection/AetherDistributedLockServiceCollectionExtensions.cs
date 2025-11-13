@@ -24,8 +24,7 @@ public static class AetherDistributedLockServiceCollectionExtensions
 
         return services;
     }
-
-
+    
     public static IServiceCollection AddDaprDistributedLock(
         this IServiceCollection services,
         string storeName)

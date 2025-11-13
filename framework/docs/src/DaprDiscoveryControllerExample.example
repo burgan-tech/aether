@@ -1,0 +1,54 @@
+using BBT.Aether.Events;
+using Microsoft.AspNetCore.Mvc;
+
+namespace BBT.Aether.AspNetCore.Events;
+
+/// <summary>
+/// Example implementation of DaprDiscoveryController showing how to create a concrete controller
+/// with custom routes and optional method overrides.
+/// 
+/// Usage in your project:
+/// 1. Create a new controller class that inherits from DaprDiscoveryController
+/// 2. Add [ApiController] and [Route] attributes to define your endpoints
+/// 3. Create an action method that calls GetSubscriptions()
+/// 4. Optionally override GetSubscriptions() to customize behavior
+/// 
+/// Note: Dapr expects the subscription discovery endpoint at /dapr/subscribe by default,
+/// but you can customize this route as needed.
+/// </summary>
+[ApiController]
+[Route("api/dapr")]
+public sealed class DaprDiscoveryControllerExample(IDistributedEventInvokerRegistry invokerRegistry) 
+    : DaprDiscoveryController(invokerRegistry)
+{
+    /// <summary>
+    /// Returns Dapr subscription configuration for all registered event handlers.
+    /// This endpoint is called by Dapr runtime to discover subscriptions.
+    /// </summary>
+    /// <returns>JSON result containing subscription configuration</returns>
+    [HttpGet("subscribe", Order = int.MinValue)]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public IActionResult Subscribe()
+    {
+        return GetSubscriptions();
+    }
+
+    // Example: Override GetSubscriptions() to customize behavior
+    // Uncomment and modify as needed:
+
+    // protected override IActionResult GetSubscriptions()
+    // {
+    //     // Custom pre-processing logic here
+    //     var result = base.GetSubscriptions();
+    //     // Custom post-processing logic here
+    //     return result;
+    // }
+
+    // Example: Create alternative endpoints with different routes
+    // [HttpGet("subscriptions")]
+    // public IActionResult AlternativeRoute()
+    // {
+    //     return GetSubscriptions();
+    // }
+}
+

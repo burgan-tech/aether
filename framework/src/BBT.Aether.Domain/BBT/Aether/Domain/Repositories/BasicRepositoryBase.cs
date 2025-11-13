@@ -18,10 +18,10 @@ public abstract class BasicRepositoryBase<TEntity>(IServiceProvider serviceProvi
     public IServiceProvider ServiceProvider { get; } = serviceProvider;
     public ILazyServiceProvider LazyServiceProvider => ServiceProvider.GetRequiredService<ILazyServiceProvider>();
     
-    public abstract Task<TEntity> InsertAsync(TEntity entity, bool saveChanges = true, CancellationToken cancellationToken = default);
+    public abstract Task<TEntity> InsertAsync(TEntity entity, bool saveChanges = false, CancellationToken cancellationToken = default);
 
-    public abstract Task<TEntity> UpdateAsync(TEntity entity, bool saveChanges = true, CancellationToken cancellationToken = default);
-    public abstract Task DeleteAsync(TEntity entity, bool saveChanges = true, CancellationToken cancellationToken = default);
+    public abstract Task<TEntity> UpdateAsync(TEntity entity, bool saveChanges = false, CancellationToken cancellationToken = default);
+    public abstract Task DeleteAsync(TEntity entity, bool saveChanges = false, CancellationToken cancellationToken = default);
 
     public abstract Task SaveChangesAsync(CancellationToken cancellationToken = default);
 
@@ -73,7 +73,7 @@ public abstract class BasicRepositoryBase<TEntity, TKey>(IServiceProvider servic
         bool includeDetails = true,
         CancellationToken cancellationToken = default);
 
-    public virtual async Task DeleteAsync(TKey id, bool saveChanges = true, CancellationToken cancellationToken = default)
+    public virtual async Task DeleteAsync(TKey id, bool saveChanges = false, CancellationToken cancellationToken = default)
     {
         var entity = await FindAsync(id, cancellationToken: cancellationToken);
         if (entity == null)

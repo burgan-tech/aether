@@ -18,29 +18,27 @@ public class DaprDistributedLockService(
     string storeName)
     : IDistributedLockService
 {
-    public async Task<bool> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
+    public async Task<IAsyncDisposable?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            var lockId = $"{GetClientIdentifier()}-{resourceId}";
-#pragma warning disable CS0618 // Type or member is obsolete
-            await using var resourceLock =
-                await daprClient.Lock(storeName, resourceId, lockId, expiryInSeconds, cancellationToken);
-#pragma warning restore CS0618 // Type or member is obsolete
-            if (resourceLock.Success)
+            var lockOwner = $"{GetClientIdentifier()}";
+            var resourceLock =
+                await daprClient.Lock(storeName, resourceId, lockOwner, expiryInSeconds, cancellationToken);
+            if (resourceLock != null && resourceLock.Success)
             {
                 logger.LogDebug("Successfully acquired lock for resource {ResourceId}", resourceId);
-                return true;
+                return resourceLock;
             }
 
             logger.LogWarning("Failed to acquire lock for resource {ResourceId}", resourceId);
-            return false;
+            return null;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error acquiring lock for resource {ResourceId}", resourceId);
-            return false;
+            return null;
         }
     }
 
@@ -48,10 +46,8 @@ public class DaprDistributedLockService(
     {
         try
         {
-            var lockId = $"{GetClientIdentifier()}-{resourceId}";
-#pragma warning disable CS0618 // Type or member is obsolete
-            await daprClient.Unlock(storeName, resourceId, lockId, cancellationToken);
-#pragma warning restore CS0618 // Type or member is obsolete
+            var lockOwner = $"{GetClientIdentifier()}";
+            await daprClient.Unlock(storeName, resourceId, lockOwner, cancellationToken);
             return true;
         }
         catch (Exception ex)
@@ -61,29 +57,28 @@ public class DaprDistributedLockService(
         }
     }
 
-    public async Task<T?> ExecuteWithLockAsync<T>(string resourceId, Func<Task<T>> function, int expiryInSeconds = 60,
+    public async Task<(bool Acquired, T? Result)> ExecuteWithLockAsync<T>(string resourceId, Func<Task<T>> function, int expiryInSeconds = 60,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            var lockId = $"{GetClientIdentifier()}-{resourceId}";
-#pragma warning disable CS0618 // Type or member is obsolete
+            var lockOwner = $"{GetClientIdentifier()}";
             await using var resourceLock =
-                await daprClient.Lock(storeName, resourceId, lockId, expiryInSeconds, cancellationToken);
-#pragma warning restore CS0618 // Type or member is obsolete
-            if (!resourceLock.Success)
+                await daprClient.Lock(storeName, resourceId, lockOwner, expiryInSeconds, cancellationToken);
+            if (resourceLock == null || !resourceLock.Success)
             {
                 logger.LogWarning("Failed to acquire lock for resource {ResourceId}", resourceId);
-                return default;
+                return (false, default);
             }
 
             logger.LogDebug("Successfully acquired lock for resource {ResourceId}", resourceId);
-            return await function();
+            var result = await function();
+            return (true, result);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Error executing function with lock for resource {ResourceId}", resourceId);
-            return default;
+            logger.LogError(ex, "Error executing function with Redis lock for resource {ResourceId}", resourceId);
+            throw;
         }
     }
 
@@ -92,12 +87,10 @@ public class DaprDistributedLockService(
     {
         try
         {
-            var lockId = $"{GetClientIdentifier()}-{resourceId}";
-#pragma warning disable CS0618 // Type or member is obsolete
+            var lockOwner = $"{GetClientIdentifier()}";
             await using var resourceLock =
-                await daprClient.Lock(storeName, resourceId, lockId, expiryInSeconds, cancellationToken);
-#pragma warning restore CS0618 // Type or member is obsolete
-            if (!resourceLock.Success)
+                await daprClient.Lock(storeName, resourceId, lockOwner, expiryInSeconds, cancellationToken);
+            if (resourceLock == null || !resourceLock.Success)
             {
                 logger.LogWarning("Failed to acquire lock for resource {ResourceId}", resourceId);
                 return false;
@@ -109,14 +102,15 @@ public class DaprDistributedLockService(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Error executing action with lock for resource {ResourceId}", resourceId);
-            return false;
+            logger.LogError(ex, "Error executing action with Redis lock for resource {ResourceId}", resourceId);
+            throw;
         }
     }
 
     private string GetClientIdentifier()
     {
         return
-            $"{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")}-{applicationInfoAccessor.ApplicationName}";
+            ($"{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")}.{applicationInfoAccessor.ApplicationName}")
+            .ToLowerInvariant();
     }
 }

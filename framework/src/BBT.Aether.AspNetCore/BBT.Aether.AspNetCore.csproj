@@ -17,6 +17,7 @@
 
     <ItemGroup>
         <PackageReference Include="Dapr.Client" />
+        <PackageReference Include="Dapr.AspNetCore" />
         <PackageReference Include="Microsoft.AspNetCore.Mvc.Versioning" />
         <PackageReference Include="Microsoft.AspNetCore.Mvc.Versioning.ApiExplorer" />
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
@@ -32,16 +33,11 @@
         <PackageReference Include="OpenTelemetry.Instrumentation.Runtime"/>
         <PackageReference Include="OpenTelemetry.Instrumentation.Process"/>
         <PackageReference Include="OpenTelemetry.Exporter.Console"/>
-        <PackageReference Include="Serilog"/>
-        <PackageReference Include="Serilog.Extensions.Logging"/>
-        <PackageReference Include="Serilog.Formatting.Compact"/>
-        <PackageReference Include="Serilog.Sinks.Console"/>
-        <PackageReference Include="Serilog.Sinks.File"/>
-        <PackageReference Include="Serilog.Sinks.OpenTelemetry"/>
         <PackageReference Include="Microsoft.Extensions.Diagnostics"/>
         <PackageReference Include="Microsoft.AspNetCore.ResponseCompression"/>
         <ProjectReference Include="..\BBT.Aether.Application\BBT.Aether.Application.csproj"/>
         <ProjectReference Include="..\BBT.Aether.Core\BBT.Aether.Core.csproj"/>
+        <ProjectReference Include="..\BBT.Aether.Infrastructure\BBT.Aether.Infrastructure.csproj" />
     </ItemGroup>
 
 

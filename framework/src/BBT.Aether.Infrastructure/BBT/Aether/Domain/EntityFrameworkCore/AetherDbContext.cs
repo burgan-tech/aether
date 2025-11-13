@@ -9,9 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.EntityFrameworkCore.Modeling;
-using BBT.Aether.Domain.Events;
-using BBT.Aether.Domain.Events.Distributed;
-using BBT.Aether.Domain.Services;
+using BBT.Aether.Events;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 
@@ -19,14 +17,11 @@ namespace BBT.Aether.Domain.EntityFrameworkCore;
 
 public abstract class AetherDbContext<TDbContext>(
     DbContextOptions<TDbContext> options,
-    IEventContext? eventContext = null,
-    ITransactionService? transactionService = null
+    IServiceProvider? serviceProvider = null
 )
     : DbContext(options)
     where TDbContext : DbContext
 {
-    private readonly IEventContext? _eventContext = eventContext;
-    private readonly ITransactionService? _transactionService = transactionService;
     private readonly static MethodInfo ConfigureBasePropertiesMethodInfo
         = typeof(AetherDbContext<TDbContext>)
             .GetMethod(
@@ -49,23 +44,17 @@ public abstract class AetherDbContext<TDbContext>(
         {
             ConfigureBasePropertiesMethodInfo
                 .MakeGenericMethod(entityType.ClrType)
-                .Invoke(this, new object[] { modelBuilder, entityType });
+                .Invoke(this, [modelBuilder, entityType]);
             
             ConfigureValueGeneratedMethodInfo
                 .MakeGenericMethod(entityType.ClrType)
-                .Invoke(this, new object[] { modelBuilder, entityType });
+                .Invoke(this, [modelBuilder, entityType]);
         }
     }
     
      public override int SaveChanges()
     {
         TrackEntityStates();
-        
-        if (_eventContext != null)
-        {
-            return SaveChangesWithDomainEvents().GetAwaiter().GetResult();
-        }
-        
         return base.SaveChanges();
     }
 
@@ -75,14 +64,8 @@ public abstract class AetherDbContext<TDbContext>(
         try
         {
             TrackEntityStates();
-            
-            if (_eventContext != null)
-            {
-                return await SaveChangesWithDomainEvents(acceptAllChangesOnSuccess, cancellationToken);
-            }
-            
-            var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
-            return result;
+            // Domain event collection and dispatch handled by UoW or calling code
+            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
         }
         catch (DbUpdateConcurrencyException ex)
         {
@@ -110,175 +93,6 @@ public abstract class AetherDbContext<TDbContext>(
         CancellationToken cancellationToken = default)
     {
         return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
-    }
-
-    private async Task<int> SaveChangesWithDomainEvents(bool acceptAllChangesOnSuccess = true, CancellationToken cancellationToken = default)
-    {
-        // Check if we're in a transaction managed by ITransactionService
-        if (_transactionService?.HasActiveTransaction == true)
-        {
-            return await SaveChangesWithTransactionAwareEvents(acceptAllChangesOnSuccess, cancellationToken);
-        }
-
-        // Normal flow - no active transaction service
-        return await SaveChangesWithImmediateEvents(acceptAllChangesOnSuccess, cancellationToken);
-    }
-
-    private async Task<int> SaveChangesWithTransactionAwareEvents(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken)
-    {
-        // 1) Collect events from tracked aggregate roots
-        var aggregates = ChangeTracker
-            .Entries()
-            .Where(e => e.Entity is IAggregateRoot)
-            .Select(e => (IAggregateRoot)e.Entity)
-            .ToList();
-
-        // 2) Collect events by type
-        var preCommitEvents = aggregates
-            .SelectMany(a => GetDomainEvents(a))
-            .OfType<IPreCommitEvent>()
-            .ToList();
-
-        var postCommitEvents = aggregates
-            .SelectMany(a => GetDomainEvents(a))
-            .OfType<IPostCommitEvent>()
-            .ToList();
-
-        var distributedEvents = aggregates
-            .SelectMany(a => GetDistributedEvents(a))
-            .ToList();
-
-        // 3) Dispatch pre-commit events (within transaction)
-        if (preCommitEvents.Count > 0 && _eventContext != null)
-        {
-            await _eventContext.DispatchPreCommitEventsAsync(preCommitEvents, cancellationToken);
-        }
-
-        // 4) Save changes to database
-        var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
-
-        // 5) Store post-commit and distributed events for later dispatch
-        if (_transactionService is ITransactionEventStorage eventStorage)
-        {
-            eventStorage.StorePostCommitEvents(postCommitEvents);
-            eventStorage.StoreDistributedEvents(distributedEvents);
-        }
-
-        // 6) Clear events from aggregates
-        foreach (var aggregate in aggregates)
-        {
-            ClearDomainEvents(aggregate);
-            ClearDistributedEvents(aggregate);
-        }
-
-        return result;
-    }
-
-    private async Task<int> SaveChangesWithImmediateEvents(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken)
-    {
-        // 1) Collect events from tracked aggregate roots
-        var aggregates = ChangeTracker
-            .Entries()
-            .Where(e => e.Entity is IAggregateRoot)
-            .Select(e => (IAggregateRoot)e.Entity)
-            .ToList();
-
-        // 2) Collect local events
-        var preCommitEvents = aggregates
-            .SelectMany(a => GetDomainEvents(a))
-            .OfType<IPreCommitEvent>()
-            .ToList();
-
-        var postCommitEvents = aggregates
-            .SelectMany(a => GetDomainEvents(a))
-            .OfType<IPostCommitEvent>()
-            .ToList();
-
-        // 3) Collect distributed events
-        var distributedEvents = aggregates
-            .SelectMany(a => GetDistributedEvents(a))
-            .ToList();
-
-        // 4) Dispatch pre-commit events (within transaction)
-        if (preCommitEvents.Count > 0 && _eventContext != null)
-        {
-            await _eventContext.DispatchPreCommitEventsAsync(preCommitEvents, cancellationToken);
-        }
-
-        // 5) Commit changes to database
-        var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
-
-        try
-        {
-            // 6) Dispatch post-commit events (after successful save)
-            if (postCommitEvents.Count > 0 && _eventContext != null)
-            {
-                await _eventContext.DispatchPostCommitEventsAsync(postCommitEvents, cancellationToken);
-            }
-
-            // 7) Publish distributed events (after local events)
-            if (distributedEvents.Count > 0 && _eventContext != null)
-            {
-                await _eventContext.PublishDistributedEventsAsync(distributedEvents, cancellationToken);
-            }
-        }
-        finally
-        {
-            // 8) Clear all events from aggregates (important for idempotency)
-            foreach (var aggregate in aggregates)
-            {
-                ClearDomainEvents(aggregate);
-                ClearDistributedEvents(aggregate);
-            }
-        }
-
-        return result;
-    }
-
-    private static IEnumerable<IDomainEvent> GetDomainEvents(IAggregateRoot aggregate)
-    {
-        // Use reflection to get DomainEvents property from BasicAggregateRoot
-        var domainEventsProperty = aggregate.GetType()
-            .GetProperty("DomainEvents", BindingFlags.Public | BindingFlags.Instance);
-        
-        if (domainEventsProperty?.GetValue(aggregate) is IEnumerable<IDomainEvent> events)
-        {
-            return events;
-        }
-
-        return Enumerable.Empty<IDomainEvent>();
-    }
-
-    private static void ClearDomainEvents(IAggregateRoot aggregate)
-    {
-        // Use reflection to call ClearDomainEvents method from BasicAggregateRoot
-        var clearMethod = aggregate.GetType()
-            .GetMethod("ClearDomainEvents", BindingFlags.Public | BindingFlags.Instance);
-        
-        clearMethod?.Invoke(aggregate, null);
-    }
-
-    private static IEnumerable<IDistributedDomainEvent> GetDistributedEvents(IAggregateRoot aggregate)
-    {
-        // Use reflection to get DistributedEvents property from BasicAggregateRoot
-        var distributedEventsProperty = aggregate.GetType()
-            .GetProperty("DistributedEvents", BindingFlags.Public | BindingFlags.Instance);
-        
-        if (distributedEventsProperty?.GetValue(aggregate) is IEnumerable<IDistributedDomainEvent> events)
-        {
-            return events;
-        }
-
-        return Enumerable.Empty<IDistributedDomainEvent>();
-    }
-
-    private static void ClearDistributedEvents(IAggregateRoot aggregate)
-    {
-        // Use reflection to call ClearDistributedEvents method from BasicAggregateRoot
-        var clearMethod = aggregate.GetType()
-            .GetMethod("ClearDistributedEvents", BindingFlags.Public | BindingFlags.Instance);
-        
-        clearMethod?.Invoke(aggregate, null);
     }
 
     protected virtual void ConfigureBaseProperties<TEntity>(ModelBuilder modelBuilder,
@@ -407,6 +221,50 @@ public abstract class AetherDbContext<TDbContext>(
                     }
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Collects all domain events from tracked entities that implement IHasDomainEvents.
+    /// Public to allow UoW to collect events before commit.
+    /// </summary>
+    public List<DomainEventEnvelope> CollectDomainEvents()
+    {
+        var domainEvents = new List<DomainEventEnvelope>();
+
+        var entitiesWithEvents = ChangeTracker.Entries()
+            .Where(e => e.Entity is IHasDomainEvents)
+            .Select(e => e.Entity as IHasDomainEvents)
+            .Where(e => e != null)
+            .ToList();
+
+        foreach (var entity in entitiesWithEvents)
+        {
+            var events = entity!.GetDomainEvents();
+            if (events.Any())
+            {
+                domainEvents.AddRange(events);
+            }
+        }
+
+        return domainEvents;
+    }
+
+    /// <summary>
+    /// Clears all domain events from tracked entities that implement IHasDomainEvents.
+    /// Public to allow UoW to clear events after successful dispatch.
+    /// </summary>
+    public void ClearDomainEvents()
+    {
+        var entitiesWithEvents = ChangeTracker.Entries()
+            .Where(e => e.Entity is IHasDomainEvents)
+            .Select(e => e.Entity as IHasDomainEvents)
+            .Where(e => e != null)
+            .ToList();
+
+        foreach (var entity in entitiesWithEvents)
+        {
+            entity!.ClearDomainEvents();
         }
     }
 }

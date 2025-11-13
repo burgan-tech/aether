@@ -2,8 +2,10 @@ using System;
 using BBT.Aether.Auditing;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Entities.Auditing;
+using BBT.Aether.Domain.EntityFrameworkCore.ValueComparers;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace BBT.Aether.Domain.EntityFrameworkCore.Modeling;
 
@@ -20,12 +22,28 @@ public static class AetherEntityTypeBuilderExtensions
         b.TryConfigureModificationAudited();
         b.TryConfigureCreatedBy();
         b.TryConfigureModifiedBy();
+        b.TryConfigureExtraProperties();
     }
 
     public static void ConfigureConcurrencyStamp<T>(this EntityTypeBuilder<T> b)
         where T : class, IHasConcurrencyStamp
     {
         b.As<EntityTypeBuilder>().TryConfigureConcurrencyStamp();
+    }
+    
+    public static void TryConfigureExtraProperties(this EntityTypeBuilder b)
+    {
+        if (!b.Metadata.ClrType.IsAssignableTo<IHasExtraProperties>())
+        {
+            return;
+        }
+
+        var type = typeof(ExtraPropertiesValueConverter<>).MakeGenericType(b.Metadata.ClrType);
+        var extraPropertiesValueConverter = Activator.CreateInstance(type)!.As<ValueConverter<ExtraPropertyDictionary, string>>();
+        b.Property<ExtraPropertyDictionary>(nameof(IHasExtraProperties.ExtraProperties))
+            .HasColumnName(nameof(IHasExtraProperties.ExtraProperties))
+            .HasConversion(extraPropertiesValueConverter)
+            .Metadata.SetValueComparer(new ExtraPropertyDictionaryValueComparer());
     }
 
     public static void TryConfigureConcurrencyStamp(this EntityTypeBuilder b)

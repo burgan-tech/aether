@@ -14,7 +14,7 @@ public interface IBasicRepository<TEntity> : IReadOnlyBasicRepository<TEntity>
     /// <param name="entity">Inserted entity</param>
     /// <param name="saveChanges"></param>
     /// <param name="cancellationToken">A <see cref="T:System.Threading.CancellationToken" /> to observe while waiting for the task to complete.</param>
-    Task<TEntity> InsertAsync(TEntity entity, bool saveChanges = true, CancellationToken cancellationToken = default);
+    Task<TEntity> InsertAsync(TEntity entity, bool saveChanges = false, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Updates an existing entity.
@@ -22,7 +22,7 @@ public interface IBasicRepository<TEntity> : IReadOnlyBasicRepository<TEntity>
     /// <param name="entity">Entity</param>
     /// <param name="saveChanges"></param>
     /// <param name="cancellationToken">A <see cref="T:System.Threading.CancellationToken" /> to observe while waiting for the task to complete.</param>
-    Task<TEntity> UpdateAsync(TEntity entity, bool saveChanges = true, CancellationToken cancellationToken = default);
+    Task<TEntity> UpdateAsync(TEntity entity, bool saveChanges = false, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Deletes an entity.
@@ -30,7 +30,7 @@ public interface IBasicRepository<TEntity> : IReadOnlyBasicRepository<TEntity>
     /// <param name="entity">Entity to be deleted</param>
     /// <param name="saveChanges"></param>
     /// <param name="cancellationToken">A <see cref="T:System.Threading.CancellationToken" /> to observe while waiting for the task to complete.</param>
-    Task DeleteAsync(TEntity entity, bool saveChanges = true, CancellationToken cancellationToken = default);
+    Task DeleteAsync(TEntity entity, bool saveChanges = false, CancellationToken cancellationToken = default);
 
     Task SaveChangesAsync(CancellationToken cancellationToken = default);
 }
@@ -44,5 +44,5 @@ public interface IBasicRepository<TEntity, TKey> : IBasicRepository<TEntity>, IR
     /// <param name="id">Primary key of the entity</param>
     /// <param name="saveChanges"></param>
     /// <param name="cancellationToken">A <see cref="T:System.Threading.CancellationToken" /> to observe while waiting for the task to complete.</param>
-    Task DeleteAsync(TKey id, bool saveChanges = true, CancellationToken cancellationToken = default);
+    Task DeleteAsync(TKey id, bool saveChanges = false, CancellationToken cancellationToken = default);
 }

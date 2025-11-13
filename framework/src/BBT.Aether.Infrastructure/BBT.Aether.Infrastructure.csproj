@@ -20,7 +20,6 @@
         <PackageReference Include="Dapr.Jobs"/>
         <PackageReference Include="AutoMapper"/>
         <PackageReference Include="StackExchange.Redis"/>
-        <PackageReference Include="Microsoft.EntityFrameworkCore"/>
         <PackageReference Include="Microsoft.EntityFrameworkCore.Relational"/>
     </ItemGroup>
     
