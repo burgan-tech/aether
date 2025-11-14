@@ -17,8 +17,7 @@ public class DefaultHttpExceptionStatusCodeFinder(IOptions<AetherExceptionHttpSt
 
     public virtual HttpStatusCode GetStatusCode(HttpContext httpContext, Exception exception)
     {
-        if (exception is IHasHttpStatusCode exceptionWithHttpStatusCode &&
-            exceptionWithHttpStatusCode.HttpStatusCode > 0)
+        if (exception is IHasHttpStatusCode { HttpStatusCode: > 0 } exceptionWithHttpStatusCode)
         {
             return (HttpStatusCode)exceptionWithHttpStatusCode.HttpStatusCode;
         }
@@ -63,14 +62,14 @@ public class DefaultHttpExceptionStatusCodeFinder(IOptions<AetherExceptionHttpSt
     {
         return prefix switch
         {
-            "validation" => HttpStatusCode.BadRequest,
-            "conflict" => HttpStatusCode.Conflict,
-            "notfound" => HttpStatusCode.NotFound,
-            "unauthorized" => HttpStatusCode.Unauthorized,
-            "forbidden" => HttpStatusCode.Forbidden,
-            "dependency" => HttpStatusCode.BadGateway,
-            "transient" => HttpStatusCode.ServiceUnavailable,   
-            "failure" => HttpStatusCode.InternalServerError,
+            ErrorCodes.Prefixes.Validation => HttpStatusCode.BadRequest,
+            ErrorCodes.Prefixes.Conflict => HttpStatusCode.Conflict,
+            ErrorCodes.Prefixes.NotFound => HttpStatusCode.NotFound,
+            ErrorCodes.Prefixes.Unauthorized => HttpStatusCode.Unauthorized,
+            ErrorCodes.Prefixes.Forbidden => HttpStatusCode.Forbidden,
+            ErrorCodes.Prefixes.Dependency => HttpStatusCode.BadGateway,
+            ErrorCodes.Prefixes.Transient => HttpStatusCode.ServiceUnavailable,   
+            ErrorCodes.Prefixes.Failure => HttpStatusCode.InternalServerError,
             _ => HttpStatusCode.InternalServerError
         };
     }

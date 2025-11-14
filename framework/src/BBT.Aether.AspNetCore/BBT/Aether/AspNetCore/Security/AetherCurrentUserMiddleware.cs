@@ -4,7 +4,7 @@ using Microsoft.AspNetCore.Http;
 
 namespace BBT.Aether.AspNetCore.Security;
 
-public class AetherCurrentUserMiddleware(ICurrentUser currentUser, HeaderCurrentUserResolver currentUserResolver)
+public class AetherCurrentUserMiddleware(ICurrentUser currentUser, ICurrentUserResolver currentUserResolver)
     : IMiddleware
 {
     public async Task InvokeAsync(HttpContext context, RequestDelegate next)
