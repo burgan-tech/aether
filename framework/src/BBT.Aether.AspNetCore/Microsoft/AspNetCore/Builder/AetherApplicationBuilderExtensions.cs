@@ -15,6 +15,10 @@ public static class AetherApplicationBuilderExtensions
             .UseMiddleware<AetherCurrentUserMiddleware>();
     }
 
+    /// <summary>
+    /// Adds correlation ID and trace context middleware to the application pipeline.
+    /// This middleware handles both correlation ID and OpenTelemetry trace context headers.
+    /// </summary>
     public static IApplicationBuilder UseCorrelationId(this IApplicationBuilder app)
     {
         return app

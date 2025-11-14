@@ -4,7 +4,9 @@ using System.Linq;
 using BBT.Aether.AspNetCore.ExceptionHandling;
 using BBT.Aether.AspNetCore.Security;
 using BBT.Aether.AspNetCore.Tracing;
+using BBT.Aether.Users;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.Configuration;
 
@@ -25,8 +27,8 @@ public static class AetherAspNetCoreModuleServiceCollectionExtensions
         //Exception Handler
         services.AddTransient<IHttpExceptionStatusCodeFinder, DefaultHttpExceptionStatusCodeFinder>();
         services.AddExceptionHandler();
-        //Header Current User
-        services.AddTransient<HeaderCurrentUserResolver>();
+        //Current User Resolver
+        services.AddTransient<ICurrentUserResolver, HeaderCurrentUserResolver>();
 
         //Middleware
         services.AddTransient<AetherCurrentUserMiddleware>();
@@ -41,8 +43,23 @@ public static class AetherAspNetCoreModuleServiceCollectionExtensions
 
     private static IServiceCollection AddExceptionHandler(this IServiceCollection services)
     {
+        services.AddSingleton<IProblemDetailsFactory, ProblemDetailsFactory>();
         services.AddExceptionHandler<AetherExceptionHandler>();
         services.AddProblemDetails();
+        
+        // Disable automatic ModelState validation responses
+        // We'll handle validation through ModelStateValidationFilter -> AetherValidationException -> AetherExceptionHandler
+        services.Configure<ApiBehaviorOptions>(options =>
+        {
+            options.SuppressModelStateInvalidFilter = true;
+        });
+        
+        // Add the global action filter that converts ModelState errors to AetherValidationException
+        services.AddControllers(options =>
+        {
+            options.Filters.Add<AetherExceptionFilter>();
+        });
+        
         return services;
     }
 

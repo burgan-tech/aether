@@ -15,14 +15,38 @@ using Microsoft.EntityFrameworkCore.Storage;
 
 namespace BBT.Aether.Domain.EntityFrameworkCore;
 
-public class EfCoreRepository<TDbContext, TEntity>(
-    TDbContext dbContext,
-    IServiceProvider serviceProvider,
-    IAmbientUnitOfWorkAccessor uowAccessor)
-    : RepositoryBase<TEntity>(serviceProvider), IEfCoreRepository<TEntity>
+public class EfCoreRepository<TDbContext, TEntity> : RepositoryBase<TEntity>, IEfCoreRepository<TEntity>
     where TDbContext : AetherDbContext<TDbContext>
     where TEntity : class, IEntity
 {
+    private readonly TDbContext _dbContext;
+
+    /// <summary>
+    /// Initializes a new instance with explicit service provider (recommended).
+    /// </summary>
+    public EfCoreRepository(
+        TDbContext dbContext,
+        IServiceProvider serviceProvider)
+        : base(serviceProvider)
+    {
+        _dbContext = dbContext;
+    }
+
+    /// <summary>
+    /// Initializes a new instance relying on AmbientServiceProvider.
+    /// </summary>
+    public EfCoreRepository(TDbContext dbContext)
+        : base()
+    {
+        _dbContext = dbContext;
+    }
+
+    /// <summary>
+    /// Gets the ambient unit of work accessor through lazy service provider.
+    /// </summary>
+    protected IAmbientUnitOfWorkAccessor UowAccessor =>
+        LazyServiceProvider.LazyGetRequiredService<IAmbientUnitOfWorkAccessor>();
+
     public IGuidGenerator GuidGenerator =>
         LazyServiceProvider.LazyGetService<IGuidGenerator>(SimpleGuidGenerator.Instance);
 
@@ -31,7 +55,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
     protected virtual bool ShouldSaveChanges(bool saveChanges)
     {
         // Don't save changes if within an ambient unit of work
-        return saveChanges && uowAccessor.Current == null;
+        return saveChanges && UowAccessor.Current == null;
     }
 
     async Task<DbContext> IEfCoreRepository<TEntity>.GetDbContextAsync()
@@ -41,7 +65,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
 
     protected virtual Task<TDbContext> GetDbContextAsync()
     {
-        return Task.FromResult(dbContext);
+        return Task.FromResult(_dbContext);
     }
 
     Task<DbSet<TEntity>> IEfCoreRepository<TEntity>.GetDbSetAsync()
@@ -289,15 +313,28 @@ public class EfCoreRepository<TDbContext, TEntity>(
     }
 }
 
-public class EfCoreRepository<TDbContext, TEntity, TKey>(
-    TDbContext dbContext,
-    IServiceProvider serviceProvider,
-    IAmbientUnitOfWorkAccessor uowAccessor)
-    : EfCoreRepository<TDbContext, TEntity>(dbContext, serviceProvider, uowAccessor),
+public class EfCoreRepository<TDbContext, TEntity, TKey> : EfCoreRepository<TDbContext, TEntity>,
         IEfCoreRepository<TEntity, TKey>
     where TDbContext : AetherDbContext<TDbContext>
     where TEntity : class, IEntity<TKey>
 {
+    /// <summary>
+    /// Initializes a new instance with explicit service provider (recommended).
+    /// </summary>
+    public EfCoreRepository(
+        TDbContext dbContext,
+        IServiceProvider serviceProvider)
+        : base(dbContext, serviceProvider)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance relying on AmbientServiceProvider.
+    /// </summary>
+    public EfCoreRepository(TDbContext dbContext)
+        : base(dbContext)
+    {
+    }
     public virtual async Task<TEntity> GetAsync(TKey id,
         bool includeDetails = true,
         CancellationToken cancellationToken = default)
