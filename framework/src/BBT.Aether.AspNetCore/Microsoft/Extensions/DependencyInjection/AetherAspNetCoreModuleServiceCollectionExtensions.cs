@@ -54,7 +54,6 @@ public static class AetherAspNetCoreModuleServiceCollectionExtensions
             options.SuppressModelStateInvalidFilter = true;
         });
         
-        // Add the global action filter that converts ModelState errors to AetherValidationException
         services.AddControllers(options =>
         {
             options.Filters.Add<AetherExceptionFilter>();

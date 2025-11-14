@@ -65,29 +65,21 @@ public class ProblemDetailsFactory(
         };
 
         // Populate the standard RFC 7807 errors dictionary
-        if (error.ValidationErrors != null && error.ValidationErrors.Count > 0)
+        if (error.ValidationErrors != null && error.ValidationErrors.Any())
         {
             foreach (var validationError in error.ValidationErrors)
             {
-                var memberNames = validationError.MemberNames?.ToArray() ?? Array.Empty<string>();
-                
-                // If no member names, use a default key
-                if (memberNames.Length == 0)
-                {
-                    memberNames = new[] { "general" };
-                }
+                var errorsByMember = error.ValidationErrors
+                .SelectMany(ve => (ve.MemberNames?.Any() == true ? ve.MemberNames : new[] { "general" })
+                    .Select(mn => new { MemberName = mn, ve.ErrorMessage }))
+                .GroupBy(x => x.MemberName, x => x.ErrorMessage ?? string.Empty)
+                .ToDictionary(g => g.Key, g => g.ToArray());
 
-                foreach (var memberName in memberNames)
+                foreach (var kvp in errorsByMember)
                 {
-                    if (!validationProblemDetails.Errors.ContainsKey(memberName))
+                    if (!validationProblemDetails.Errors.ContainsKey(kvp.Key))
                     {
-                        validationProblemDetails.Errors[memberName] = new[] { validationError.ErrorMessage ?? string.Empty };
-                    }
-                    else
-                    {
-                        var existingErrors = validationProblemDetails.Errors[memberName].ToList();
-                        existingErrors.Add(validationError.ErrorMessage ?? string.Empty);
-                        validationProblemDetails.Errors[memberName] = existingErrors.ToArray();
+                        validationProblemDetails.Errors.Add(kvp.Key, kvp.Value);
                     }
                 }
             }

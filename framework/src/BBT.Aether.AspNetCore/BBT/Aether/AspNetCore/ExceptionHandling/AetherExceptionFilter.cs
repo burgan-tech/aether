@@ -33,7 +33,7 @@ public class AetherExceptionFilter(IProblemDetailsFactory problemDetailsFactory)
             return false;
         }
         
-        return false;
+        return true;
     }
 
     protected virtual Task HandleAndWrapException(ExceptionContext context)
