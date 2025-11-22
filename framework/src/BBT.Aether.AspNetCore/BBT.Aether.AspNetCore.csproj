@@ -35,6 +35,7 @@
         <PackageReference Include="OpenTelemetry.Exporter.Console"/>
         <PackageReference Include="Microsoft.Extensions.Diagnostics"/>
         <PackageReference Include="Microsoft.AspNetCore.ResponseCompression"/>
+        <ProjectReference Include="..\BBT.Aether.Abstractions\BBT.Aether.Abstractions.csproj"/>
         <ProjectReference Include="..\BBT.Aether.Application\BBT.Aether.Application.csproj"/>
         <ProjectReference Include="..\BBT.Aether.Core\BBT.Aether.Core.csproj"/>
         <ProjectReference Include="..\BBT.Aether.Infrastructure\BBT.Aether.Infrastructure.csproj" />

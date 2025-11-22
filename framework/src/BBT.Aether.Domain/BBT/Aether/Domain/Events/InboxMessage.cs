@@ -1,6 +1,7 @@
 using System;
 using BBT.Aether.Auditing;
 using BBT.Aether.Domain.Entities;
+using BBT.Aether.Events;
 
 namespace BBT.Aether.Domain.Events;
 
@@ -61,6 +62,14 @@ public class InboxMessage : Entity<string>, IHasExtraProperties, IHasCreatedAt
     /// Gets or sets extra properties for storing metadata (pubSubName, version, etc.).
     /// </summary>
     public ExtraPropertyDictionary ExtraProperties { get; private set; } = new ExtraPropertyDictionary();
+
+    /// <summary>
+    /// Marks the message as currently being processed.
+    /// </summary>
+    public void MarkAsProcessing()
+    {
+        Status = IncomingEventStatus.Processing;
+    }
 
     /// <summary>
     /// Marks the message as processed.

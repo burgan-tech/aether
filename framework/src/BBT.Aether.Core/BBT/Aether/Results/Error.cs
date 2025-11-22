@@ -132,6 +132,17 @@ public readonly record struct Error(
     /// <param name="target">The operation that failed transiently</param>
     public static Error Transient(string code, string? message = null, string? target = null)
         => new(ErrorCodes.Prefixes.Transient, $"{code}", message, Target: target);
+    
+    /// <summary>
+    /// Creates a not supported error.
+    /// Used when a requested feature is not supported.
+    /// Maps to HTTP 400 Bad Request.
+    /// </summary>
+    /// <param name="code">Specific not supported error code</param>
+    /// <param name="message">Error message</param>
+    /// <param name="target">The feature that is not supported</param>
+    public static Error NotSupported(string code, string? message = null, string? target = null)
+        => new(ErrorCodes.Prefixes.NotSupported, $"{code}", message, Target: target);
 
     /// <summary>
     /// Creates a general failure error.

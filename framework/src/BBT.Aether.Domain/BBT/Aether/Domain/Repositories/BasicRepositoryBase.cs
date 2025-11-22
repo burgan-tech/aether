@@ -40,8 +40,8 @@ public abstract class BasicRepositoryBase<TEntity> :
         ?? AmbientServiceProvider.Root
         ?? throw new InvalidOperationException(
             "No service provider available. Either inject IServiceProvider in constructor or ensure AmbientServiceProvider is configured.");
-    
-    public ILazyServiceProvider LazyServiceProvider => ServiceProvider.GetRequiredService<ILazyServiceProvider>();
+
+    protected ILazyServiceProvider LazyServiceProvider => ServiceProvider.GetRequiredService<ILazyServiceProvider>();
     
     public abstract Task<TEntity> InsertAsync(TEntity entity, bool saveChanges = false, CancellationToken cancellationToken = default);
 

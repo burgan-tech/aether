@@ -12,12 +12,13 @@ public static class InboxModelBuilderExtensions
     /// Configures the InboxMessage entity with appropriate table name, indexes, and constraints.
     /// </summary>
     /// <param name="builder">The ModelBuilder instance</param>
+    /// <param name="schemaName">Schema name</param>
     /// <returns>The ModelBuilder for method chaining</returns>
-    public static ModelBuilder ConfigureInbox(this ModelBuilder builder)
+    public static ModelBuilder ConfigureInbox(this ModelBuilder builder, string? schemaName = null)
     {
         builder.Entity<InboxMessage>(entity =>
         {
-            entity.ToTable("InboxMessages");
+            entity.ToTable("InboxMessages",  schemaName);
 
             entity.HasKey(e => e.Id);
 

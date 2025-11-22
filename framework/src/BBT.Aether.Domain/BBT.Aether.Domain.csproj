@@ -16,6 +16,7 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <ProjectReference Include="..\BBT.Aether.Abstractions\BBT.Aether.Abstractions.csproj"/>
         <ProjectReference Include="..\BBT.Aether.Core\BBT.Aether.Core.csproj"/>
     </ItemGroup>
 

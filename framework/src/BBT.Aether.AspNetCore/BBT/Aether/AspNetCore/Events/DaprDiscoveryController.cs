@@ -15,7 +15,7 @@ public abstract class DaprDiscoveryController(IDistributedEventInvokerRegistry i
 {
     protected readonly IDistributedEventInvokerRegistry InvokerRegistry = invokerRegistry;
 
-    protected static readonly JsonSerializerOptions JsonOptions = new()
+    protected readonly static JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull

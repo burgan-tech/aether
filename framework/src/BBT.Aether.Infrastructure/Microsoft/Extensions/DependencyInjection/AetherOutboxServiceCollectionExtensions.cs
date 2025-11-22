@@ -42,6 +42,9 @@ public static class AetherOutboxServiceCollectionExtensions
         // Register outbox store (replaces NullOutboxStore if registered)
         services.AddScoped<IOutboxStore, EfCoreOutboxStore<TDbContext>>();
 
+        // Register outbox processor
+        services.AddSingleton<IOutboxProcessor, OutboxProcessor<TDbContext>>();
+        
         // Register background processor
         // services.AddHostedService<OutboxProcessor<TDbContext>>();
 
@@ -51,7 +54,7 @@ public static class AetherOutboxServiceCollectionExtensions
     /// <summary>
     /// Adds Inbox pattern support for the specified DbContext.
     /// The DbContext must implement IHasEfCoreInbox interface.
-    /// Registers the inbox store and cleanup service.
+    /// Registers the inbox store and processor service.
     /// </summary>
     /// <typeparam name="TDbContext">The DbContext type that implements IHasEfCoreInbox</typeparam>
     /// <param name="services">The service collection</param>
@@ -78,8 +81,11 @@ public static class AetherOutboxServiceCollectionExtensions
         // Register inbox store (replaces NullInboxStore if registered)
         services.AddScoped<IInboxStore, EfCoreInboxStore<TDbContext>>();
 
-        // Register cleanup service
-        // services.AddHostedService<InboxCleanupService<TDbContext>>();
+        // Register inbox processor
+        services.AddSingleton<IInboxProcessor, InboxProcessor<TDbContext>>();
+
+        // Note: To run the processor as a background service, add a hosted service wrapper:
+        // services.AddHostedService<InboxBackgroundService>();
 
         return services;
     }

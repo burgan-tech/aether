@@ -1,5 +1,6 @@
 using System;
 using System.Text.Json;
+using BBT.Aether.Events;
 
 namespace BBT.Aether.Events;
 

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Auditing;
+using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Guids;
 using BBT.Aether.Reflection;
@@ -17,7 +18,8 @@ namespace BBT.Aether.Domain.EntityFrameworkCore.Interceptors;
 
 public class AuditInterceptor(
     ICurrentUser currentUser,
-    IGuidGenerator guidGenerator)
+    IGuidGenerator guidGenerator,
+    IClock clock)
     : SaveChangesInterceptor
 {
     public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
@@ -51,6 +53,7 @@ public class AuditInterceptor(
         CheckAndSetId(entry);
         SetConcurrencyStampIfNull(entry);
         SetCreationAuditProperties(entry);
+        NormalizeDateTimeProperties(entry);
     }
 
     private void CheckAndSetId(EntityEntry entry)
@@ -120,7 +123,7 @@ public class AuditInterceptor(
     {
         if (entry.Entity is IHasCreatedAt)
         {
-            entry.Property("CreatedAt").CurrentValue = DateTime.UtcNow;
+            entry.Property("CreatedAt").CurrentValue = clock.UtcNow;
         }
 
         if (entry.Entity is ICreationAuditedObject)
@@ -149,6 +152,7 @@ public class AuditInterceptor(
         {
             IncrementEntityVersionProperty(entry);
             SetModificationAuditProperties(entry);
+            NormalizeDateTimeProperties(entry);
 
             if (entry.Entity is ISoftDelete && entry.Entity.As<ISoftDelete>().IsDeleted)
             {
@@ -161,7 +165,7 @@ public class AuditInterceptor(
     {
         if (entry.Entity is IHasModifyTime)
         {
-            entry.Property("ModifiedAt").CurrentValue = DateTime.UtcNow;
+            entry.Property("ModifiedAt").CurrentValue = clock.UtcNow;
         }
 
         if (entry.Entity is IModifyAuditedObject)
@@ -187,7 +191,7 @@ public class AuditInterceptor(
     {
         if (entry.Entity is IHasDeletionTime)
         {
-            entry.Property("DeletedAt").CurrentValue = DateTime.UtcNow;
+            entry.Property("DeletedAt").CurrentValue = clock.UtcNow;
         }
 
         if (entry.Entity is IDeletionAuditedObject)
@@ -209,6 +213,31 @@ public class AuditInterceptor(
         {
             entry.Property("EntityVersion").CurrentValue =
                 Convert.ToInt32(entry.Property("EntityVersion").CurrentValue ?? 0) + 1;
+        }
+    }
+
+    private void NormalizeDateTimeProperties(EntityEntry entry)
+    {
+        foreach (var property in entry.Properties)
+        {
+            if (property.Metadata.ClrType == typeof(DateTime) || 
+                property.Metadata.ClrType == typeof(DateTime?))
+            {
+                var currentValue = property.CurrentValue;
+                if (currentValue != null && currentValue is DateTime dateTime)
+                {
+                    property.CurrentValue = clock.NormalizeToUtc(dateTime);
+                }
+            }
+            else if (property.Metadata.ClrType == typeof(DateTimeOffset) || 
+                     property.Metadata.ClrType == typeof(DateTimeOffset?))
+            {
+                var currentValue = property.CurrentValue;
+                if (currentValue != null && currentValue is DateTimeOffset dateTimeOffset)
+                {
+                    property.CurrentValue = clock.NormalizeToUtc(dateTimeOffset);
+                }
+            }
         }
     }
 

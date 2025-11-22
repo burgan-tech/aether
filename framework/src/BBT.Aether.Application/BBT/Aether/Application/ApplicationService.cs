@@ -1,7 +1,9 @@
 using System;
+using BBT.Aether.Clock;
 using BBT.Aether.DependencyInjection;
 using BBT.Aether.Guids;
 using BBT.Aether.Mapper;
+using BBT.Aether.Uow;
 using BBT.Aether.Users;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -36,13 +38,14 @@ public abstract class ApplicationService : IApplicationService, IServiceProvider
         ?? throw new InvalidOperationException(
             "No service provider available. Either inject IServiceProvider in constructor or ensure AmbientServiceProvider is configured.");
 
-    public ILazyServiceProvider LazyServiceProvider =>
-        ServiceProvider.GetRequiredService<ILazyServiceProvider>();
-    
+    protected IUnitOfWork? CurrentUnitOfWork => UnitOfWorkManager?.Current;
+
+    protected ILazyServiceProvider LazyServiceProvider => ServiceProvider.GetRequiredService<ILazyServiceProvider>();
     protected ICurrentUser CurrentUser => LazyServiceProvider.LazyGetRequiredService<ICurrentUser>();
     protected IGuidGenerator GuidGenerator => LazyServiceProvider.LazyGetRequiredService<IGuidGenerator>();
     protected IObjectMapper ObjectMapper => LazyServiceProvider.LazyGetRequiredService<IObjectMapper>();
-    
+    protected IUnitOfWorkManager UnitOfWorkManager => LazyServiceProvider.LazyGetRequiredService<IUnitOfWorkManager>();
     protected ILoggerFactory LoggerFactory => LazyServiceProvider.LazyGetRequiredService<ILoggerFactory>();
     protected ILogger Logger => LoggerFactory?.CreateLogger(GetType().FullName!) ?? NullLogger.Instance;
+    protected IClock Clock => LazyServiceProvider.LazyGetRequiredService<IClock>();
 }

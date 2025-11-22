@@ -18,7 +18,7 @@ public abstract class CrudEntityAppService<TEntity, TKey>(
 
     protected async override Task DeleteByIdAsync(TKey id)
     {
-        await Repository.DeleteAsync(id);
+        await Repository.DeleteAsync(id, true);
     }
 
     protected async override Task<TEntity> GetEntityByIdAsync(TKey id)

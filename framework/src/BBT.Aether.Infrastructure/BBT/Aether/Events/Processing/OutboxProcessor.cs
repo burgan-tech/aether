@@ -3,61 +3,52 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using BBT.Aether.Domain.Events;
+using BBT.Aether.Clock;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace BBT.Aether.Events.Processing;
 
 /// <summary>
-/// Background service that processes outbox messages.
+/// Processor that processes outbox messages.
 /// Retries failed messages with exponential backoff and cleans up old processed messages.
 /// </summary>
 public class OutboxProcessor<TDbContext>(
-    IServiceProvider serviceProvider,
+    IServiceScopeFactory scopeFactory,
+    IClock clock,
     ILogger<OutboxProcessor<TDbContext>> logger,
-    AetherOutboxOptions options)
-    : BackgroundService
+    AetherOutboxOptions options) : IOutboxProcessor
     where TDbContext : DbContext, IHasEfCoreOutbox
 {
-    protected async override Task ExecuteAsync(CancellationToken stoppingToken)
+    /// <inheritdoc />
+    public virtual async Task RunAsync(CancellationToken cancellationToken = default)
     {
-        logger.LogInformation("OutboxProcessor started");
-
-        while (!stoppingToken.IsCancellationRequested)
+        try
         {
-            try
-            {
-                await ProcessOutboxMessagesAsync(stoppingToken);
-                await CleanupProcessedMessagesAsync(stoppingToken);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Error processing outbox messages");
-            }
-
-            await Task.Delay(options.ProcessingInterval, stoppingToken);
+            await ProcessOutboxMessagesAsync(cancellationToken);
+            await CleanupProcessedMessagesAsync(cancellationToken);
         }
-
-        logger.LogInformation("OutboxProcessor stopped");
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error processing outbox messages");
+        }
     }
 
-    private async Task ProcessOutboxMessagesAsync(CancellationToken cancellationToken)
+    protected virtual async Task ProcessOutboxMessagesAsync(CancellationToken cancellationToken)
     {
-        await using var scope = serviceProvider.CreateAsyncScope();
+        await using var scope = scopeFactory.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<TDbContext>();
         var eventBus = scope.ServiceProvider.GetRequiredService<IDistributedEventBus>();
         var eventBusOptions = scope.ServiceProvider.GetRequiredService<AetherEventBusOptions>();
-        var now = DateTime.UtcNow;
+        var now = clock.UtcNow;
 
         // Get unprocessed messages or messages that are due for retry
         var messages = await dbContext.OutboxMessages
             .Where(m => m.ProcessedAt == null &&
-                       m.RetryCount < options.MaxRetryCount &&
-                       (m.NextRetryAt == null || m.NextRetryAt <= now))
+                        m.RetryCount < options.MaxRetryCount &&
+                        (m.NextRetryAt == null || m.NextRetryAt <= now))
             .OrderBy(m => m.CreatedAt)
             .Take(options.BatchSize)
             .ToListAsync(cancellationToken);
@@ -80,19 +71,17 @@ public class OutboxProcessor<TDbContext>(
             {
                 // Get topicName and pubSubName from ExtraProperties
                 var topicName = message.ExtraProperties.GetOrDefault("TopicName")?.ToString() ?? message.EventName;
-                var pubSubName = message.ExtraProperties.GetOrDefault("PubSubName")?.ToString() ?? eventBusOptions.PubSubName;
-                
-                logger.LogDebug("Publishing outbox message {MessageId} of type {EventName} to topic {TopicName}", 
-                    message.Id, message.EventName, topicName);
-                
+                var pubSubName = message.ExtraProperties.GetOrDefault("PubSubName")?.ToString() ??
+                                 eventBusOptions.PubSubName;
+
                 // EventData is already serialized CloudEventEnvelope bytes
                 var serializedEnvelope = message.EventData;
-                
+
                 // Publish using IDistributedEventBus abstraction
                 await eventBus.PublishEnvelopeAsync(serializedEnvelope, topicName, pubSubName, cancellationToken);
 
                 // Mark as processed
-                message.ProcessedAt = DateTime.UtcNow;
+                message.ProcessedAt = clock.UtcNow;
                 message.LastError = null;
 
                 logger.LogDebug("Successfully published outbox message {MessageId}", message.Id);
@@ -100,10 +89,10 @@ public class OutboxProcessor<TDbContext>(
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to publish outbox message {MessageId}", message.Id);
-                
+
                 message.RetryCount++;
-                message.LastError = ex.Message.Length > 4000 
-                    ? ex.Message.Substring(0, 4000) 
+                message.LastError = ex.Message.Length > 4000
+                    ? ex.Message.Substring(0, 4000)
                     : ex.Message;
                 message.NextRetryAt = CalculateNextRetryTime(message.RetryCount);
             }
@@ -112,12 +101,12 @@ public class OutboxProcessor<TDbContext>(
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    private async Task CleanupProcessedMessagesAsync(CancellationToken cancellationToken)
+    protected virtual async Task CleanupProcessedMessagesAsync(CancellationToken cancellationToken)
     {
-        await using var scope = serviceProvider.CreateAsyncScope();
+        await using var scope = scopeFactory.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<TDbContext>();
 
-        var cutoffDate = DateTime.UtcNow - options.RetentionPeriod;
+        var cutoffDate = clock.UtcNow - options.RetentionPeriod;
 
         var processedMessages = await dbContext.OutboxMessages
             .Where(m => m.ProcessedAt != null && m.ProcessedAt < cutoffDate)
@@ -136,8 +125,6 @@ public class OutboxProcessor<TDbContext>(
     {
         // Exponential backoff: baseDelay * 2^(retryCount - 1)
         var delay = options.RetryBaseDelay * Math.Pow(2, retryCount - 1);
-        return DateTime.UtcNow.Add(TimeSpan.FromMilliseconds(delay.TotalMilliseconds));
+        return clock.UtcNow.Add(TimeSpan.FromMilliseconds(delay.TotalMilliseconds));
     }
-
 }
-

@@ -1,6 +1,10 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Clock;
+using BBT.Aether.Events;
 using BBT.Aether.Domain.Events;
 using BBT.Aether.Guids;
 using BBT.Aether.Persistence;
@@ -14,7 +18,8 @@ namespace BBT.Aether.Events;
 public class EfCoreOutboxStore<TDbContext>(
     TDbContext dbContext,
     IEventSerializer eventSerializer,
-    IGuidGenerator guidGenerator) : IOutboxStore
+    IGuidGenerator guidGenerator,
+    IClock clock) : IOutboxStore
     where TDbContext : DbContext, IHasEfCoreOutbox
 {
     public async Task StoreAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default)
@@ -22,14 +27,20 @@ public class EfCoreOutboxStore<TDbContext>(
         // Serialize CloudEventEnvelope to bytes
         var serializedBytes = eventSerializer.Serialize(envelope);
 
-        var outboxMessage = new OutboxMessage(guidGenerator.Create(), envelope.Type, serializedBytes)
+        // Store EventName (Type) for handler resolution
+        var outboxMessage = new Domain.Events.OutboxMessage(guidGenerator.Create(), envelope.Type, serializedBytes)
         {
-            CreatedAt = DateTime.UtcNow,
+            CreatedAt = clock.UtcNow,
             RetryCount = 0,
             ExtraProperties = {
-                // Store metadata in ExtraProperties
-                ["TopicName"] = envelope.Type }
+                // Store full topic name for routing to the message broker
+                ["TopicName"] = envelope.Topic ?? envelope.Type }
         };
+
+        if (envelope.Version.HasValue)
+        {
+            outboxMessage.ExtraProperties["Version"] = envelope.Version.Value;
+        }
 
         if (envelope.Source != null)
         {

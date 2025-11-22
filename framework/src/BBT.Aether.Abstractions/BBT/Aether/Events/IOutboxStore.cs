@@ -15,3 +15,4 @@ public interface IOutboxStore
     /// <param name="cancellationToken">Cancellation token</param>
     Task StoreAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default);
 }
+

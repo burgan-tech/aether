@@ -18,7 +18,8 @@ public abstract class DistributedEventBusBase(
 
     /// <summary>
     /// Creates a CloudEventEnvelope from the event payload using EventMeta&lt;T&gt;.
-    /// The Type is generated from EventNameAttribute on the event type using TopicNameStrategy.
+    /// The Type is set to EventName from EventNameAttribute for handler resolution.
+    /// The Topic is generated using TopicNameStrategy for message broker routing.
     /// The Source is populated from AetherEventBusOptions.DefaultSource.
     /// If subject is null, it will attempt to extract it from properties marked with [EventSubject] attribute.
     /// </summary>
@@ -26,7 +27,8 @@ public abstract class DistributedEventBusBase(
         TEvent payload,
         string? subject = null) where TEvent : class
     {
-        var type = TopicNameStrategy.GetTopicName(typeof(TEvent));
+        var eventName = EventMeta<TEvent>.Name;
+        var topic = TopicNameStrategy.GetTopicName(typeof(TEvent));
         var source = AetherEventBusOptions.DefaultSource
             ?? throw new InvalidOperationException(
                 "DefaultSource must be configured in AetherEventBusOptions. Set AetherEventBusOptions.DefaultSource when configuring the EventBus.");
@@ -36,10 +38,12 @@ public abstract class DistributedEventBusBase(
 
         return new CloudEventEnvelope
         {
-            Type = type,
+            Type = eventName,
+            Topic = topic,
             Source = source,
             Subject = subject,
             DataSchema = EventMeta<TEvent>.DataSchema,
+            Version = EventMeta<TEvent>.Version,
             Data = payload
             // Other properties (SpecVersion, Id, Time, DataContentType) use defaults from CloudEventEnvelope class
         };
@@ -60,8 +64,8 @@ public abstract class DistributedEventBusBase(
     {
         // Create envelope from payload
         var envelope = CreateEnvelope(payload, subject);
-        // Use TopicNameStrategy to get topic name (includes environment prefix if enabled)
-        var topicName = envelope.Type;
+        // Use Topic for routing to the message broker (includes environment prefix if enabled)
+        var topicName = envelope.Topic ?? envelope.Type;
 
         if (useOutbox)
         {
@@ -95,7 +99,9 @@ public abstract class DistributedEventBusBase(
             var serialized = EventSerializer.Serialize(envelope);
             // Use PubSubName from metadata or fall back to default from options
             var pubSubName = metadata.PubSubName ?? AetherEventBusOptions.PubSubName;
-            await PublishToBrokerAsync(envelope.Type, pubSubName, serialized, cancellationToken);
+            // Use Topic for routing to the message broker
+            var topicName = envelope.Topic ?? envelope.Type;
+            await PublishToBrokerAsync(topicName, pubSubName, serialized, cancellationToken);
         }
     }
 
@@ -106,8 +112,10 @@ public abstract class DistributedEventBusBase(
     /// </summary>
     private CloudEventEnvelope CreateEnvelopeFromMetadata(IDistributedEvent @event, EventMetadata metadata, string? subject)
     {
+        // Get EventName for handler resolution
+        var eventName = metadata.EventName;
         // Get topic name using TopicNameStrategy (handles environment prefixing)
-        var type = TopicNameStrategy.GetTopicName(metadata.EventType);
+        var topic = TopicNameStrategy.GetTopicName(metadata.EventType);
         var source = AetherEventBusOptions.DefaultSource
             ?? throw new InvalidOperationException(
                 "DefaultSource must be configured in AetherEventBusOptions. Set AetherEventBusOptions.DefaultSource when configuring the EventBus.");
@@ -117,10 +125,12 @@ public abstract class DistributedEventBusBase(
 
         return new CloudEventEnvelope
         {
-            Type = type,
+            Type = eventName,
+            Topic = topic,
             Source = source,
             Subject = subject,
             DataSchema = metadata.DataSchema,
+            Version = metadata.Version,
             Data = @event
             // Other properties (SpecVersion, Id, Time, DataContentType) use defaults from CloudEventEnvelope class
         };

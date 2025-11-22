@@ -104,7 +104,7 @@ public static class AetherTelemetryServiceCollectionExtensions
                 if (opts.Tracing.EnableAspNetCore)
                 {
                     tracing.AddAspNetCoreInstrumentation(o =>
-                    {
+                        {
                         o.Filter = ctx => !IsExcluded(ctx.Request.Path.Value, excludedPatterns);
 
                         o.EnrichWithHttpRequest = (activity, request) =>

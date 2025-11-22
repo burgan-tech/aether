@@ -14,6 +14,31 @@ Welcome to the comprehensive documentation for Aether Framework - a production-r
 
 ## Core Infrastructure
 
+### [Result Pattern](result-pattern/README.md)
+Type-safe error handling with functional programming patterns for exception-free operations.
+
+**Key Features:**
+- Type-safe success/failure representation
+- Exception-to-Error automatic conversion
+- Monadic operations (Map, Bind, Tap)
+- Railway-oriented programming
+- Async/await support
+- Structured error information
+- ASP.NET Core integration
+
+**Quick Start:**
+```csharp
+// Exception-free error handling
+var result = await ResultExtensions.TryAsync(async ct => 
+    await userService.GetUserAsync(id, ct));
+
+// Railway pattern
+return await GetUserAsync(id)
+    .ThenAsync(user => ValidateUserAsync(user))
+    .ThenAsync(user => ProcessUserAsync(user))
+    .MapAsync(user => user.ToDto());
+```
+
 ### [Repository Pattern](repository-pattern/README.md)
 Clean data access abstraction supporting multiple providers (EF Core, Dapper, MongoDB).
 
@@ -294,6 +319,7 @@ services.RegisterHttpClient<IMyClient, MyHttpClient>();
 
 | Feature | Core | Domain | Infrastructure | AspNetCore | Aspects |
 |---------|------|--------|----------------|------------|---------|
+| **Result Pattern** | ✓ | - | - | ✓ | - |
 | **Repository Pattern** | ✓ | ✓ | ✓ | - | - |
 | **Unit of Work** | ✓ | - | ✓ | ✓ | ✓ |
 | **Entity & Value Object** | - | ✓ | - | - | - |
@@ -347,6 +373,36 @@ BBT.Aether.Core (Base)
 
 ## Migration Guides
 
+### From Exception-Based to Result Pattern
+
+1. Change method return types from `T` to `Result<T>`
+2. Replace `throw` statements with `Result<T>.Fail(Error.*)`
+3. Wrap external calls with `ResultExtensions.Try` or `TryAsync`
+4. Use railway operators (`ThenAsync`, `BindAsync`) for chaining
+5. Convert to ActionResult in controllers using `ToActionResult()`
+6. Update error handling from `try/catch` to checking `IsSuccess`
+
+**Example:**
+```csharp
+// Before
+public async Task<User> GetUserAsync(int id)
+{
+    var user = await _dbContext.Users.FindAsync(id);
+    if (user == null)
+        throw new EntityNotFoundException(typeof(User), id);
+    return user;
+}
+
+// After
+public async Task<Result<User>> GetUserAsync(int id)
+{
+    return await ResultExtensions.TryAsync(async ct => 
+        await _dbContext.Users.FindAsync(id, ct))
+        .EnsureAsync(user => user != null, 
+            Error.NotFound("user_not_found", "User not found"));
+}
+```
+
 ### From Custom Repository to Aether
 
 1. Replace custom repository interfaces with `IRepository<TEntity, TKey>`
@@ -393,6 +449,14 @@ BBT.Aether.Core (Base)
 - Use inbox for critical handlers
 - Monitor outbox processing
 
+### Result Pattern
+- Use Result for business logic validation and rules
+- Use Try methods for external/infrastructure operations
+- Chain operations with railway pattern (ThenAsync, BindAsync)
+- Provide meaningful error codes and messages
+- Preserve validation errors with Error.Validation
+- Convert to ActionResult for API endpoints
+
 ### Performance
 - Use pagination for large datasets
 - Enable query splitting for complex includes
@@ -406,10 +470,11 @@ Aether Framework is built on these principles:
 1. **Clean Architecture** - Clear separation of concerns across layers
 2. **Domain-Driven Design** - Rich domain models with business logic
 3. **SOLID Principles** - Maintainable and extensible code
-4. **Convention over Configuration** - Sensible defaults with override options
-5. **Cloud-Native** - Built for distributed, scalable applications
-6. **Observability First** - OpenTelemetry integration from the ground up
-7. **Developer Experience** - Intuitive APIs and comprehensive documentation
+4. **Exception-Free Error Handling** - Result pattern for explicit, type-safe error handling
+5. **Convention over Configuration** - Sensible defaults with override options
+6. **Cloud-Native** - Built for distributed, scalable applications
+7. **Observability First** - OpenTelemetry integration from the ground up
+8. **Developer Experience** - Intuitive APIs and comprehensive documentation
 
 ## Version Compatibility
 

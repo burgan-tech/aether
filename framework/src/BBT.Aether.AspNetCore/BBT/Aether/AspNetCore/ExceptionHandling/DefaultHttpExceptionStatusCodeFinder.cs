@@ -68,7 +68,8 @@ public class DefaultHttpExceptionStatusCodeFinder(IOptions<AetherExceptionHttpSt
             ErrorCodes.Prefixes.Unauthorized => HttpStatusCode.Unauthorized,
             ErrorCodes.Prefixes.Forbidden => HttpStatusCode.Forbidden,
             ErrorCodes.Prefixes.Dependency => HttpStatusCode.BadGateway,
-            ErrorCodes.Prefixes.Transient => HttpStatusCode.ServiceUnavailable,   
+            ErrorCodes.Prefixes.Transient => HttpStatusCode.ServiceUnavailable,
+            ErrorCodes.Prefixes.NotSupported => HttpStatusCode.BadRequest,   
             ErrorCodes.Prefixes.Failure => HttpStatusCode.InternalServerError,
             _ => HttpStatusCode.InternalServerError
         };

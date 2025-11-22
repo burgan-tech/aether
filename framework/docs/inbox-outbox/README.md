@@ -2,15 +2,61 @@
 
 ## Overview
 
-The Inbox and Outbox patterns ensure reliable message delivery in distributed systems. The Outbox pattern guarantees events are published even if the message broker is temporarily unavailable, while the Inbox pattern ensures idempotent message processing.
+The Inbox and Outbox patterns ensure reliable message delivery in distributed systems. The Outbox pattern guarantees events are published even if the message broker is temporarily unavailable, while the Inbox pattern ensures idempotent message processing with error tracking and retry capabilities.
 
 ## Key Features
 
 - **Transactional Outbox** - Events stored in database with business data
-- **Background Processing** - Automatic retry and delivery
+- **Background Processing** - Automatic retry and delivery via processor interfaces
 - **Inbox for Idempotency** - Prevent duplicate message processing
+- **Error Tracking** - Failed events are tracked with retry information
+- **Extensible Architecture** - Processors implement interfaces, developers control hosting
 - **EF Core Integration** - Seamless database integration
 - **Configurable Retention** - Automatic cleanup of old messages
+
+## Architecture
+
+### Processor Interfaces
+
+Processors implement interfaces rather than inheriting from BackgroundService, giving developers full control over hosting and lifecycle management.
+
+```csharp
+public interface IOutboxProcessor
+{
+    Task RunAsync(CancellationToken cancellationToken = default);
+}
+
+public interface IInboxProcessor
+{
+    Task RunAsync(CancellationToken cancellationToken = default);
+}
+```
+
+### Store Interfaces
+
+Store interfaces provide abstraction for data access operations:
+
+```csharp
+public interface IOutboxStore
+{
+    Task StoreAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default);
+    Task<List<OutboxMessage>> GetUnprocessedMessagesAsync(int batchSize, int maxRetryCount, CancellationToken cancellationToken = default);
+    Task<List<OutboxMessage>> GetProcessedMessagesForCleanupAsync(DateTime cutoffDate, int batchSize, CancellationToken cancellationToken = default);
+    Task UpdateAsync(OutboxMessage message, CancellationToken cancellationToken = default);
+    Task DeleteRangeAsync(List<OutboxMessage> messages, CancellationToken cancellationToken = default);
+}
+
+public interface IInboxStore
+{
+    Task<bool> HasProcessedAsync(string eventId, CancellationToken cancellationToken = default);
+    Task MarkProcessedAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default);
+    Task<InboxMessage?> GetByIdAsync(string eventId, CancellationToken cancellationToken = default);
+    Task<List<InboxMessage>> GetMessagesForCleanupAsync(DateTime cutoffDate, int batchSize, CancellationToken cancellationToken = default);
+    Task InsertAsync(InboxMessage message, CancellationToken cancellationToken = default);
+    Task UpdateAsync(InboxMessage message, CancellationToken cancellationToken = default);
+    Task DeleteRangeAsync(List<InboxMessage> messages, CancellationToken cancellationToken = default);
+}
+```
 
 ## Outbox Pattern
 
@@ -30,15 +76,25 @@ public class OutboxMessage : Entity<Guid>
 }
 ```
 
-### IOutboxStore
+## Inbox Pattern
+
+### InboxMessage Entity
 
 ```csharp
-public interface IOutboxStore
+public class InboxMessage : Entity<string>
 {
-    Task SaveAsync(OutboxMessage message, CancellationToken cancellationToken = default);
-    Task<List<OutboxMessage>> GetUnprocessedAsync(int limit, CancellationToken cancellationToken = default);
-    Task MarkAsProcessedAsync(Guid messageId, CancellationToken cancellationToken = default);
-    Task UpdateRetryInfoAsync(Guid messageId, string error, DateTime nextRetryAt, CancellationToken cancellationToken = default);
+    public string EventName { get; private set; }
+    public byte[] EventData { get; private set; } // Serialized CloudEventEnvelope
+    public DateTime CreatedAt { get; set; }
+    public IncomingEventStatus Status { get; set; } // Pending, Processed, Discarded
+    public DateTime? HandledTime { get; set; }
+    public int RetryCount { get; set; }
+    public DateTime? NextRetryTime { get; set; }
+    public ExtraPropertyDictionary ExtraProperties { get; private set; }
+    
+    public void MarkAsProcessed(DateTime processedTime);
+    public void MarkAsDiscarded(DateTime discardedTime);
+    public void RetryLater(int retryCount, DateTime nextRetryTime);
 }
 ```
 
@@ -70,19 +126,31 @@ public class MyDbContext : AetherDbContext<MyDbContext>, IHasEfCoreOutbox, IHasE
 
 ```csharp
 // Register Outbox
-services.AddAetherOutbox<MyDbContext>(options =>
+services.AddSingleton<AetherOutboxOptions>(new AetherOutboxOptions
 {
-    options.ProcessingInterval = TimeSpan.FromSeconds(30);
-    options.MaxRetryCount = 5;
-    options.RetryDelay = TimeSpan.FromMinutes(1);
-    options.CleanupRetentionDays = 7;
+    ProcessingInterval = TimeSpan.FromSeconds(30),
+    MaxRetryCount = 5,
+    RetryBaseDelay = TimeSpan.FromMinutes(1),
+    RetentionPeriod = TimeSpan.FromDays(7),
+    BatchSize = 100
 });
 
+services.AddScoped<IOutboxStore, EfCoreOutboxStore<MyDbContext>>();
+services.AddSingleton<IOutboxProcessor, OutboxProcessor<MyDbContext>>();
+
 // Register Inbox
-services.AddAetherInbox<MyDbContext>(options =>
+services.AddSingleton<AetherInboxOptions>(new AetherInboxOptions
 {
-    options.CleanupRetentionDays = 30;
+    RetentionPeriod = TimeSpan.FromDays(7),
+    CleanupInterval = TimeSpan.FromHours(1),
+    CleanupBatchSize = 1000,
+    MaxRetryCount = 5,
+    RetryBaseDelay = TimeSpan.FromMinutes(1),
+    ProcessingInterval = TimeSpan.FromSeconds(30)
 });
+
+services.AddScoped<IInboxStore, EfCoreInboxStore<MyDbContext>>();
+services.AddSingleton<IInboxProcessor, InboxProcessor<MyDbContext>>();
 ```
 
 ## Usage Examples
@@ -110,131 +178,132 @@ public async Task CreateOrderAsync(CreateOrderDto dto)
 
 ### Outbox: Background Processing
 
-The `OutboxProcessor` automatically processes messages:
+Developers implement their own BackgroundService to host the processor:
 
 ```csharp
-// Runs in background
-public class OutboxProcessor<TDbContext> : BackgroundService
+public class OutboxBackgroundService : BackgroundService
 {
+    private readonly IOutboxProcessor _processor;
+    private readonly ILogger<OutboxBackgroundService> _logger;
+
+    public OutboxBackgroundService(
+        IOutboxProcessor processor,
+        ILogger<OutboxBackgroundService> logger)
+    {
+        _processor = processor;
+        _logger = logger;
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            await ProcessOutboxMessagesAsync(stoppingToken);
-            await CleanupProcessedMessagesAsync(stoppingToken);
-            await Task.Delay(_options.ProcessingInterval, stoppingToken);
-        }
-    }
-}
-```
-
-### Inbox: Idempotent Handler
-
-```csharp
-public class OrderCreatedEventHandler : IDistributedEventHandler<OrderCreatedEvent>
-{
-    private readonly IInboxStore _inboxStore;
-    private readonly IHttpContextAccessor _httpContextAccessor;
-    
-    [UnitOfWork]
-    public async Task HandleEventAsync(
-        OrderCreatedEvent @event, 
-        CancellationToken cancellationToken)
-    {
-        // Extract message ID from Dapr headers
-        var messageId = _httpContextAccessor.HttpContext?.Request.Headers["cloudevents-id"].ToString();
-        
-        if (string.IsNullOrEmpty(messageId))
-        {
-            messageId = Guid.NewGuid().ToString();
-        }
-        
-        // Check if already processed
-        var inboxMessage = await _inboxStore.FindAsync(messageId, cancellationToken);
-        if (inboxMessage != null)
-        {
-            _logger.LogInformation("Message {MessageId} already processed, skipping", messageId);
-            return;
-        }
+        _logger.LogInformation("Outbox background service starting");
         
         try
         {
-            // Process the event
-            await ProcessOrderAsync(@event, cancellationToken);
-            
-            // Mark as processed in inbox
-            await _inboxStore.InsertAsync(new InboxMessage
-            {
-                Id = Guid.NewGuid(),
-                MessageId = messageId,
-                EventName = "order.created.v1",
-                ReceivedAt = DateTime.UtcNow,
-                ProcessedAt = DateTime.UtcNow,
-                Status = InboxMessageStatus.Processed
-            }, cancellationToken);
+            await _processor.RunAsync(stoppingToken);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error processing message {MessageId}", messageId);
-            
-            // Mark as failed
-            await _inboxStore.InsertAsync(new InboxMessage
-            {
-                Id = Guid.NewGuid(),
-                MessageId = messageId,
-                EventName = "order.created.v1",
-                ReceivedAt = DateTime.UtcNow,
-                Status = InboxMessageStatus.Failed,
-                ErrorMessage = ex.Message
-            }, cancellationToken);
-            
+            _logger.LogError(ex, "Outbox background service failed");
             throw;
         }
+        
+        _logger.LogInformation("Outbox background service stopped");
     }
-    
-    private async Task ProcessOrderAsync(OrderCreatedEvent @event, CancellationToken ct)
+}
+
+// Register the BackgroundService
+services.AddHostedService<OutboxBackgroundService>();
+```
+
+### Inbox: Background Processing
+
+Similarly, implement BackgroundService for inbox cleanup:
+
+```csharp
+public class InboxBackgroundService : BackgroundService
+{
+    private readonly IInboxProcessor _processor;
+    private readonly ILogger<InboxBackgroundService> _logger;
+
+    public InboxBackgroundService(
+        IInboxProcessor processor,
+        ILogger<InboxBackgroundService> logger)
     {
-        // Business logic here
-        var order = await _orderRepository.GetAsync(@event.OrderId, cancellationToken: ct);
-        // ...
+        _processor = processor;
+        _logger = logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("Inbox background service starting");
+        
+        try
+        {
+            await _processor.RunAsync(stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Inbox background service failed");
+            throw;
+        }
+        
+        _logger.LogInformation("Inbox background service stopped");
+    }
+}
+
+// Register the BackgroundService
+services.AddHostedService<InboxBackgroundService>();
+```
+
+### Inbox: Automatic Idempotency with EventsController
+
+The `EventsController` automatically handles idempotency checking and error tracking:
+
+```csharp
+[ApiController]
+[Route("api/events")]
+public class MyEventsController : EventsController
+{
+    public MyEventsController(
+        IDistributedEventInvokerRegistry invokerRegistry,
+        IInboxStore inboxStore,
+        IUnitOfWorkManager unitOfWorkManager,
+        IServiceProvider serviceProvider,
+        IEventSerializer serializer,
+        AetherInboxOptions inboxOptions,
+        ILogger<EventsController> logger)
+        : base(invokerRegistry, inboxStore, unitOfWorkManager, 
+               serviceProvider, serializer, inboxOptions, logger)
+    {
+    }
+
+    [HttpPost("{name}/v{version}")]
+    public async Task<IActionResult> HandleEvent(
+        string name, 
+        int version, 
+        CancellationToken cancellationToken)
+    {
+        return await ProcessEventAsync(name, version, cancellationToken);
     }
 }
 ```
 
-## Inbox Pattern
+**Event Processing Flow:**
+1. Receives event from Dapr
+2. Checks inbox for duplicate (idempotency)
+3. Invokes registered event handler
+4. Marks as processed in inbox on success
+5. Tracks error with retry info in inbox on failure
+6. Returns 500 to trigger Dapr retry
 
-### InboxMessage Entity
-
-```csharp
-public class InboxMessage : Entity<Guid>
-{
-    public string MessageId { get; set; } // Unique message ID from broker
-    public string EventName { get; set; }
-    public DateTime ReceivedAt { get; set; }
-    public DateTime? ProcessedAt { get; set; }
-    public InboxMessageStatus Status { get; set; }
-    public string? ErrorMessage { get; set; }
-    public ExtraPropertyDictionary ExtraProperties { get; private set; }
-}
-
-public enum InboxMessageStatus
-{
-    Received = 0,
-    Processed = 1,
-    Failed = 2
-}
-```
-
-### IInboxStore
-
-```csharp
-public interface IInboxStore
-{
-    Task<InboxMessage?> FindAsync(string messageId, CancellationToken cancellationToken = default);
-    Task InsertAsync(InboxMessage message, CancellationToken cancellationToken = default);
-    Task<bool> ExistsAsync(string messageId, CancellationToken cancellationToken = default);
-}
-```
+**Error Tracking:**
+When event processing fails:
+- Creates/updates InboxMessage with error details
+- Stores error message in `ExtraProperties["LastError"]`
+- Calculates next retry time with exponential backoff
+- Sets status to `Pending` for potential retry
+- Still returns HTTP 500 to let Dapr handle retries
 
 ## Database Schema
 
@@ -261,18 +330,48 @@ CREATE INDEX IX_OutboxMessages_Processing
 
 ```sql
 CREATE TABLE InboxMessages (
-    Id UUID PRIMARY KEY,
-    MessageId VARCHAR(256) NOT NULL UNIQUE,
+    Id VARCHAR(256) PRIMARY KEY,
     EventName VARCHAR(500) NOT NULL,
-    ReceivedAt TIMESTAMP NOT NULL,
-    ProcessedAt TIMESTAMP NULL,
+    EventData BYTEA NOT NULL,
+    CreatedAt TIMESTAMP NOT NULL,
     Status INT NOT NULL,
-    ErrorMessage VARCHAR(4000) NULL,
+    HandledTime TIMESTAMP NULL,
+    RetryCount INT NOT NULL DEFAULT 0,
+    NextRetryTime TIMESTAMP NULL,
     ExtraProperties JSONB NULL
 );
 
-CREATE INDEX IX_InboxMessages_MessageId ON InboxMessages(MessageId);
-CREATE INDEX IX_InboxMessages_Cleanup ON InboxMessages(ProcessedAt, ReceivedAt);
+CREATE INDEX IX_InboxMessages_Status ON InboxMessages(Status);
+CREATE INDEX IX_InboxMessages_Cleanup ON InboxMessages(Status, HandledTime);
+```
+
+## Configuration Options
+
+### AetherOutboxOptions
+
+```csharp
+public class AetherOutboxOptions
+{
+    public TimeSpan ProcessingInterval { get; set; } = TimeSpan.FromSeconds(30);
+    public int MaxRetryCount { get; set; } = 5;
+    public TimeSpan RetentionPeriod { get; set; } = TimeSpan.FromDays(7);
+    public int BatchSize { get; set; } = 100;
+    public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromMinutes(1);
+}
+```
+
+### AetherInboxOptions
+
+```csharp
+public class AetherInboxOptions
+{
+    public TimeSpan RetentionPeriod { get; set; } = TimeSpan.FromDays(7);
+    public TimeSpan CleanupInterval { get; set; } = TimeSpan.FromHours(1);
+    public int CleanupBatchSize { get; set; } = 1000;
+    public int MaxRetryCount { get; set; } = 5;
+    public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromMinutes(1);
+    public TimeSpan ProcessingInterval { get; set; } = TimeSpan.FromSeconds(30);
+}
 ```
 
 ## Best Practices
@@ -287,40 +386,83 @@ public async Task ProcessOrderAsync()
     await _repository.SaveAsync(order);
     await _eventBus.PublishAsync(event, useOutbox: true);
 }
-```
 
-### 2. Implement Inbox for All Handlers
-
-```csharp
-// ✅ Good: Idempotent processing
-public async Task HandleEventAsync(MyEvent @event, CancellationToken ct)
+// ❌ Bad: Event might be lost if broker is down
+[UnitOfWork]
+public async Task ProcessOrderAsync()
 {
-    if (await _inbox.ExistsAsync(messageId, ct))
-        return;
-    
-    await ProcessAsync(@event, ct);
-    await _inbox.MarkProcessedAsync(messageId, ct);
+    await _repository.SaveAsync(order);
+    await _eventBus.PublishAsync(event, useOutbox: false);
 }
 ```
 
-### 3. Monitor Outbox Processing
+### 2. Let EventsController Handle Idempotency
+
+The framework automatically handles idempotency checking and error tracking:
 
 ```csharp
-// Monitor failed messages
-var failedMessages = await _outboxStore.GetFailedMessagesAsync();
-foreach (var message in failedMessages)
+// ✅ Good: Framework handles it automatically
+[ApiController]
+[Route("api/events")]
+public class MyEventsController : EventsController
 {
-    _logger.LogWarning("Failed to process outbox message {Id}: {Error}", 
-        message.Id, message.LastError);
+    [HttpPost("{name}/v{version}")]
+    public async Task<IActionResult> HandleEvent(string name, int version, CancellationToken ct)
+    {
+        return await ProcessEventAsync(name, version, ct);
+    }
 }
 ```
 
-### 4. Configure Appropriate Retention
+### 3. Implement BackgroundService Wrappers
 
 ```csharp
-services.AddAetherOutbox<MyDbContext>(options =>
+// ✅ Good: Custom BackgroundService with logging and error handling
+public class OutboxBackgroundService : BackgroundService
 {
-    options.CleanupRetentionDays = 7; // Keep processed messages for 7 days
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await _processor.RunAsync(stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "Outbox processor crashed");
+            // Notify operations team
+            throw;
+        }
+    }
+}
+```
+
+### 4. Monitor Failed Messages
+
+```csharp
+public class OutboxMonitor
+{
+    public async Task<OutboxStats> GetStatsAsync()
+    {
+        var unprocessed = await _outboxStore.GetUnprocessedMessagesAsync(1000, 5);
+        var failedCount = unprocessed.Count(m => m.RetryCount >= 5);
+        
+        return new OutboxStats 
+        { 
+            Unprocessed = unprocessed.Count, 
+            Failed = failedCount 
+        };
+    }
+}
+```
+
+### 5. Configure Appropriate Retention
+
+```csharp
+services.AddSingleton<AetherOutboxOptions>(new AetherOutboxOptions
+{
+    RetentionPeriod = TimeSpan.FromDays(7), // Keep for compliance/debugging
+    MaxRetryCount = 5, // Prevent infinite retry loops
+    RetryBaseDelay = TimeSpan.FromMinutes(1) // Start with 1 min delay
 });
 ```
 
@@ -329,19 +471,27 @@ services.AddAetherOutbox<MyDbContext>(options =>
 ### Check Outbox Status
 
 ```csharp
-public class OutboxMonitor
+public class OutboxHealthCheck : IHealthCheck
 {
-    public async Task<OutboxStats> GetStatsAsync()
+    private readonly IOutboxStore _store;
+    private readonly AetherOutboxOptions _options;
+
+    public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken ct)
     {
-        var unprocessed = await _context.OutboxMessages
-            .Where(m => m.ProcessedAt == null)
-            .CountAsync();
+        var messages = await _store.GetUnprocessedMessagesAsync(100, _options.MaxRetryCount, ct);
+        var failedCount = messages.Count(m => m.RetryCount >= _options.MaxRetryCount);
         
-        var failed = await _context.OutboxMessages
-            .Where(m => m.RetryCount >= _options.MaxRetryCount)
-            .CountAsync();
+        if (failedCount > 10)
+        {
+            return HealthCheckResult.Unhealthy($"{failedCount} messages have exceeded max retry count");
+        }
         
-        return new OutboxStats { Unprocessed = unprocessed, Failed = failed };
+        if (messages.Count > 1000)
+        {
+            return HealthCheckResult.Degraded($"{messages.Count} unprocessed messages in outbox");
+        }
+        
+        return HealthCheckResult.Healthy($"{messages.Count} messages pending");
     }
 }
 ```
@@ -349,20 +499,81 @@ public class OutboxMonitor
 ### Retry Failed Messages
 
 ```csharp
-public async Task RetryFailedMessagesAsync()
+public class OutboxManagementService
 {
-    var failedMessages = await _context.OutboxMessages
-        .Where(m => m.ProcessedAt == null && m.RetryCount >= _options.MaxRetryCount)
-        .ToListAsync();
-    
-    foreach (var message in failedMessages)
+    public async Task RetryFailedMessagesAsync()
     {
-        message.RetryCount = 0;
-        message.NextRetryAt = DateTime.UtcNow;
-        message.LastError = null;
+        var failedMessages = await _outboxStore.GetUnprocessedMessagesAsync(100, int.MaxValue);
+        
+        foreach (var message in failedMessages.Where(m => m.RetryCount >= _options.MaxRetryCount))
+        {
+            message.RetryCount = 0;
+            message.NextRetryAt = DateTime.UtcNow;
+            message.LastError = null;
+            
+            await _outboxStore.UpdateAsync(message);
+        }
+    }
+}
+```
+
+## Advanced Scenarios
+
+### Custom Error Tracking
+
+Override `TryTrackErrorInInboxAsync` in EventsController:
+
+```csharp
+protected override async Task TryTrackErrorInInboxAsync(
+    byte[] payload, 
+    string? eventId, 
+    Exception exception, 
+    CancellationToken cancellationToken)
+{
+    // Custom error tracking logic
+    await base.TryTrackErrorInInboxAsync(payload, eventId, exception, cancellationToken);
+    
+    // Send alert for critical errors
+    if (exception is CriticalBusinessException)
+    {
+        await _alertService.SendAlertAsync($"Critical error processing event {eventId}");
+    }
+}
+```
+
+### Custom Retry Strategy
+
+Override `CalculateNextRetryTime` in EventsController:
+
+```csharp
+protected override DateTime CalculateNextRetryTime(int retryCount)
+{
+    // Linear backoff instead of exponential
+    var delay = InboxOptions.RetryBaseDelay * retryCount;
+    return DateTime.UtcNow.Add(delay);
+}
+```
+
+### Processor Control
+
+Control processor behavior at runtime:
+
+```csharp
+public class ManagedOutboxService : BackgroundService
+{
+    private readonly IOutboxProcessor _processor;
+    private CancellationTokenSource? _processorCts;
+    
+    public void Pause()
+    {
+        _processorCts?.Cancel();
     }
     
-    await _context.SaveChangesAsync();
+    public void Resume()
+    {
+        _processorCts = new CancellationTokenSource();
+        Task.Run(() => _processor.RunAsync(_processorCts.Token));
+    }
 }
 ```
 
@@ -371,4 +582,4 @@ public async Task RetryFailedMessagesAsync()
 - **[Distributed Events](../distributed-events/README.md)** - Event bus integration
 - **[Domain Events](../domain-events/README.md)** - Domain event dispatching
 - **[Unit of Work](../unit-of-work/README.md)** - Transaction management
-
+- **[Telemetry](../telemetry/README.md)** - Distributed tracing for events

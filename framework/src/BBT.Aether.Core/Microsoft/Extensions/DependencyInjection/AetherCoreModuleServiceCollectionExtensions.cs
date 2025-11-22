@@ -1,6 +1,7 @@
 using System;
 using System.Reflection;
 using BBT.Aether;
+using BBT.Aether.Clock;
 using BBT.Aether.DependencyInjection;
 using BBT.Aether.ExceptionHandling;
 using BBT.Aether.Guids;
@@ -48,7 +49,7 @@ public static class AetherCoreModuleServiceCollectionExtensions
         services.AddTransient<ILazyServiceProvider, LazyServiceProvider>();
         services.TryAddSingleton<IInitLoggerFactory>(new DefaultInitLoggerFactory());
         services.AddTransient<IExceptionToErrorInfoConverter, DefaultExceptionToErrorInfoConverter>();
-
+        services.AddSingleton<IClock, SystemClock>();
         return services;
     }
 

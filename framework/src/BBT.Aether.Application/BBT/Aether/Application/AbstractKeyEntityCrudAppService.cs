@@ -22,7 +22,7 @@ public abstract class AbstractKeyEntityCrudAppService<TEntity, TKey>(IServicePro
 
     public virtual async Task<TEntity> UpdateAsync(TKey id, TEntity input)
     {
-        await Repository.UpdateAsync(input);
+        await Repository.UpdateAsync(input, true);
         return input;
     }
 

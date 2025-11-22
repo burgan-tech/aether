@@ -1,4 +1,4 @@
-namespace BBT.Aether.Domain.Events;
+namespace BBT.Aether.Events;
 
 /// <summary>
 /// Status of an incoming event in the inbox.
@@ -11,13 +11,18 @@ public enum IncomingEventStatus
     Pending = 0,
 
     /// <summary>
+    /// Event is currently being processed.
+    /// </summary>
+    Processing = 1,
+
+    /// <summary>
     /// Event has been successfully processed.
     /// </summary>
-    Processed = 1,
+    Processed = 2,
 
     /// <summary>
     /// Event has been discarded (e.g., exceeded max retry count).
     /// </summary>
-    Discarded = 2
+    Discarded = 3
 }
 

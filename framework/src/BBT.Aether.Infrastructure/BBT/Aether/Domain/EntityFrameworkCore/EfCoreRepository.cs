@@ -5,6 +5,7 @@ using System.Linq;
 using System.Linq.Expressions;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Guids;
@@ -41,21 +42,16 @@ public class EfCoreRepository<TDbContext, TEntity> : RepositoryBase<TEntity>, IE
         _dbContext = dbContext;
     }
 
-    /// <summary>
-    /// Gets the ambient unit of work accessor through lazy service provider.
-    /// </summary>
-    protected IAmbientUnitOfWorkAccessor UowAccessor =>
-        LazyServiceProvider.LazyGetRequiredService<IAmbientUnitOfWorkAccessor>();
-
     public IGuidGenerator GuidGenerator =>
         LazyServiceProvider.LazyGetService<IGuidGenerator>(SimpleGuidGenerator.Instance);
 
     public ICurrentUser CurrentUser => LazyServiceProvider.LazyGetRequiredService<ICurrentUser>();
 
+    public IClock Clock => LazyServiceProvider.LazyGetRequiredService<IClock>();
+    
     protected virtual bool ShouldSaveChanges(bool saveChanges)
     {
-        // Don't save changes if within an ambient unit of work
-        return saveChanges && UowAccessor.Current == null;
+        return saveChanges;
     }
 
     async Task<DbContext> IEfCoreRepository<TEntity>.GetDbContextAsync()

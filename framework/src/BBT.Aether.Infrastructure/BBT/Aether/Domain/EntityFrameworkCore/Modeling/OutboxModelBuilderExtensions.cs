@@ -12,12 +12,13 @@ public static class OutboxModelBuilderExtensions
     /// Configures the OutboxMessage entity with appropriate table name, indexes, and constraints.
     /// </summary>
     /// <param name="builder">The ModelBuilder instance</param>
+    /// <param name="schemaName">Schema name</param>
     /// <returns>The ModelBuilder for method chaining</returns>
-    public static ModelBuilder ConfigureOutbox(this ModelBuilder builder)
+    public static ModelBuilder ConfigureOutbox(this ModelBuilder builder, string? schemaName = null)
     {
         builder.Entity<OutboxMessage>(entity =>
         {
-            entity.ToTable("OutboxMessages");
+            entity.ToTable("OutboxMessages", schemaName);
 
             entity.HasKey(e => e.Id);
 

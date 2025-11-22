@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -14,9 +16,34 @@ public class NullInboxStore : IInboxStore
         return Task.FromResult(false);
     }
 
-    public Task MarkProcessedAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default)
+    public Task MarkAsProcessedAsync(string eventId, CancellationToken cancellationToken = default)
     {
         return Task.CompletedTask;
     }
-}
 
+    public Task StorePendingAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default)
+    {
+        return Task.CompletedTask;
+    }
+
+    public Task<List<InboxMessage>> GetPendingEventsAsync(int batchSize, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(new List<InboxMessage>());
+    }
+
+    public Task MarkAsProcessingAsync(string eventId, CancellationToken cancellationToken = default)
+    {
+        return Task.CompletedTask;
+    }
+
+    public Task MarkAsFailedAsync(string eventId, CancellationToken cancellationToken = default)
+    {
+        return Task.CompletedTask;
+    }
+
+    public Task<int> CleanupOldMessagesAsync(int batchSize, TimeSpan retentionPeriod,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(0);
+    }
+}

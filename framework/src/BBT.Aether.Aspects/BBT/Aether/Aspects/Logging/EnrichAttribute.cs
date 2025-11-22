@@ -7,7 +7,7 @@ namespace BBT.Aether.Aspects;
 /// When applied to a parameter, the parameter value will be serialized and added to the log enrichment
 /// with either the custom Name or the parameter name if Name is not specified.
 /// </summary>
-[AttributeUsage(AttributeTargets.Parameter, AllowMultiple = false, Inherited = true)]
+[AttributeUsage(AttributeTargets.Parameter | AttributeTargets.Property, AllowMultiple = false, Inherited = true)]
 public class EnrichAttribute : Attribute
 {
     /// <summary>
