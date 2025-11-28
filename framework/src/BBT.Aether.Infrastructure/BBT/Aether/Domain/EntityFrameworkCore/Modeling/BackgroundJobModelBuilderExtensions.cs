@@ -12,13 +12,13 @@ public static class BackgroundJobModelBuilderExtensions
     /// Configures the BackgroundJobInfo entity with appropriate table name, indexes, and constraints.
     /// </summary>
     /// <param name="builder">The ModelBuilder instance</param>
-    /// <param name="schemaName">Schema name</param>
+    /// <param name="schema">Schema name</param>
     /// <returns>The ModelBuilder for method chaining</returns>
-    public static ModelBuilder ConfigureBackgroundJob(this ModelBuilder builder, string? schemaName = null)
+    public static ModelBuilder ConfigureBackgroundJob(this ModelBuilder builder, string? schema = null)
     {
         builder.Entity<BackgroundJobInfo>(entity =>
         {
-            entity.ToTable("BackgroundJobs", schemaName);
+            entity.ToTable("BackgroundJobs", schema);
 
             entity.HasKey(e => e.Id);
 

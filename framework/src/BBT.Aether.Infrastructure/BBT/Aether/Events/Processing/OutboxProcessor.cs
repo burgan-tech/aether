@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -22,6 +23,8 @@ public class OutboxProcessor<TDbContext>(
     AetherOutboxOptions options) : IOutboxProcessor
     where TDbContext : DbContext, IHasEfCoreOutbox
 {
+    private readonly string _workerId = $"{Environment.MachineName}-{Environment.ProcessId}-{Guid.NewGuid():N}";
+
     /// <inheritdoc />
     public virtual async Task RunAsync(CancellationToken cancellationToken = default)
     {
@@ -39,26 +42,26 @@ public class OutboxProcessor<TDbContext>(
     protected virtual async Task ProcessOutboxMessagesAsync(CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<TDbContext>();
+        var outboxStore = scope.ServiceProvider.GetRequiredService<IOutboxStore>();
         var eventBus = scope.ServiceProvider.GetRequiredService<IDistributedEventBus>();
         var eventBusOptions = scope.ServiceProvider.GetRequiredService<AetherEventBusOptions>();
-        var now = clock.UtcNow;
+        var dbContext = scope.ServiceProvider.GetRequiredService<TDbContext>();
+        var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
 
-        // Get unprocessed messages or messages that are due for retry
-        var messages = await dbContext.OutboxMessages
-            .Where(m => m.ProcessedAt == null &&
-                        m.RetryCount < options.MaxRetryCount &&
-                        (m.NextRetryAt == null || m.NextRetryAt <= now))
-            .OrderBy(m => m.CreatedAt)
-            .Take(options.BatchSize)
-            .ToListAsync(cancellationToken);
+        // Lease messages with database-level locking
+        var messages = await outboxStore.LeaseBatchAsync(
+            options.BatchSize,
+            _workerId,
+            options.LeaseDuration,
+            cancellationToken);
 
         if (!messages.Any())
         {
             return;
         }
 
-        logger.LogInformation("Processing {Count} outbox messages", messages.Count);
+        logger.LogInformation("Leased {Count} outbox messages for processing by worker {WorkerId}", 
+            messages.Count, _workerId);
 
         foreach (var message in messages)
         {
@@ -66,13 +69,16 @@ public class OutboxProcessor<TDbContext>(
             {
                 break;
             }
-
+            
             try
             {
                 // Get topicName and pubSubName from ExtraProperties
-                var topicName = message.ExtraProperties.GetOrDefault("TopicName")?.ToString() ?? message.EventName;
-                var pubSubName = message.ExtraProperties.GetOrDefault("PubSubName")?.ToString() ??
-                                 eventBusOptions.PubSubName;
+                var topicName = message.ExtraProperties.TryGetValue("TopicName", out var topicObj) 
+                    ? topicObj?.ToString() ?? message.EventName 
+                    : message.EventName;
+                var pubSubName = message.ExtraProperties.TryGetValue("PubSubName", out var pubSubObj)
+                    ? pubSubObj?.ToString() ?? eventBusOptions.PubSubName
+                    : eventBusOptions.PubSubName;
 
                 // EventData is already serialized CloudEventEnvelope bytes
                 var serializedEnvelope = message.EventData;
@@ -80,9 +86,16 @@ public class OutboxProcessor<TDbContext>(
                 // Publish using IDistributedEventBus abstraction
                 await eventBus.PublishEnvelopeAsync(serializedEnvelope, topicName, pubSubName, cancellationToken);
 
-                // Mark as processed
-                message.ProcessedAt = clock.UtcNow;
-                message.LastError = null;
+                // Find and update the domain entity
+                var domainMessage = await dbContext.OutboxMessages.FindAsync(new object[] { message.Id }, cancellationToken);
+                if (domainMessage != null)
+                {
+                    domainMessage.Status = OutboxMessageStatus.Processed;
+                    domainMessage.ProcessedAt = clock.UtcNow;
+                    domainMessage.LastError = null;
+                    domainMessage.LockedBy = null;
+                    domainMessage.LockedUntil = null;
+                }
 
                 logger.LogDebug("Successfully published outbox message {MessageId}", message.Id);
             }
@@ -90,11 +103,19 @@ public class OutboxProcessor<TDbContext>(
             {
                 logger.LogError(ex, "Failed to publish outbox message {MessageId}", message.Id);
 
-                message.RetryCount++;
-                message.LastError = ex.Message.Length > 4000
-                    ? ex.Message.Substring(0, 4000)
-                    : ex.Message;
-                message.NextRetryAt = CalculateNextRetryTime(message.RetryCount);
+                // Find and update the domain entity for retry
+                var domainMessage = await dbContext.OutboxMessages.FindAsync(new object[] { message.Id }, cancellationToken);
+                if (domainMessage != null)
+                {
+                    domainMessage.RetryCount++;
+                    domainMessage.LastError = ex.Message.Length > 4000
+                        ? ex.Message.Substring(0, 4000)
+                        : ex.Message;
+                    domainMessage.NextRetryAt = CalculateNextRetryTime(domainMessage.RetryCount);
+                    domainMessage.Status = OutboxMessageStatus.Pending;
+                    domainMessage.LockedBy = null;
+                    domainMessage.LockedUntil = null;
+                }
             }
         }
 
@@ -109,7 +130,7 @@ public class OutboxProcessor<TDbContext>(
         var cutoffDate = clock.UtcNow - options.RetentionPeriod;
 
         var processedMessages = await dbContext.OutboxMessages
-            .Where(m => m.ProcessedAt != null && m.ProcessedAt < cutoffDate)
+            .Where(m => m.Status == OutboxMessageStatus.Processed && m.ProcessedAt != null && m.ProcessedAt < cutoffDate)
             .Take(options.BatchSize)
             .ToListAsync(cancellationToken);
 

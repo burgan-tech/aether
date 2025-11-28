@@ -1,6 +1,8 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Events;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace BBT.Aether.BackgroundJob;
 
@@ -14,12 +16,14 @@ public interface IBackgroundJobInvoker
     /// Invokes the job handler with the serialized payload.
     /// Deserializes payload to TArgs and calls handler.HandleAsync().
     /// </summary>
-    /// <param name="serviceProvider">Service provider for resolving handler instances</param>
+    /// <param name="scopeFactory">Scope factory for creating a scope for resolving handler instances</param>
+    /// <param name="eventSerializer">Event serializer for deserializing payload</param>
     /// <param name="payload">Serialized job payload</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>A task representing the asynchronous operation</returns>
     Task InvokeAsync(
-        IServiceProvider serviceProvider,
+        IServiceScopeFactory scopeFactory,
+        IEventSerializer eventSerializer,
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken);
 }

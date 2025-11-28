@@ -232,6 +232,34 @@ public static class ResultExtensions
         => result.IsSuccess && !predicate(result.Value!) ? Result<T>.Fail(error) : result;
 
     /// <summary>
+    /// Executes a side effect on failure without altering the error.
+    /// Useful for logging, alerting, or cleanup actions on failure.
+    /// </summary>
+    /// <typeparam name="T">Value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="onFailure">Action to perform on failure</param>
+    /// <returns>The original result</returns>
+    public static Result<T> OnFailure<T>(this Result<T> result, Action<Error> onFailure)
+    {
+        if (!result.IsSuccess) onFailure(result.Error);
+        return result;
+    }
+
+    /// <summary>
+    /// Executes a side effect on success without altering the result.
+    /// Alias for Tap - provided for symmetry with OnFailure.
+    /// </summary>
+    /// <typeparam name="T">Value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="onSuccess">Action to perform on success</param>
+    /// <returns>The original result</returns>
+    public static Result<T> OnSuccess<T>(this Result<T> result, Action<T> onSuccess)
+    {
+        if (result.IsSuccess) onSuccess(result.Value!);
+        return result;
+    }
+
+    /// <summary>
     /// Matches the result to execute different actions based on success or failure.
     /// </summary>
     /// <typeparam name="T">Value type</typeparam>
@@ -246,6 +274,80 @@ public static class ResultExtensions
     #endregion
 
     #region Async Monadic Operations
+
+    /// <summary>
+    /// Binds a sync Result to an async operation. Enables starting async pipelines from sync results.
+    /// </summary>
+    /// <typeparam name="T">Source value type</typeparam>
+    /// <typeparam name="TU">Target value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="binder">Async function that returns a new Result</param>
+    /// <returns>The result from the binder function or the original error</returns>
+    /// <example>
+    /// return await Result.Ok(context)
+    ///     .BindAsync(ctx => GetStrategyAsync(ctx.Mode))
+    ///     .BindAsync(strategy => ExecuteAsync(strategy));
+    /// </example>
+    public static Task<Result<TU>> BindAsync<T, TU>(this Result<T> result, Func<T, Task<Result<TU>>> binder)
+        => result.IsSuccess ? binder(result.Value!) : Task.FromResult(Result<TU>.Fail(result.Error));
+
+    /// <summary>
+    /// Binds a sync Result to an async operation that returns non-generic Result.
+    /// Useful for validation chains where input is transformed but output is just success/failure.
+    /// </summary>
+    /// <typeparam name="T">Source value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="binder">Async function that returns a non-generic Result</param>
+    /// <returns>The result from the binder function or the original error</returns>
+    /// <example>
+    /// return await workflow.GetInitialState()
+    ///     .Map(state => BuildContext(state))
+    ///     .ThenAsync(ctx => ValidateAsync(ctx));
+    /// </example>
+    public static Task<Result> ThenAsync<T>(this Result<T> result, Func<T, Task<Result>> binder)
+        => result.IsSuccess ? binder(result.Value!) : Task.FromResult(Result.Fail(result.Error));
+
+    /// <summary>
+    /// Maps a sync Result using an async mapper function.
+    /// </summary>
+    /// <typeparam name="T">Source value type</typeparam>
+    /// <typeparam name="TU">Target value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="mapper">Async function to transform the value</param>
+    /// <returns>A new result with the transformed value or the original error</returns>
+    public static async Task<Result<TU>> MapAsync<T, TU>(this Result<T> result, Func<T, Task<TU>> mapper)
+    {
+        if (!result.IsSuccess) return Result<TU>.Fail(result.Error);
+        var value = await mapper(result.Value!);
+        return Result<TU>.Ok(value);
+    }
+
+    /// <summary>
+    /// Async version of Tap for sync Result with async side effect.
+    /// </summary>
+    /// <typeparam name="T">Value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="sideEffect">Async action to perform on success</param>
+    /// <returns>The original result</returns>
+    public static async Task<Result<T>> TapAsync<T>(this Result<T> result, Func<T, Task> sideEffect)
+    {
+        if (result.IsSuccess) await sideEffect(result.Value!);
+        return result;
+    }
+
+    /// <summary>
+    /// Async version of Ensure for sync Result with async predicate.
+    /// </summary>
+    /// <typeparam name="T">Value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="predicate">Async predicate that must be true</param>
+    /// <param name="error">Error to return if predicate fails</param>
+    /// <returns>The original result if predicate passes, otherwise a failure</returns>
+    public static async Task<Result<T>> EnsureAsync<T>(this Result<T> result, Func<T, Task<bool>> predicate, Error error)
+    {
+        if (!result.IsSuccess) return result;
+        return await predicate(result.Value!) ? result : Result<T>.Fail(error);
+    }
 
     /// <summary>
     /// Async version of Map for Task-wrapped results.
@@ -274,13 +376,77 @@ public static class ResultExtensions
     }
 
     /// <summary>
-    /// Async version of Tap for Task-wrapped results.
+    /// Binds Task-wrapped result to a synchronous binder function.
+    /// Use this when chaining async operations with sync Result-returning transformations.
+    /// Named 'Then' to distinguish from 'BindAsync' which takes an async binder.
+    /// </summary>
+    /// <typeparam name="T">Source value type</typeparam>
+    /// <typeparam name="TU">Target value type</typeparam>
+    /// <param name="task">The source task result</param>
+    /// <param name="binder">Synchronous function that returns a new Result</param>
+    /// <returns>The result from the binder function or the original error</returns>
+    /// <example>
+    /// return await LoadDataAsync()
+    ///     .Then(data => ValidateSync(data))  // sync binder
+    ///     .MapAsync(data => Transform(data));
+    /// </example>
+    public static async Task<Result<TU>> Then<T, TU>(this Task<Result<T>> task, Func<T, Result<TU>> binder)
+    {
+        var result = await task;
+        return result.IsSuccess ? binder(result.Value!) : Result<TU>.Fail(result.Error);
+    }
+
+    /// <summary>
+    /// Async version of Tap for Task-wrapped results with async side effect.
     /// </summary>
     public static async Task<Result<T>> TapAsync<T>(this Task<Result<T>> task, Func<T, Task> sideEffect)
     {
         var result = await task;
         if (result.IsSuccess) await sideEffect(result.Value!);
         return result;
+    }
+
+    /// <summary>
+    /// Sync version of Tap for Task-wrapped results.
+    /// Executes a synchronous side effect on the awaited result.
+    /// </summary>
+    /// <typeparam name="T">Value type</typeparam>
+    /// <param name="task">The source task result</param>
+    /// <param name="sideEffect">Synchronous action to perform on success</param>
+    /// <returns>The original result</returns>
+    public static async Task<Result<T>> Tap<T>(this Task<Result<T>> task, Action<T> sideEffect)
+    {
+        var result = await task;
+        if (result.IsSuccess) sideEffect(result.Value!);
+        return result;
+    }
+
+    /// <summary>
+    /// Binds Task-wrapped result to a synchronous Result-returning function.
+    /// </summary>
+    /// <typeparam name="T">Source value type</typeparam>
+    /// <typeparam name="TU">Target value type</typeparam>
+    /// <param name="task">The source task result</param>
+    /// <param name="binder">Synchronous function that returns a new Result</param>
+    /// <returns>The result from the binder function or the original error</returns>
+    public static async Task<Result<TU>> Bind<T, TU>(this Task<Result<T>> task, Func<T, Result<TU>> binder)
+    {
+        var result = await task;
+        return result.IsSuccess ? binder(result.Value!) : Result<TU>.Fail(result.Error);
+    }
+
+    /// <summary>
+    /// Maps Task-wrapped result using a synchronous mapper function.
+    /// </summary>
+    /// <typeparam name="T">Source value type</typeparam>
+    /// <typeparam name="TU">Target value type</typeparam>
+    /// <param name="task">The source task result</param>
+    /// <param name="mapper">Synchronous function to transform the value</param>
+    /// <returns>A new result with the transformed value or the original error</returns>
+    public static async Task<Result<TU>> Map<T, TU>(this Task<Result<T>> task, Func<T, TU> mapper)
+    {
+        var result = await task;
+        return result.IsSuccess ? Result<TU>.Ok(mapper(result.Value!)) : Result<TU>.Fail(result.Error);
     }
 
     /// <summary>
@@ -293,12 +459,138 @@ public static class ResultExtensions
     }
 
     /// <summary>
-    /// Async version of Match for Task-wrapped results.
+    /// Async version of Match for Task-wrapped results with sync handlers.
     /// </summary>
     public static async Task<TU> MatchAsync<T, TU>(this Task<Result<T>> task, Func<T, TU> onSuccess, Func<Error, TU> onFailure)
     {
         var result = await task;
         return result.Match(onSuccess, onFailure);
+    }
+
+    /// <summary>
+    /// Async version of Match for Task-wrapped results with async success handler.
+    /// Use this when the success path requires async operations.
+    /// </summary>
+    /// <typeparam name="T">Source value type</typeparam>
+    /// <typeparam name="TU">Target value type</typeparam>
+    /// <param name="task">The source result task</param>
+    /// <param name="onSuccess">Async function to execute on success</param>
+    /// <param name="onFailure">Sync function to execute on failure</param>
+    /// <returns>The result of either function</returns>
+    /// <example>
+    /// return await GetInstanceAsync()
+    ///     .MatchAsync(
+    ///         onSuccess: async instance => await BuildOutputAsync(instance),
+    ///         onFailure: error => DefaultOutput.FromError(error));
+    /// </example>
+    public static async Task<TU> MatchAsync<T, TU>(
+        this Task<Result<T>> task, 
+        Func<T, Task<TU>> onSuccess, 
+        Func<Error, TU> onFailure)
+    {
+        var result = await task;
+        return result.IsSuccess 
+            ? await onSuccess(result.Value!) 
+            : onFailure(result.Error);
+    }
+
+    /// <summary>
+    /// Async version of Match for Task-wrapped results with both async handlers.
+    /// Use this when both success and failure paths require async operations.
+    /// </summary>
+    /// <typeparam name="T">Source value type</typeparam>
+    /// <typeparam name="TU">Target value type</typeparam>
+    /// <param name="task">The source result task</param>
+    /// <param name="onSuccess">Async function to execute on success</param>
+    /// <param name="onFailure">Async function to execute on failure</param>
+    /// <returns>The result of either function</returns>
+    public static async Task<TU> MatchAsync<T, TU>(
+        this Task<Result<T>> task, 
+        Func<T, Task<TU>> onSuccess, 
+        Func<Error, Task<TU>> onFailure)
+    {
+        var result = await task;
+        return result.IsSuccess 
+            ? await onSuccess(result.Value!) 
+            : await onFailure(result.Error);
+    }
+
+    /// <summary>
+    /// Async version of Match for sync Result with async success handler.
+    /// Use this when starting from a sync Result but the success path requires async operations.
+    /// </summary>
+    /// <typeparam name="T">Source value type</typeparam>
+    /// <typeparam name="TU">Target value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="onSuccess">Async function to execute on success</param>
+    /// <param name="onFailure">Sync function to execute on failure</param>
+    /// <returns>The result of either function</returns>
+    public static async Task<TU> MatchAsync<T, TU>(
+        this Result<T> result, 
+        Func<T, Task<TU>> onSuccess, 
+        Func<Error, TU> onFailure)
+    {
+        return result.IsSuccess 
+            ? await onSuccess(result.Value!) 
+            : onFailure(result.Error);
+    }
+
+    /// <summary>
+    /// Async version of Match for non-generic Task-wrapped Result with sync handlers.
+    /// Useful for converting non-generic Result to a typed result or different output.
+    /// </summary>
+    /// <typeparam name="TU">Target value type</typeparam>
+    /// <param name="task">The source result task</param>
+    /// <param name="onSuccess">Function to execute on success</param>
+    /// <param name="onFailure">Function to execute on failure</param>
+    /// <returns>The result of either function</returns>
+    /// <example>
+    /// return await ValidateAsync()
+    ///     .MatchAsync(
+    ///         onSuccess: () => Result&lt;Instance&gt;.Ok(instance),
+    ///         onFailure: error => Result&lt;Instance&gt;.Fail(error));
+    /// </example>
+    public static async Task<TU> MatchAsync<TU>(
+        this Task<Result> task,
+        Func<TU> onSuccess,
+        Func<Error, TU> onFailure)
+    {
+        var result = await task;
+        return result.IsSuccess ? onSuccess() : onFailure(result.Error);
+    }
+
+    /// <summary>
+    /// Async version of Match for non-generic Task-wrapped Result with async success handler.
+    /// </summary>
+    /// <typeparam name="TU">Target value type</typeparam>
+    /// <param name="task">The source result task</param>
+    /// <param name="onSuccess">Async function to execute on success</param>
+    /// <param name="onFailure">Sync function to execute on failure</param>
+    /// <returns>The result of either function</returns>
+    public static async Task<TU> MatchAsync<TU>(
+        this Task<Result> task,
+        Func<Task<TU>> onSuccess,
+        Func<Error, TU> onFailure)
+    {
+        var result = await task;
+        return result.IsSuccess ? await onSuccess() : onFailure(result.Error);
+    }
+
+    /// <summary>
+    /// Async version of Match for non-generic Task-wrapped Result with both async handlers.
+    /// </summary>
+    /// <typeparam name="TU">Target value type</typeparam>
+    /// <param name="task">The source result task</param>
+    /// <param name="onSuccess">Async function to execute on success</param>
+    /// <param name="onFailure">Async function to execute on failure</param>
+    /// <returns>The result of either function</returns>
+    public static async Task<TU> MatchAsync<TU>(
+        this Task<Result> task,
+        Func<Task<TU>> onSuccess,
+        Func<Error, Task<TU>> onFailure)
+    {
+        var result = await task;
+        return result.IsSuccess ? await onSuccess() : await onFailure(result.Error);
     }
 
     #endregion
@@ -366,6 +658,25 @@ public static class ResultExtensions
         return result.IsSuccess 
             ? await next() 
             : Result<TOut>.Fail(result.Error);
+    }
+
+    /// <summary>
+    /// Railway operator: Chains two non-generic Result operations.
+    /// Useful for validation chains where no value needs to be passed.
+    /// </summary>
+    /// <param name="resultTask">The source result task</param>
+    /// <param name="next">The next operation to execute on success</param>
+    /// <returns>The result from the next operation or the original error</returns>
+    /// <example>
+    /// return await ValidateSchemaAsync(context)
+    ///     .ThenAsync(() => ValidatePolicyAsync(context));
+    /// </example>
+    public static async Task<Result> ThenAsync(
+        this Task<Result> resultTask,
+        Func<Task<Result>> next)
+    {
+        var result = await resultTask;
+        return result.IsSuccess ? await next() : result;
     }
 
     /// <summary>
@@ -593,6 +904,40 @@ public static class ResultExtensions
     /// </summary>
     public static Result<T> ToResult<T>(this T? value, Error error) where T : struct
         => value.HasValue ? Result<T>.Ok(value.Value) : Result<T>.Fail(error);
+
+    /// <summary>
+    /// Ensures a value is not null, returning it wrapped in a Result.
+    /// Provides a fluent way to validate nullable values in railway chains.
+    /// </summary>
+    /// <typeparam name="T">The type of the value.</typeparam>
+    /// <param name="value">The nullable value to check.</param>
+    /// <param name="error">The error to return if the value is null.</param>
+    /// <returns>A successful Result with the value if not null, otherwise a failure.</returns>
+    public static Result<T> EnsureNotNull<T>(this T? value, Error error) where T : class
+        => value is not null ? Result<T>.Ok(value) : Result<T>.Fail(error);
+
+    /// <summary>
+    /// Ensures a nullable struct value is not null, returning it wrapped in a Result.
+    /// </summary>
+    /// <typeparam name="T">The type of the struct value.</typeparam>
+    /// <param name="value">The nullable struct value to check.</param>
+    /// <param name="error">The error to return if the value is null.</param>
+    /// <returns>A successful Result with the value if not null, otherwise a failure.</returns>
+    public static Result<T> EnsureNotNull<T>(this T? value, Error error) where T : struct
+        => value.HasValue ? Result<T>.Ok(value.Value) : Result<T>.Fail(error);
+
+    /// <summary>
+    /// Async version: Ensures a task result is not null.
+    /// </summary>
+    /// <typeparam name="T">The type of the value.</typeparam>
+    /// <param name="task">The task returning a nullable value.</param>
+    /// <param name="error">The error to return if the value is null.</param>
+    /// <returns>A successful Result with the value if not null, otherwise a failure.</returns>
+    public static async Task<Result<T>> EnsureNotNullAsync<T>(this Task<T?> task, Error error) where T : class
+    {
+        var value = await task;
+        return value is not null ? Result<T>.Ok(value) : Result<T>.Fail(error);
+    }
 
     #endregion
 

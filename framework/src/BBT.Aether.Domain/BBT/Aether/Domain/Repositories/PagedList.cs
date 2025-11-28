@@ -3,7 +3,6 @@ using System.Collections.Generic;
 
 namespace BBT.Aether.Domain.Repositories;
 
-//TODO: Href yap??s?? ve alternatifleri yap??land??r??lacak.
 /// <summary>
 /// Represents a paged list of items.
 /// </summary>

@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Services;
 using BBT.Aether.Events;
+using BBT.Aether.Uow.EntityFrameworkCore;
 
 namespace BBT.Aether.Uow;
 
@@ -19,13 +20,12 @@ public sealed class CompositeUnitOfWork(
     IEnumerable<ILocalTransactionSource> sources,
     IDomainEventDispatcher? eventDispatcher = null,
     AetherDomainEventOptions? domainEventOptions = null)
-    : IUnitOfWork, ITransactionalRoot
+    : IUnitOfWork, ITransactionalRoot, IUnitOfWorkEventEnqueuer
 {
     private readonly List<(ILocalTransaction tx, ITransactionalLocal? tLocal)> _opened = new();
     private readonly List<Func<IUnitOfWork, Task>> _completedHandlers = new();
     private readonly List<Func<IUnitOfWork, Exception?, Task>> _failedHandlers = new();
     private readonly List<Action<IUnitOfWork>> _disposedHandlers = new();
-    private readonly AetherDomainEventOptions? _domainEventOptions = domainEventOptions;
     private bool _isInitialized;
     private Exception? _exception;
 
@@ -116,6 +116,20 @@ public sealed class CompositeUnitOfWork(
         IsAborted = true;
     }
 
+    /// <inheritdoc />
+    public void EnqueueEvent(DomainEventEnvelope eventEnvelope)
+    {
+        // Push events to all transactions that support enqueueing
+        // Typically there's one EF Core transaction, but we support multiple
+        foreach (var (tx, _) in _opened)
+        {
+            if (tx is ILocalTransactionEventEnqueuer enqueuer)
+            {
+                enqueuer.EnqueueEvents(new[] { eventEnvelope });
+            }
+        }
+    }
+
     /// <summary>
     /// Ensures that all local transactions are escalated to transactional mode.
     /// This is used for lazy escalation when needed.
@@ -178,7 +192,7 @@ public sealed class CompositeUnitOfWork(
 
         try
         {
-            var strategy = _domainEventOptions?.DispatchStrategy ?? DomainEventDispatchStrategy.AlwaysUseOutbox;
+            var strategy = domainEventOptions?.DispatchStrategy ?? DomainEventDispatchStrategy.AlwaysUseOutbox;
             
             if (strategy == DomainEventDispatchStrategy.AlwaysUseOutbox)
             {
@@ -205,23 +219,18 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     private async Task CommitWithOutboxAsync(CancellationToken cancellationToken)
     {
-        // Step 1: Save changes to all sources
-        await SaveChangesAsync(cancellationToken);
-        
-        // Step 2: Explicitly collect domain events from all transactions
+        // Step 1: Collect all domain events from all transactions
+        // Events are automatically pushed to transactions via IDomainEventSink during SaveChanges
+        // Use HashSet to deduplicate events that may have been pushed to multiple transactions
+        var allEvents = new HashSet<DomainEventEnvelope>();
         foreach (var (tx, _) in _opened)
         {
-            tx.CollectEvents();
-        }
-        
-        // Step 3: Collect all domain events from all transactions
-        var allEvents = new List<DomainEventEnvelope>();
-        foreach (var (tx, _) in _opened)
-        {
-            allEvents.AddRange(tx.CollectedEvents);
+            foreach (var evt in tx.CollectedEvents)
+            {
+                allEvents.Add(evt);
+            }
         }
 
-        // Step 4: Dispatch domain events (writes to outbox within transaction)
         if (allEvents.Any() && eventDispatcher != null)
         {
             await eventDispatcher.DispatchEventsAsync(allEvents, cancellationToken);
@@ -234,7 +243,7 @@ public sealed class CompositeUnitOfWork(
             }
         }
         
-        // Step 5: Commit all transactions
+        // Step 3: Commit all transactions
         foreach (var (tx, _) in _opened)
         {
             await tx.CommitAsync(cancellationToken);
@@ -247,29 +256,25 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     private async Task CommitWithDirectPublishAsync(CancellationToken cancellationToken)
     {
-        // Step 1: Save changes to all sources
-        await SaveChangesAsync(cancellationToken);
-        
-        // Step 2: Explicitly collect domain events from all transactions
+        // Step 1: Collect all domain events from all transactions
+        // Events are automatically pushed to transactions via IDomainEventSink during SaveChanges
+        // Use HashSet to deduplicate events that may have been pushed to multiple transactions
+        var allEvents = new HashSet<DomainEventEnvelope>();
         foreach (var (tx, _) in _opened)
         {
-            tx.CollectEvents();
+            foreach (var evt in tx.CollectedEvents)
+            {
+                allEvents.Add(evt);
+            }
         }
         
-        // Step 3: Collect all domain events from all transactions
-        var allEvents = new List<DomainEventEnvelope>();
-        foreach (var (tx, _) in _opened)
-        {
-            allEvents.AddRange(tx.CollectedEvents);
-        }
-        
-        // Step 4: Commit all transactions (business data is now persisted)
+        // Step 2: Commit all transactions (business data is now persisted)
         foreach (var (tx, _) in _opened)
         {
             await tx.CommitAsync(cancellationToken);
         }
         
-        // Step 5: Publish events directly after commit
+        // Step 3: Publish events directly after commit
         if (allEvents.Any() && eventDispatcher != null)
         {
             try

@@ -27,6 +27,12 @@ public sealed class SystemTextJsonEventSerializer : IEventSerializer
     }
 
     /// <inheritdoc />
+    public JsonElement SerializeToElement(object obj)
+    {
+        return JsonSerializer.SerializeToElement(obj, Options);
+    }
+
+    /// <inheritdoc />
     public TOut? Deserialize<TOut>(ReadOnlySpan<byte> payload)
     {
         return JsonSerializer.Deserialize<TOut>(payload, Options);

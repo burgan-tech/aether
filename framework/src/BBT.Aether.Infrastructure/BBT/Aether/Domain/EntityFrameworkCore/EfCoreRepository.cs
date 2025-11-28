@@ -20,26 +20,25 @@ public class EfCoreRepository<TDbContext, TEntity> : RepositoryBase<TEntity>, IE
     where TDbContext : AetherDbContext<TDbContext>
     where TEntity : class, IEntity
 {
-    private readonly TDbContext _dbContext;
-
+    private readonly IDbContextProvider<TDbContext> _dbContextProvider;
     /// <summary>
     /// Initializes a new instance with explicit service provider (recommended).
     /// </summary>
     public EfCoreRepository(
-        TDbContext dbContext,
+        IDbContextProvider<TDbContext> dbContextProvider,
         IServiceProvider serviceProvider)
         : base(serviceProvider)
     {
-        _dbContext = dbContext;
+        _dbContextProvider = dbContextProvider;
     }
 
     /// <summary>
     /// Initializes a new instance relying on AmbientServiceProvider.
     /// </summary>
-    public EfCoreRepository(TDbContext dbContext)
+    public EfCoreRepository(IDbContextProvider<TDbContext> dbContextProvider)
         : base()
     {
-        _dbContext = dbContext;
+        _dbContextProvider = dbContextProvider;
     }
 
     public IGuidGenerator GuidGenerator =>
@@ -61,7 +60,7 @@ public class EfCoreRepository<TDbContext, TEntity> : RepositoryBase<TEntity>, IE
 
     protected virtual Task<TDbContext> GetDbContextAsync()
     {
-        return Task.FromResult(_dbContext);
+        return Task.FromResult(_dbContextProvider.GetDbContext());
     }
 
     Task<DbSet<TEntity>> IEfCoreRepository<TEntity>.GetDbSetAsync()
@@ -318,17 +317,17 @@ public class EfCoreRepository<TDbContext, TEntity, TKey> : EfCoreRepository<TDbC
     /// Initializes a new instance with explicit service provider (recommended).
     /// </summary>
     public EfCoreRepository(
-        TDbContext dbContext,
+        IDbContextProvider<TDbContext> dbContextProvider,
         IServiceProvider serviceProvider)
-        : base(dbContext, serviceProvider)
+        : base(dbContextProvider, serviceProvider)
     {
     }
 
     /// <summary>
     /// Initializes a new instance relying on AmbientServiceProvider.
     /// </summary>
-    public EfCoreRepository(TDbContext dbContext)
-        : base(dbContext)
+    public EfCoreRepository(IDbContextProvider<TDbContext> dbContextProvider)
+        : base(dbContextProvider)
     {
     }
     public virtual async Task<TEntity> GetAsync(TKey id,

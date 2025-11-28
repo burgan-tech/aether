@@ -6,7 +6,9 @@ using System.Threading.Tasks;
 using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Repositories;
+using BBT.Aether.Events;
 using BBT.Aether.Guids;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.Logging;
 
@@ -17,6 +19,7 @@ namespace BBT.Aether.BackgroundJob;
 /// Scheduler-agnostic: Works with any IJobScheduler implementation (Dapr, Quartz, Hangfire, etc.).
 /// Integrates job persistence via IJobStore with scheduling via IJobScheduler.
 /// Uses UoW pattern for transactional consistency.
+/// Wraps job payloads in CloudEventEnvelope to carry schema context and metadata.
 /// </summary>
 public sealed class BackgroundJobService(
     IJobStore jobStore,
@@ -24,9 +27,12 @@ public sealed class BackgroundJobService(
     IUnitOfWorkManager uowManager,
     IGuidGenerator guidGenerator,
     IClock clock,
+    ICurrentSchema currentSchema,
+    IEventSerializer eventSerializer,
     ILogger<BackgroundJobService> logger)
     : IBackgroundJobService
 {
+    private const string Source = "urn:background-job";
     /// <inheritdoc/>
     public async Task<Guid> EnqueueAsync<TPayload>(
         string handlerName,
@@ -64,16 +70,25 @@ public sealed class BackgroundJobService(
             }
         }
         
+        var envelope = new CloudEventEnvelope<TPayload>
+        {
+            Type = handlerName,
+            Source = Source,
+            Data = payload,
+            Schema = currentSchema.Name,
+            DataContentType = "application/json"
+        };
+        
         var jobInfo = new BackgroundJobInfo(jobId, handlerName, jobName)
         {
             ExpressionValue = schedule,
-            Payload = JsonSerializer.SerializeToElement(payload),
+            Payload = eventSerializer.SerializeToElement(envelope),
             Status = BackgroundJobStatus.Scheduled,
             ExtraProperties = extraProperties
         };
 
-        // Serialize payload for scheduler
-        var payloadBytes = JsonSerializer.SerializeToUtf8Bytes(payload);
+        // Serialize envelope for scheduler
+        var payloadBytes = eventSerializer.Serialize(envelope);
 
         await using var uow = await uowManager.BeginAsync(cancellationToken: cancellationToken);
         try
@@ -81,12 +96,12 @@ public sealed class BackgroundJobService(
             // Save to job store
             await jobStore.SaveAsync(jobInfo, cancellationToken);
 
-            // Schedule with configured scheduler (Dapr, Quartz, etc.)
-            await jobScheduler.ScheduleAsync(handlerName, jobName, schedule, payloadBytes, cancellationToken);
-
             // Commit transaction
             await uow.CommitAsync(cancellationToken);
-
+            
+            // Schedule with configured scheduler (Dapr, Quartz, etc.)
+            await jobScheduler.ScheduleAsync(handlerName, jobName, schedule, payloadBytes, cancellationToken);
+            
             logger.LogInformation("Successfully enqueued job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
                 handlerName, jobName, jobId);
 
@@ -127,8 +142,19 @@ public sealed class BackgroundJobService(
             // Delete from scheduler and reschedule with new schedule
             await jobScheduler.DeleteAsync(jobInfo.HandlerName, jobInfo.JobName, cancellationToken);
 
+            // Wrap payload in CloudEventEnvelope (maintain schema context from original job)
+            var originalPayload = jobInfo.Payload;
+            var envelope = new CloudEventEnvelope
+            {
+                Type = jobInfo.HandlerName,
+                Source = "background-job",
+                Data = originalPayload,
+                Schema = currentSchema.Name, // Use current schema context
+                DataContentType = "application/json"
+            };
+
             // Reschedule with new schedule
-            var payloadBytes = JsonSerializer.SerializeToUtf8Bytes(jobInfo.Payload);
+            var payloadBytes = eventSerializer.Serialize(envelope);
             await jobScheduler.ScheduleAsync(jobInfo.HandlerName, jobInfo.JobName, newSchedule, payloadBytes, cancellationToken);
 
             // Save updated entity

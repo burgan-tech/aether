@@ -2,105 +2,28 @@
 
 ## Overview
 
-Distributed Lock in Aether provides a mechanism to coordinate work across multiple application instances. It ensures only one instance processes a critical section at a time, preventing race conditions and duplicate processing in distributed environments.
+Coordinates work across multiple application instances to prevent race conditions and duplicate processing. Supports Redis and Dapr implementations with automatic lock expiry.
 
-## Key Features
-
-- **Multiple Providers** - Redis and Dapr implementations
-- **Automatic Cleanup** - Locks expire automatically
-- **ExecuteWithLock Pattern** - Convenient execution wrapper
-- **Lock Renewal** - Extend lock duration
-- **Owner Identification** - Track lock ownership
-
-## Core Interface
-
-### IDistributedLockService
-
-```csharp
-public interface IDistributedLockService
-{
-    Task<bool> TryAcquireLockAsync(
-        string resourceId, 
-        int expiryInSeconds = 60, 
-        CancellationToken cancellationToken = default);
-    
-    Task<bool> ReleaseLockAsync(
-        string resourceId, 
-        CancellationToken cancellationToken = default);
-    
-    Task<T?> ExecuteWithLockAsync<T>(
-        string resourceId, 
-        Func<Task<T>> function, 
-        int expiryInSeconds = 60, 
-        CancellationToken cancellationToken = default);
-    
-    Task<bool> ExecuteWithLockAsync(
-        string resourceId, 
-        Func<Task> action, 
-        int expiryInSeconds = 60, 
-        CancellationToken cancellationToken = default);
-}
-```
-
-## Configuration
+## Quick Start
 
 ### Redis Lock
 
 ```csharp
 services.AddRedisDistributedLock();
 
-// Requires Redis connection
 services.AddSingleton<IConnectionMultiplexer>(sp =>
-{
-    return ConnectionMultiplexer.Connect(configuration.GetConnectionString("Redis"));
-});
+    ConnectionMultiplexer.Connect(configuration.GetConnectionString("Redis")));
 ```
 
 ### Dapr Lock
 
 ```csharp
 services.AddDaprDistributedLock("lockstore");
-
-// Requires Dapr sidecar with lock component
 ```
 
-## Usage Examples
+## Usage
 
-### Basic Lock Acquisition
-
-```csharp
-public class OrderService
-{
-    private readonly IDistributedLockService _lockService;
-    
-    public async Task ProcessOrderAsync(Guid orderId)
-    {
-        var resourceId = $"order:{orderId}";
-        
-        // Try to acquire lock
-        var lockAcquired = await _lockService.TryAcquireLockAsync(resourceId, expiryInSeconds: 30);
-        
-        if (!lockAcquired)
-        {
-            _logger.LogWarning("Could not acquire lock for order {OrderId}", orderId);
-            return;
-        }
-        
-        try
-        {
-            // Critical section
-            await ProcessOrderLogicAsync(orderId);
-        }
-        finally
-        {
-            // Always release lock
-            await _lockService.ReleaseLockAsync(resourceId);
-        }
-    }
-}
-```
-
-### ExecuteWithLock Pattern
+### ExecuteWithLock Pattern (Recommended)
 
 ```csharp
 public async Task ProcessOrderAsync(Guid orderId)
@@ -109,10 +32,10 @@ public async Task ProcessOrderAsync(Guid orderId)
         resourceId: $"order:{orderId}",
         action: async () =>
         {
-            await ProcessOrderLogicAsync(orderId);
+            var order = await _repository.GetAsync(orderId);
+            await ProcessOrderLogicAsync(order);
         },
-        expiryInSeconds: 30
-    );
+        expiryInSeconds: 30);
     
     if (!executed)
     {
@@ -121,7 +44,7 @@ public async Task ProcessOrderAsync(Guid orderId)
 }
 ```
 
-### ExecuteWithLock with Return Value
+### With Return Value
 
 ```csharp
 public async Task<ProcessResult?> ProcessOrderAsync(Guid orderId)
@@ -133,239 +56,118 @@ public async Task<ProcessResult?> ProcessOrderAsync(Guid orderId)
             var order = await _repository.GetAsync(orderId);
             order.Process();
             await _repository.UpdateAsync(order);
-            return new ProcessResult { Success = true, OrderId = orderId };
+            return new ProcessResult { Success = true };
         },
-        expiryInSeconds: 60
-    );
+        expiryInSeconds: 60);
 }
 ```
 
-### Preventing Duplicate Processing
+### Manual Lock Management
 
 ```csharp
-public class PaymentProcessor
+public async Task ProcessPaymentAsync(Guid paymentId)
 {
-    public async Task ProcessPaymentAsync(Guid paymentId)
+    var resourceId = $"payment:{paymentId}";
+    
+    if (!await _lockService.TryAcquireLockAsync(resourceId, expiryInSeconds: 30))
     {
-        var executed = await _lockService.ExecuteWithLockAsync(
-            resourceId: $"payment:{paymentId}",
-            action: async () =>
-            {
-                // Check if already processed
-                var payment = await _repository.GetAsync(paymentId);
-                if (payment.IsProcessed)
-                    return;
-                
-                // Process payment
-                await ProcessPaymentLogicAsync(payment);
-                payment.MarkAsProcessed();
-                await _repository.UpdateAsync(payment);
-            },
-            expiryInSeconds: 120
-        );
+        _logger.LogWarning("Could not acquire lock");
+        return;
+    }
+    
+    try
+    {
+        await ProcessPaymentLogicAsync(paymentId);
+    }
+    finally
+    {
+        await _lockService.ReleaseLockAsync(resourceId);
     }
 }
 ```
 
-### Background Job Coordination
+## Interface
 
 ```csharp
-public class ReportGenerator
+public interface IDistributedLockService
 {
-    public async Task GenerateDailyReportAsync()
-    {
-        // Ensure only one instance generates the report
-        var executed = await _lockService.ExecuteWithLockAsync(
-            resourceId: "daily-report-generation",
-            action: async () =>
-            {
-                _logger.LogInformation("Generating daily report...");
-                await GenerateReportAsync();
-                _logger.LogInformation("Daily report generated successfully");
-            },
-            expiryInSeconds: 300 // 5 minutes
-        );
-        
-        if (!executed)
-        {
-            _logger.LogInformation("Another instance is generating the report");
-        }
-    }
+    Task<bool> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60, CancellationToken ct = default);
+    Task<bool> ReleaseLockAsync(string resourceId, CancellationToken ct = default);
+    Task<T?> ExecuteWithLockAsync<T>(string resourceId, Func<Task<T>> function, int expiryInSeconds = 60, CancellationToken ct = default);
+    Task<bool> ExecuteWithLockAsync(string resourceId, Func<Task> action, int expiryInSeconds = 60, CancellationToken ct = default);
 }
-```
-
-## Best Practices
-
-### 1. Choose Appropriate Lock Duration
-
-```csharp
-// ✅ Good: Lock duration matches operation time
-await _lockService.ExecuteWithLockAsync(
-    "quick-operation",
-    async () => await QuickOperationAsync(),
-    expiryInSeconds: 10
-);
-
-await _lockService.ExecuteWithLockAsync(
-    "long-operation",
-    async () => await LongOperationAsync(),
-    expiryInSeconds: 300
-);
-```
-
-### 2. Use Descriptive Resource IDs
-
-```csharp
-// ✅ Good: Clear, structured resource IDs
-var lockId = $"order:payment:{orderId}";
-var lockId = $"user:profile:update:{userId}";
-var lockId = $"report:daily:{date:yyyy-MM-dd}";
-
-// ❌ Bad: Vague or inconsistent
-var lockId = orderId.ToString();
-var lockId = "lock1";
-```
-
-### 3. Handle Lock Failures Gracefully
-
-```csharp
-// ✅ Good: Handle failure appropriately
-var executed = await _lockService.ExecuteWithLockAsync(resourceId, async () =>
-{
-    await ProcessAsync();
-});
-
-if (!executed)
-{
-    // Queue for retry or notify
-    await _queue.EnqueueRetryAsync(resourceId);
-}
-
-// ❌ Bad: Ignoring lock failure
-await _lockService.ExecuteWithLockAsync(resourceId, async () =>
-{
-    await ProcessAsync();
-});
-// Continues regardless of success
-```
-
-### 4. Keep Critical Sections Short
-
-```csharp
-// ✅ Good: Only lock what needs coordination
-await _lockService.ExecuteWithLockAsync(
-    $"inventory:{productId}",
-    async () =>
-    {
-        // Only critical inventory update
-        var product = await _repository.GetAsync(productId);
-        product.DecreaseStock(quantity);
-        await _repository.UpdateAsync(product);
-    }
-);
-
-// Do non-critical work outside lock
-await SendNotificationAsync(productId);
-
-// ❌ Bad: Locking too much
-await _lockService.ExecuteWithLockAsync(
-    $"inventory:{productId}",
-    async () =>
-    {
-        var product = await _repository.GetAsync(productId);
-        product.DecreaseStock(quantity);
-        await _repository.UpdateAsync(product);
-        await SendNotificationAsync(productId); // Don't need lock for this
-    }
-);
 ```
 
 ## Common Patterns
+
+### Prevent Duplicate Processing
+
+```csharp
+public async Task ProcessPaymentAsync(Guid paymentId)
+{
+    await _lockService.ExecuteWithLockAsync(
+        $"payment:{paymentId}",
+        async () =>
+        {
+            var payment = await _repository.GetAsync(paymentId);
+            if (payment.IsProcessed) return; // Already done
+            
+            await ProcessPaymentLogicAsync(payment);
+            payment.MarkAsProcessed();
+            await _repository.UpdateAsync(payment);
+        },
+        expiryInSeconds: 120);
+}
+```
 
 ### Cache Stampede Prevention
 
 ```csharp
 public async Task<Product> GetProductAsync(Guid id)
 {
-    // Try cache first
     var cached = await _cache.GetAsync<Product>($"product:{id}");
-    if (cached != null)
-        return cached;
+    if (cached != null) return cached;
     
-    // Use lock to prevent multiple simultaneous DB queries
     return await _lockService.ExecuteWithLockAsync(
-        resourceId: $"cache:product:{id}",
-        function: async () =>
+        $"cache:product:{id}",
+        async () =>
         {
-            // Check cache again (might have been populated while waiting for lock)
+            // Check again after acquiring lock
             cached = await _cache.GetAsync<Product>($"product:{id}");
-            if (cached != null)
-                return cached;
+            if (cached != null) return cached;
             
-            // Fetch from DB and cache
             var product = await _repository.GetAsync(id);
             await _cache.SetAsync($"product:{id}", product);
             return product;
         },
-        expiryInSeconds: 10
-    ) ?? throw new EntityNotFoundException(typeof(Product), id);
+        expiryInSeconds: 10) ?? throw new EntityNotFoundException(typeof(Product), id);
 }
 ```
 
 ### Singleton Background Task
 
 ```csharp
-public class CleanupJob
+public async Task GenerateDailyReportAsync()
 {
-    public async Task ExecuteAsync()
-    {
-        await _lockService.ExecuteWithLockAsync(
-            resourceId: "cleanup-job",
-            action: async () =>
-            {
-                await CleanupExpiredDataAsync();
-            },
-            expiryInSeconds: 600 // 10 minutes
-        );
-    }
-}
-```
-
-## Testing
-
-```csharp
-public class OrderServiceTests
-{
-    private readonly Mock<IDistributedLockService> _mockLockService;
+    var executed = await _lockService.ExecuteWithLockAsync(
+        "daily-report-generation",
+        async () => await GenerateReportAsync(),
+        expiryInSeconds: 300);
     
-    [Fact]
-    public async Task ProcessOrder_ShouldProcess_WhenLockAcquired()
-    {
-        // Arrange
-        _mockLockService
-            .Setup(l => l.ExecuteWithLockAsync(
-                It.IsAny<string>(),
-                It.IsAny<Func<Task>>(),
-                It.IsAny<int>(),
-                default))
-            .Returns<string, Func<Task>, int, CancellationToken>(
-                async (_, action, _, _) =>
-                {
-                    await action();
-                    return true;
-                });
-        
-        // Act
-        await _service.ProcessOrderAsync(orderId);
-        
-        // Assert
-        _mockRepository.Verify(r => r.UpdateAsync(It.IsAny<Order>(), false, default), Times.Once);
-    }
+    if (!executed)
+        _logger.LogInformation("Another instance is generating the report");
 }
 ```
+
+## Best Practices
+
+1. **Choose appropriate lock duration** - Match to expected operation time + buffer
+2. **Use descriptive resource IDs** - `order:payment:{orderId}`, `report:daily:{date}`
+3. **Handle lock failures** - Log, queue for retry, or skip gracefully
+4. **Keep critical sections short** - Do non-critical work outside the lock
+5. **Prefer ExecuteWithLock** - Automatic release on completion/exception
 
 ## Related Features
 
-- **[Distributed Cache](../distributed-cache/README.md)** - Coordinate cache updates
-- **[Background Jobs](../background-job/README.md)** - Coordinate job execution
-
+- [Distributed Cache](../distributed-cache/README.md) - Cache stampede prevention
+- [Background Jobs](../background-job/README.md) - Coordinate job execution

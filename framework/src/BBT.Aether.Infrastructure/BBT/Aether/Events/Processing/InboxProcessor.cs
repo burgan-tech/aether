@@ -22,49 +22,28 @@ public class InboxProcessor<TDbContext>(
     AetherInboxOptions options) : IInboxProcessor
     where TDbContext : DbContext, IHasEfCoreInbox
 {
+    private readonly string _workerId = $"{Environment.MachineName}-{Environment.ProcessId}-{Guid.NewGuid():N}";
+
     /// <inheritdoc />
     public virtual async Task RunAsync(CancellationToken cancellationToken = default)
     {
-        logger.LogInformation("InboxProcessor started");
-
-        while (!cancellationToken.IsCancellationRequested)
+        try
         {
-            try
-            {
-                await ProcessWithLockAsync(cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Error in inbox processing cycle");
-            }
-
-            await Task.Delay(options.ProcessingInterval, cancellationToken);
+            await ProcessWithLockAsync(cancellationToken);
         }
-
-        logger.LogInformation("InboxProcessor stopped");
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error in inbox processing cycle");
+        }
     }
 
     protected virtual async Task ProcessWithLockAsync(CancellationToken cancellationToken)
     {
-        // Try to acquire distributed lock
-        await using var lockHandle = await distributedLockService.TryAcquireLockAsync(
-            options.DistributedLockName,
-            options.LockExpirySeconds,
-            cancellationToken);
-
-        if (lockHandle == null)
-        {
-            logger.LogDebug("Could not acquire distributed lock: {LockName}", options.DistributedLockName);
-            return;
-        }
-
-        logger.LogDebug("Acquired distributed lock: {LockName}", options.DistributedLockName);
-
-        // Process pending events
+        // Process pending events using database-level locking (no distributed lock needed)
         await ProcessPendingEventsAsync(cancellationToken);
 
-        // Cleanup old messages
-        await CleanupOldMessagesAsync(cancellationToken);
+        // Cleanup uses distributed lock to ensure only one processor cleans at a time
+        await CleanupOldMessagesWithLockAsync(cancellationToken);
     }
 
     protected virtual async Task ProcessPendingEventsAsync(CancellationToken cancellationToken)
@@ -75,15 +54,20 @@ public class InboxProcessor<TDbContext>(
             await using var scope = scopeFactory.CreateAsyncScope();
             var inboxStore = scope.ServiceProvider.GetRequiredService<IInboxStore>();
 
-            // Get pending events
-            var pendingEvents = await inboxStore.GetPendingEventsAsync(options.ProcessingBatchSize, cancellationToken);
+            // Lease pending events with database-level locking
+            var pendingEvents = await inboxStore.LeaseBatchAsync(
+                options.ProcessingBatchSize,
+                _workerId,
+                options.LeaseDuration,
+                cancellationToken);
 
             if (!pendingEvents.Any())
             {
                 break;
             }
 
-            logger.LogInformation("Found {Count} pending events in the inbox", pendingEvents.Count);
+            logger.LogInformation("Leased {Count} pending events in the inbox for worker {WorkerId}", 
+                pendingEvents.Count, _workerId);
 
             foreach (var inboxMessage in pendingEvents)
             {
@@ -126,10 +110,10 @@ public class InboxProcessor<TDbContext>(
                 await MarkEventAsFailedAsync(inboxMessage.Id, scopedServiceProvider, cancellationToken);
                 return;
             }
-            
+
             var eventName = envelope.Type;
             var version = envelope.Version ?? 1;
-            
+
             // Lookup invoker from registry
             if (!invokerRegistry.TryGet(eventName, version, out var invoker))
             {
@@ -181,6 +165,23 @@ public class InboxProcessor<TDbContext>(
         {
             logger.LogError(ex, "Failed to mark event {EventId} as failed", eventId);
         }
+    }
+
+    protected virtual async Task CleanupOldMessagesWithLockAsync(CancellationToken cancellationToken)
+    {
+        // Use distributed lock for cleanup to avoid concurrent cleanup operations
+        await using var lockHandle = await distributedLockService.TryAcquireLockAsync(
+            options.DistributedLockName + ":cleanup",
+            options.LockExpirySeconds,
+            cancellationToken);
+
+        if (lockHandle == null)
+        {
+            logger.LogDebug("Could not acquire distributed lock for cleanup");
+            return;
+        }
+
+        await CleanupOldMessagesAsync(cancellationToken);
     }
 
     protected virtual async Task CleanupOldMessagesAsync(CancellationToken cancellationToken)

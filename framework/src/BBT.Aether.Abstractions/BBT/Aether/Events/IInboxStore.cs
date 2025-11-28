@@ -62,5 +62,19 @@ public interface IInboxStore
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>Number of messages deleted</returns>
     Task<int> CleanupOldMessagesAsync(int batchSize, TimeSpan retentionPeriod, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Leases a batch of inbox messages for processing with database-level locking.
+    /// </summary>
+    /// <param name="batchSize">Maximum number of messages to lease</param>
+    /// <param name="workerId">Unique identifier for the worker acquiring the lease</param>
+    /// <param name="leaseDuration">How long the lease should be held</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>List of leased inbox messages</returns>
+    Task<IReadOnlyList<InboxMessage>> LeaseBatchAsync(
+        int batchSize,
+        string workerId,
+        TimeSpan leaseDuration,
+        CancellationToken cancellationToken = default);
 }
 

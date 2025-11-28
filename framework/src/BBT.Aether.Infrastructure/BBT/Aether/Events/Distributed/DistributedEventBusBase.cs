@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.MultiSchema;
 
 namespace BBT.Aether.Events;
 
@@ -8,13 +9,15 @@ public abstract class DistributedEventBusBase(
     ITopicNameStrategy topicNameStrategy,
     IEventSerializer eventSerializer,
     IOutboxStore outboxStore,
-    AetherEventBusOptions eventBusOptions)
+    AetherEventBusOptions eventBusOptions,
+    ICurrentSchema currentSchema)
     : IDistributedEventBus
 {
     protected readonly ITopicNameStrategy TopicNameStrategy = topicNameStrategy;
     protected readonly IEventSerializer EventSerializer = eventSerializer;
     protected readonly IOutboxStore OutboxStore = outboxStore;
     protected readonly AetherEventBusOptions AetherEventBusOptions = eventBusOptions;
+    protected readonly ICurrentSchema CurrentSchema = currentSchema;
 
     /// <summary>
     /// Creates a CloudEventEnvelope from the event payload using EventMeta&lt;T&gt;.
@@ -44,7 +47,8 @@ public abstract class DistributedEventBusBase(
             Subject = subject,
             DataSchema = EventMeta<TEvent>.DataSchema,
             Version = EventMeta<TEvent>.Version,
-            Data = payload
+            Data = payload,
+            Schema = CurrentSchema.Name  // Automatically populate schema from current context
             // Other properties (SpecVersion, Id, Time, DataContentType) use defaults from CloudEventEnvelope class
         };
     }
@@ -131,7 +135,8 @@ public abstract class DistributedEventBusBase(
             Subject = subject,
             DataSchema = metadata.DataSchema,
             Version = metadata.Version,
-            Data = @event
+            Data = @event,
+            Schema = CurrentSchema.Name  // Automatically populate schema from current context
             // Other properties (SpecVersion, Id, Time, DataContentType) use defaults from CloudEventEnvelope class
         };
     }

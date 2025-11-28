@@ -4,18 +4,21 @@ using System.Threading.Tasks;
 using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Repositories;
+using BBT.Aether.Events;
 using BBT.Aether.Uow;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace BBT.Aether.BackgroundJob;
 
 /// <inheritdoc />
 public class JobDispatcher(
-    IServiceProvider serviceProvider,
+    IServiceScopeFactory scopeFactory,
     IJobStore jobStore,
     IUnitOfWorkManager uowManager,
     BackgroundJobOptions options,
     IClock clock,
+    IEventSerializer eventSerializer,
     ILogger<JobDispatcher> logger)
     : IJobDispatcher
 {
@@ -182,6 +185,6 @@ public class JobDispatcher(
         }
 
         // Invoke handler - completely type-safe, no reflection at runtime
-        await invoker.InvokeAsync(serviceProvider, jobPayload, cancellationToken);
+        await invoker.InvokeAsync(scopeFactory, eventSerializer, jobPayload, cancellationToken);
     }
 }

@@ -46,4 +46,13 @@ public class NullInboxStore : IInboxStore
     {
         return Task.FromResult(0);
     }
+
+    public Task<IReadOnlyList<InboxMessage>> LeaseBatchAsync(
+        int batchSize,
+        string workerId,
+        TimeSpan leaseDuration,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult<IReadOnlyList<InboxMessage>>(Array.Empty<InboxMessage>());
+    }
 }

@@ -12,13 +12,13 @@ public static class InboxModelBuilderExtensions
     /// Configures the InboxMessage entity with appropriate table name, indexes, and constraints.
     /// </summary>
     /// <param name="builder">The ModelBuilder instance</param>
-    /// <param name="schemaName">Schema name</param>
+    /// <param name="schema">Schema name</param>
     /// <returns>The ModelBuilder for method chaining</returns>
-    public static ModelBuilder ConfigureInbox(this ModelBuilder builder, string? schemaName = null)
+    public static ModelBuilder ConfigureInbox(this ModelBuilder builder, string? schema = null)
     {
         builder.Entity<InboxMessage>(entity =>
         {
-            entity.ToTable("InboxMessages",  schemaName);
+            entity.ToTable("InboxMessages",  schema);
 
             entity.HasKey(e => e.Id);
 
@@ -48,8 +48,13 @@ public static class InboxModelBuilderExtensions
 
             entity.Property(e => e.NextRetryTime);
 
-            // Index for processing pending messages
-            entity.HasIndex(e => new { e.Status, e.NextRetryTime, e.RetryCount })
+            entity.Property(e => e.LockedBy)
+                .HasMaxLength(200);
+
+            entity.Property(e => e.LockedUntil);
+
+            // Index for processing pending messages with lease support
+            entity.HasIndex(e => new { e.Status, e.LockedUntil, e.NextRetryTime, e.CreatedAt })
                 .HasDatabaseName("IX_InboxMessages_Processing");
 
             // Index for cleanup of old processed messages

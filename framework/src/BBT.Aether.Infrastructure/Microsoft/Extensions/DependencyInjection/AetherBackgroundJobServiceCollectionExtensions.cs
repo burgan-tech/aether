@@ -3,6 +3,7 @@ using System.Linq;
 using BBT.Aether.BackgroundJob;
 using BBT.Aether.BackgroundJob.Dapr;
 using BBT.Aether.Domain.Repositories;
+using BBT.Aether.Events;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -47,6 +48,9 @@ public static class AetherBackgroundJobServiceCollectionExtensions
         var options = new BackgroundJobOptions();
         configure?.Invoke(options);
         services.AddSingleton(options);
+
+        // Register event serializer for CloudEventEnvelope wrapping (if not already registered)
+        services.TryAddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
 
         // Register core services (scheduler-agnostic)
         services.TryAddScoped<IJobStore, EfCoreJobStore<TDbContext>>();

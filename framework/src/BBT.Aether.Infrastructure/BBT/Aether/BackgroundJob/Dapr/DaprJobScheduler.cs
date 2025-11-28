@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Events;
 using Dapr.Jobs;
 using Dapr.Jobs.Models;
 using Microsoft.Extensions.Logging;
@@ -15,6 +16,7 @@ namespace BBT.Aether.BackgroundJob.Dapr;
 /// </summary>
 public class DaprJobScheduler(
     DaprJobsClient daprJobsClient,
+    IEventSerializer eventSerializer,
     ILogger<DaprJobScheduler> logger)
     : IJobScheduler
 {
@@ -39,10 +41,16 @@ public class DaprJobScheduler(
         {
             var daprSchedule = ParseSchedule(schedule);
 
+            // Deserialize the envelope to object so Dapr can serialize it properly
+            // This prevents double-serialization (base64 string wrapping) by Dapr
+            // Same pattern as used in DaprEventBus
+            var envelopeObject = eventSerializer.Deserialize<object>(payload.Span);
+            var payloadBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(envelopeObject);
+
             await daprJobsClient.ScheduleJobAsync(
                 jobName: jobName, // Use jobName as the unique identifier in Dapr
                 schedule: daprSchedule,
-                payload: payload,
+                payload: new ReadOnlyMemory<byte>(payloadBytes),
                 cancellationToken: cancellationToken);
         }
         catch (Exception ex)

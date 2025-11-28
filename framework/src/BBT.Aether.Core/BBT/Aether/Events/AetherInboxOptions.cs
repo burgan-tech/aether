@@ -48,5 +48,12 @@ public class AetherInboxOptions
     /// Default is 60 seconds.
     /// </summary>
     public int LockExpirySeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Gets or sets the lease duration for message processing.
+    /// Messages are locked for this duration while being processed.
+    /// Default is 30 seconds.
+    /// </summary>
+    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
 }
 

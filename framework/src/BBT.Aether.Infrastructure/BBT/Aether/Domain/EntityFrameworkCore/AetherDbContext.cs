@@ -17,8 +17,7 @@ namespace BBT.Aether.Domain.EntityFrameworkCore;
 
 public abstract class AetherDbContext<TDbContext>(
     DbContextOptions<TDbContext> options,
-    IServiceProvider? serviceProvider = null
-)
+    IDomainEventSink? eventSink = null)
     : DbContext(options)
     where TDbContext : DbContext
 {
@@ -55,7 +54,9 @@ public abstract class AetherDbContext<TDbContext>(
      public override int SaveChanges()
     {
         TrackEntityStates();
-        return base.SaveChanges();
+        var result =  base.SaveChanges();
+        PublishDomainEventsToSink();
+        return result;
     }
 
     public async override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess,
@@ -64,8 +65,9 @@ public abstract class AetherDbContext<TDbContext>(
         try
         {
             TrackEntityStates();
-            // Domain event collection and dispatch handled by UoW or calling code
-            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+            var result =  await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+            PublishDomainEventsToSink();
+            return result;
         }
         catch (DbUpdateConcurrencyException ex)
         {
@@ -92,7 +94,7 @@ public abstract class AetherDbContext<TDbContext>(
     public virtual Task<int> SaveChangesOnDbContextAsync(bool acceptAllChangesOnSuccess,
         CancellationToken cancellationToken = default)
     {
-        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        return SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
     }
 
     protected virtual void ConfigureBaseProperties<TEntity>(ModelBuilder modelBuilder,
@@ -266,5 +268,27 @@ public abstract class AetherDbContext<TDbContext>(
         {
             entity!.ClearDomainEvents();
         }
+    }
+
+    /// <summary>
+    /// Publishes collected domain events to the sink (Unit of Work).
+    /// Called automatically during SaveChanges to push events into the UoW transaction queue.
+    /// </summary>
+    private void PublishDomainEventsToSink()
+    {
+        if (eventSink is null)
+        {
+            // No sink configured - events will be collected explicitly by UoW (backward compatibility)
+            return;
+        }
+
+        var domainEvents = CollectDomainEvents();
+        if (domainEvents.Count == 0)
+        {
+            return;
+        }
+
+        eventSink.EnqueueDomainEvents(domainEvents);
+        ClearDomainEvents();
     }
 }

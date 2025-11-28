@@ -50,6 +50,16 @@ public class InboxMessage
     public DateTime? NextRetryTime { get; set; } = null;
 
     /// <summary>
+    /// Gets or sets the worker ID that currently holds the lock on this message.
+    /// </summary>
+    public string? LockedBy { get; set; }
+
+    /// <summary>
+    /// Gets or sets when the lock expires.
+    /// </summary>
+    public DateTime? LockedUntil { get; set; }
+
+    /// <summary>
     /// Gets or sets extra properties for storing metadata (pubSubName, version, etc.).
     /// </summary>
     public Dictionary<string, object> ExtraProperties { get; set; } = new();

@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Events;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -19,16 +20,18 @@ public abstract class EventsController(
     IInboxStore inboxStore,
     IUnitOfWorkManager unitOfWorkManager,
     IEventSerializer serializer,
+    ICurrentSchema currentSchema,
     ILogger<EventsController> logger) : ControllerBase
 {
     protected readonly IInboxStore InboxStore = inboxStore;
     protected readonly IUnitOfWorkManager UnitOfWorkManager = unitOfWorkManager;
     protected readonly IEventSerializer Serializer = serializer;
+    protected readonly ICurrentSchema CurrentSchema = currentSchema;
     protected readonly ILogger<EventsController> Logger = logger;
 
     /// <summary>
     /// Processes incoming events from Dapr.
-    /// Flow: Read body → Check inbox → Store as pending → Return 200 OK
+    /// Flow: Read body → Extract schema → Set schema context → Check inbox → Store as pending → Return 200 OK
     /// Background InboxProcessor will handle actual event processing.
     /// Developers should call this method from their controller action.
     /// </summary>
@@ -56,10 +59,17 @@ public abstract class EventsController(
                 return Ok(); // Return OK to prevent Dapr retries on malformed/missing ID
             }
             
-            // Step 3: Open UoW for storing the event
+            // Step 3: Extract and set schema context from CloudEvent envelope
+            var schemaFromEnvelope = TryExtractSchema(payload);
+            if (!string.IsNullOrWhiteSpace(schemaFromEnvelope))
+            {
+                CurrentSchema.Set(schemaFromEnvelope);
+            }
+            
+            // Step 4: Open UoW for storing the event (with schema context set)
             await using var uow = await UnitOfWorkManager.BeginRequiresNew(cancellationToken);
 
-            // Step 4: Check inbox for duplicate (idempotency)
+            // Step 5: Check inbox for duplicate (idempotency)
             if (await InboxStore.HasProcessedAsync(eventId, cancellationToken))
             {
                 Logger.LogInformation("Event {EventId} ({Name} v{Version}) has already been processed, skipping", 
@@ -67,13 +77,12 @@ public abstract class EventsController(
                 return Ok();
             }
 
-            // Step 5: Store event as pending for background processing
+            // Step 6: Store event as pending for background processing
             await TryStorePendingEventAsync(payload, eventId, cancellationToken);
 
-            // Step 6: Commit UoW (flushes inbox)
+            // Step 7: Commit UoW (flushes inbox)
             await uow.CommitAsync(cancellationToken);
-
-            Logger.LogDebug("Successfully stored event {EventId} ({Name} v{Version}) as pending", eventId, name, version);
+            
             return Ok();
         }
         catch (Exception ex)
@@ -124,6 +133,33 @@ public abstract class EventsController(
     }
 
     /// <summary>
+    /// Attempts to extract the Schema from the CloudEvent envelope.
+    /// Returns null if extraction fails or Schema is missing.
+    /// Can be overridden to customize schema extraction.
+    /// </summary>
+    protected virtual string? TryExtractSchema(byte[] payload)
+    {
+        try
+        {
+            using var jsonDoc = JsonDocument.Parse(payload);
+            var root = jsonDoc.RootElement;
+
+            if (root.TryGetProperty("schema", out var schemaElement) || 
+                root.TryGetProperty("Schema", out schemaElement))
+            {
+                return schemaElement.GetString();
+            }
+
+            return null;
+        }
+        catch (JsonException ex)
+        {
+            Logger.LogDebug(ex, "Failed to extract Schema from CloudEvent envelope");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Attempts to store the event as pending in the inbox for background processing.
     /// Logs a warning if storing fails but does not throw.
     /// Can be overridden to customize inbox storage behavior.
@@ -136,27 +172,6 @@ public abstract class EventsController(
             
             if (envelope != null)
             {
-                // // Parse version from route parameter (format: "v1" -> 1)
-                // var versionNumber = ParseVersionNumber(version);
-                //
-                // // Create a new envelope with version included if not already present
-                // if (envelope.Version == null && versionNumber.HasValue)
-                // {
-                //     envelope = new CloudEventEnvelope
-                //     {
-                //         Id = envelope.Id,
-                //         SpecVersion = envelope.SpecVersion,
-                //         Type = envelope.Type,
-                //         Source = envelope.Source,
-                //         Subject = envelope.Subject,
-                //         Time = envelope.Time,
-                //         DataContentType = envelope.DataContentType,
-                //         DataSchema = envelope.DataSchema,
-                //         Version = envelope.Version,
-                //         Data = envelope.Data
-                //     };
-                // }
-                
                 await InboxStore.StorePendingAsync(envelope, cancellationToken);
             }
         }
@@ -166,25 +181,5 @@ public abstract class EventsController(
             throw; // Re-throw to trigger retry
         }
     }
-
-    // /// <summary>
-    // /// Parses version string from route (e.g., "v1", "1") to integer.
-    // /// Returns null if parsing fails.
-    // /// </summary>
-    // protected virtual int? ParseVersionNumber(string version)
-    // {
-    //     if (string.IsNullOrWhiteSpace(version))
-    //         return null;
-    //
-    //     // Remove 'v' or 'V' prefix if present
-    //     var versionStr = version.TrimStart('v', 'V');
-    //     
-    //     if (int.TryParse(versionStr, out var versionNumber))
-    //     {
-    //         return versionNumber;
-    //     }
-    //
-    //     return null;
-    // }
 }
 
