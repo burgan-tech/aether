@@ -14,7 +14,7 @@ public static class AetherDistributedLockServiceCollectionExtensions
     public static IServiceCollection AddRedisDistributedLock(
         this IServiceCollection services)
     {
-        services.AddScoped<IDistributedLockService>(sp =>
+        services.AddSingleton<IDistributedLockService>(sp =>
             new RedisDistributedLockService(
                 sp.GetRequiredService<IConnectionMultiplexer>(),
                 sp.GetRequiredService<ILogger<RedisDistributedLockService>>(),
@@ -35,7 +35,7 @@ public static class AetherDistributedLockServiceCollectionExtensions
         }
 
         // Register the Dapr State Store cache service
-        services.AddScoped<IDistributedLockService>(sp =>
+        services.AddSingleton<IDistributedLockService>(sp =>
             new DaprDistributedLockService(
                 sp.GetRequiredService<DaprClient>(),
                 sp.GetRequiredService<ILogger<DaprDistributedLockService>>(),

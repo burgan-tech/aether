@@ -70,7 +70,7 @@ public class UnitOfWorkAttribute : AetherMethodInterceptionAspect
                 if (uowManager.Current != null)
                 {
                     await uowManager.Current.SaveChangesAsync(cancellationToken);
-                    await uowManager.Current.CommitAsync(cancellationToken);
+                    // await uowManager.Current.CommitAsync(cancellationToken);
                 }
 
                 await OnAfterAsync(args);

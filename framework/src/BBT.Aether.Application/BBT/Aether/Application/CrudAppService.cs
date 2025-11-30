@@ -54,7 +54,7 @@ public abstract class CrudAppService<TEntity, TGetOutputDto, TGetListOutputDto, 
 
     protected async override Task DeleteByIdAsync(TKey id)
     {
-        await Repository.DeleteAsync(id);
+        await Repository.DeleteAsync(id, true);
     }
 
     protected async override Task<TEntity> GetEntityByIdAsync(TKey id)

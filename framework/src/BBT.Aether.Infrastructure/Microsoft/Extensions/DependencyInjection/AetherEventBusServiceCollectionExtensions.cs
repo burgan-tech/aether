@@ -1,5 +1,6 @@
 using System;
 using BBT.Aether.Events;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
@@ -16,7 +17,7 @@ public static class AetherEventBusServiceCollectionExtensions
     public static IServiceCollection AddAetherEventBus(this IServiceCollection services, Action<AetherEventBusOptions>? configure = null)
     {
         // Core event bus registrations
-        services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
+        services.TryAddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
         services.AddSingleton<ITopicNameStrategy, DefaultTopicNameStrategy>();
         services.AddScoped<IOutboxStore, NullOutboxStore>();
         services.AddScoped<IInboxStore, NullInboxStore>();

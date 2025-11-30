@@ -54,10 +54,10 @@ public class DefaultExceptionToErrorInfoConverter(IServiceProvider serviceProvid
     protected virtual Error CreateErrorWithoutCode(Exception exception, AetherExceptionHandlingOptions options)
     {
         exception = TryToGetActualException(exception);
-
+        var code = (exception as IHasErrorCode)?.Code;
         if (exception is AetherDbConcurrencyException)
         {
-            return Error.Conflict("concurrency", "The data you have submitted has already changed by another user/client. Please discard the changes you've done and try from the beginning.");
+            return Error.Conflict(code ?? "concurrency", "The data you have submitted has already changed by another user/client. Please discard the changes you've done and try from the beginning.");
         }
 
         if (exception is EntityNotFoundException entityNotFoundException)
@@ -74,18 +74,17 @@ public class DefaultExceptionToErrorInfoConverter(IServiceProvider serviceProvid
         {
             var message = exception.Message;
             var details = (exception as IHasErrorDetails)?.Details;
-            
-            return Error.Failure("user_friendly", message, details);
+            return Error.Failure(code ?? "user_friendly", message, details);
         }
 
         if (exception is IBusinessException)
         {
-            return Error.Forbidden("business_rule", exception.Message);
+            return Error.Forbidden(code ?? "business_rule", exception.Message);
         }
 
         if (exception is NotImplementedException)
         {
-            return Error.Failure("not_implemented", "The requested functionality is not implemented.");
+            return Error.Failure(code ?? "not_implemented", "The requested functionality is not implemented.");
         }
 
         // Default case for unexpected errors
@@ -97,7 +96,7 @@ public class DefaultExceptionToErrorInfoConverter(IServiceProvider serviceProvid
             ? CreateDetailedErrorFromException(exception, options.SendStackTraceToClients)
             : null;
 
-        return Error.Failure("internal_error", errorMessage, errorDetail);
+        return Error.Failure(code ?? "internal_error", errorMessage, errorDetail);
     }
     
     protected virtual Error CreateEntityNotFoundError(EntityNotFoundException exception)

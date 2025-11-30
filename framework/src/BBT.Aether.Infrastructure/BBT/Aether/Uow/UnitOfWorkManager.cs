@@ -39,7 +39,9 @@ public sealed class UnitOfWorkManager(
         // Handle Required scope - participate in existing UoW if available
         if (options.Scope == UnitOfWorkScopeOption.Required && existing != null)
         {
-            return new UnitOfWorkScope(existing.Root, ambient);
+            return new UnitOfWorkScope(
+                existing.Root, 
+                ambient);
         }
 
         // Create new root UoW (for RequiresNew or when no existing UoW for Required)
@@ -47,7 +49,6 @@ public sealed class UnitOfWorkManager(
         var eventDispatcher = serviceProvider.GetService<IDomainEventDispatcher>();
         var root = new CompositeUnitOfWork(sources, eventDispatcher, domainEventOptions);
         await root.InitializeAsync(options, cancellationToken);
-
         return new UnitOfWorkScope(root, ambient);
     }
 
@@ -62,7 +63,9 @@ public sealed class UnitOfWorkManager(
             // Return a new scope on the same prepared UoW
             if (current is UnitOfWorkScope existingScope)
             {
-                return new UnitOfWorkScope(existingScope.Root, ambient);
+                return new UnitOfWorkScope(
+                    existingScope.Root, 
+                    ambient);
             }
         }
 

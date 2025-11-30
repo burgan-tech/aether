@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Events;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -12,27 +13,26 @@ namespace BBT.Aether.AspNetCore.Events;
 
 /// <summary>
 /// Abstract base class for event receiver endpoints for Dapr event delivery.
-/// Routes events by name and version using precompiled invokers.
+/// Stores events as pending in inbox for background processing.
 /// Developers should inherit from this class and create their own controller actions with custom routes.
 /// </summary>
 public abstract class EventsController(
-    IDistributedEventInvokerRegistry invokerRegistry,
     IInboxStore inboxStore,
     IUnitOfWorkManager unitOfWorkManager,
-    IServiceProvider serviceProvider,
     IEventSerializer serializer,
+    ICurrentSchema currentSchema,
     ILogger<EventsController> logger) : ControllerBase
 {
-    protected readonly IDistributedEventInvokerRegistry InvokerRegistry = invokerRegistry;
     protected readonly IInboxStore InboxStore = inboxStore;
     protected readonly IUnitOfWorkManager UnitOfWorkManager = unitOfWorkManager;
-    protected readonly IServiceProvider ServiceProvider = serviceProvider;
     protected readonly IEventSerializer Serializer = serializer;
+    protected readonly ICurrentSchema CurrentSchema = currentSchema;
     protected readonly ILogger<EventsController> Logger = logger;
 
     /// <summary>
     /// Processes incoming events from Dapr.
-    /// Flow: Read body → Check inbox → Lookup invoker → Invoke handler → Mark as processed
+    /// Flow: Read body → Extract schema → Set schema context → Check inbox → Store as pending → Return 200 OK
+    /// Background InboxProcessor will handle actual event processing.
     /// Developers should call this method from their controller action.
     /// </summary>
     /// <param name="name">Event name from route</param>
@@ -41,25 +41,35 @@ public abstract class EventsController(
     /// <returns>Action result indicating success or failure</returns>
     protected virtual async Task<IActionResult> ProcessEventAsync(
         string name,
-        int version,
+        string version,
         CancellationToken cancellationToken)
     {
+        byte[]? payload = null;
+        string? eventId = null;
+
         try
         {
             // Step 1: Read request body as bytes
-            var payload = await ReadRequestBodyAsync(cancellationToken);
+            payload = await ReadRequestBodyAsync(cancellationToken);
 
             // Step 2: Extract CloudEvent Id from JSON for idempotency check
-            var eventId = TryExtractEventId(payload, name, version);
+            eventId = TryExtractEventId(payload, name, version);
             if (string.IsNullOrWhiteSpace(eventId))
             {
                 return Ok(); // Return OK to prevent Dapr retries on malformed/missing ID
             }
             
-            // Step 3: Open UoW for this event processing (handler + inbox)
+            // Step 3: Extract and set schema context from CloudEvent envelope
+            var schemaFromEnvelope = TryExtractSchema(payload);
+            if (!string.IsNullOrWhiteSpace(schemaFromEnvelope))
+            {
+                CurrentSchema.Set(schemaFromEnvelope);
+            }
+            
+            // Step 4: Open UoW for storing the event (with schema context set)
             await using var uow = await UnitOfWorkManager.BeginRequiresNew(cancellationToken);
 
-            // Step 4: Check inbox for duplicate (idempotency)
+            // Step 5: Check inbox for duplicate (idempotency)
             if (await InboxStore.HasProcessedAsync(eventId, cancellationToken))
             {
                 Logger.LogInformation("Event {EventId} ({Name} v{Version}) has already been processed, skipping", 
@@ -67,28 +77,17 @@ public abstract class EventsController(
                 return Ok();
             }
 
-            // Step 5: Lookup invoker from registry by (name, version)
-            if (!InvokerRegistry.TryGet(name, version, out var invoker))
-            {
-                Logger.LogDebug("No handler registered for event {Name} v{Version}", name, version);
-                return NotFound($"No handler registered for event '{name}' version {version}");
-            }
-            
-            // Step 6: Invoke handler with precompiled invoker (no reflection!)
-            await invoker.InvokeAsync(ServiceProvider, payload, cancellationToken);
-            
-            // Step 7: Mark as processed in inbox (only tracks, doesn't save)
-            await TryMarkEventAsProcessedAsync(payload, eventId, cancellationToken);
+            // Step 6: Store event as pending for background processing
+            await TryStorePendingEventAsync(payload, eventId, cancellationToken);
 
-            // Step 8: Commit UoW (flushes inbox + any changes made by handler)
+            // Step 7: Commit UoW (flushes inbox)
             await uow.CommitAsync(cancellationToken);
-
-            Logger.LogDebug("Successfully processed event {EventId} ({Name} v{Version})", eventId, name, version);
+            
             return Ok();
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Error handling event {Name} v{Version}", name, version);
+            Logger.LogError(ex, "Error handling event {Name} v{Version} with ID {EventId}", name, version, eventId);
             
             // Return 500 to trigger Dapr retry mechanism
             return StatusCode(500, new { error = "Internal server error processing event" });
@@ -111,7 +110,7 @@ public abstract class EventsController(
     /// Returns null if extraction fails or ID is missing.
     /// Can be overridden to customize event ID extraction.
     /// </summary>
-    protected virtual string? TryExtractEventId(byte[] payload, string name, int version)
+    protected virtual string? TryExtractEventId(byte[] payload, string name, string version)
     {
         try
         {
@@ -123,22 +122,49 @@ public abstract class EventsController(
                 return idElement.GetString();
             }
 
-            Logger.LogWarning("CloudEvent Id is missing from event {Name} v{Version}", name, version);
+            Logger.LogWarning("CloudEvent Id is missing from event {Name} {Version}", name, version);
             return null;
         }
-        catch (JsonException ex)
+        catch (JsonException ex) 
         {
-            Logger.LogWarning(ex, "Failed to parse CloudEvent Id from event {Name} v{Version}", name, version);
+            Logger.LogWarning(ex, "Failed to parse CloudEvent Id from event {Name} {Version}", name, version);
             return null;
         }
     }
 
     /// <summary>
-    /// Attempts to mark the event as processed in the inbox.
-    /// Logs a warning if marking fails but does not throw.
-    /// Can be overridden to customize inbox marking behavior.
+    /// Attempts to extract the Schema from the CloudEvent envelope.
+    /// Returns null if extraction fails or Schema is missing.
+    /// Can be overridden to customize schema extraction.
     /// </summary>
-    protected virtual async Task TryMarkEventAsProcessedAsync(byte[] payload, string eventId, CancellationToken cancellationToken)
+    protected virtual string? TryExtractSchema(byte[] payload)
+    {
+        try
+        {
+            using var jsonDoc = JsonDocument.Parse(payload);
+            var root = jsonDoc.RootElement;
+
+            if (root.TryGetProperty("schema", out var schemaElement) || 
+                root.TryGetProperty("Schema", out schemaElement))
+            {
+                return schemaElement.GetString();
+            }
+
+            return null;
+        }
+        catch (JsonException ex)
+        {
+            Logger.LogDebug(ex, "Failed to extract Schema from CloudEvent envelope");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Attempts to store the event as pending in the inbox for background processing.
+    /// Logs a warning if storing fails but does not throw.
+    /// Can be overridden to customize inbox storage behavior.
+    /// </summary>
+    protected virtual async Task TryStorePendingEventAsync(byte[] payload, string eventId, CancellationToken cancellationToken)
     {
         try
         {
@@ -146,12 +172,13 @@ public abstract class EventsController(
             
             if (envelope != null)
             {
-                await InboxStore.MarkProcessedAsync(envelope, cancellationToken);
+                await InboxStore.StorePendingAsync(envelope, cancellationToken);
             }
         }
         catch (Exception ex)
         {
-            Logger.LogWarning(ex, "Failed to mark event {EventId} as processed in inbox", eventId);
+            Logger.LogWarning(ex, "Failed to store event {EventId} as pending in inbox", eventId);
+            throw; // Re-throw to trigger retry
         }
     }
 }

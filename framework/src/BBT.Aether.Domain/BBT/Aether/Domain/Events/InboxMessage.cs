@@ -1,6 +1,7 @@
 using System;
 using BBT.Aether.Auditing;
 using BBT.Aether.Domain.Entities;
+using BBT.Aether.Events;
 
 namespace BBT.Aether.Domain.Events;
 
@@ -58,9 +59,27 @@ public class InboxMessage : Entity<string>, IHasExtraProperties, IHasCreatedAt
     public DateTime? NextRetryTime { get; set; } = null;
 
     /// <summary>
+    /// Gets or sets the worker ID that currently holds the lock on this message.
+    /// </summary>
+    public string? LockedBy { get; set; }
+
+    /// <summary>
+    /// Gets or sets when the lock expires.
+    /// </summary>
+    public DateTime? LockedUntil { get; set; }
+
+    /// <summary>
     /// Gets or sets extra properties for storing metadata (pubSubName, version, etc.).
     /// </summary>
     public ExtraPropertyDictionary ExtraProperties { get; private set; } = new ExtraPropertyDictionary();
+
+    /// <summary>
+    /// Marks the message as currently being processed.
+    /// </summary>
+    public void MarkAsProcessing()
+    {
+        Status = IncomingEventStatus.Processing;
+    }
 
     /// <summary>
     /// Marks the message as processed.

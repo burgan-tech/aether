@@ -13,15 +13,9 @@ public interface ILocalTransaction
 {
     /// <summary>
     /// Gets the domain events collected during this transaction.
-    /// Events are collected before commit and dispatched after all transactions commit.
+    /// Events are automatically pushed via IDomainEventSink during SaveChanges.
     /// </summary>
     IReadOnlyList<DomainEventEnvelope> CollectedEvents { get; }
-
-    /// <summary>
-    /// Collects domain events from the transaction source.
-    /// Should be called before commit to make events available for processing (e.g., outbox).
-    /// </summary>
-    void CollectEvents();
 
     /// <summary>
     /// Commits the local transaction, persisting all changes.

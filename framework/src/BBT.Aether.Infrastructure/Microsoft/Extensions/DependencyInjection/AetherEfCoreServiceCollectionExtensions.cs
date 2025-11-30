@@ -12,16 +12,42 @@ namespace Microsoft.Extensions.DependencyInjection;
 
 public static class AetherEfCoreServiceCollectionExtensions
 {
+    /// <summary>
+    /// Adds Aether DbContext with EF Core configuration.
+    /// Use this overload if you don't need access to IServiceProvider in your configuration.
+    /// </summary>
     public static IServiceCollection AddAetherDbContext<TDbContext>(
         this IServiceCollection services,
         Action<DbContextOptionsBuilder> options)
+        where TDbContext : AetherDbContext<TDbContext>
+    {
+        // Delegate to the overload that accepts IServiceProvider
+        return services.AddAetherDbContext<TDbContext>((_, builder) => options(builder));
+    }
+
+    /// <summary>
+    /// Adds Aether DbContext with EF Core configuration.
+    /// Use this overload when you need access to IServiceProvider (e.g., to add interceptors from DI).
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// services.AddAetherDbContext&lt;MyDbContext&gt;((sp, options) =>
+    /// {
+    ///     options.UseNpgsql(connectionString);
+    ///     options.AddInterceptors(sp.GetRequiredService&lt;NpgsqlSchemaConnectionInterceptor&gt;());
+    /// });
+    /// </code>
+    /// </example>
+    public static IServiceCollection AddAetherDbContext<TDbContext>(
+        this IServiceCollection services,
+        Action<IServiceProvider, DbContextOptionsBuilder> options)
         where TDbContext : AetherDbContext<TDbContext>
     {
         services.AddSingleton<AuditInterceptor>();
 
         services.AddDbContext<TDbContext>((sp, dbContextOptions) =>
         {
-            options.Invoke(dbContextOptions);
+            options.Invoke(sp, dbContextOptions);
             dbContextOptions.AddInterceptors(
                 sp.GetRequiredService<AuditInterceptor>()
             );
@@ -29,13 +55,13 @@ public static class AetherEfCoreServiceCollectionExtensions
 
         // Register Unit of Work services
         services.AddAetherUnitOfWork<TDbContext>();
-        
+
         return services;
     }
 
     /// <summary>
     /// Registers Unit of Work services for the specified DbContext.
-    /// Includes ambient accessor, UoW manager, and EF Core transaction source.
+    /// Includes ambient accessor, UoW manager, EF Core transaction source, and domain event sink.
     /// </summary>
     public static IServiceCollection AddAetherUnitOfWork<TDbContext>(this IServiceCollection services)
         where TDbContext : AetherDbContext<TDbContext>
@@ -46,8 +72,13 @@ public static class AetherEfCoreServiceCollectionExtensions
         // Register UoW manager as scoped
         services.TryAddScoped<IUnitOfWorkManager, UnitOfWorkManager>();
 
+        // Register domain event sink to bridge DbContext and UoW
+        services.TryAddScoped<IDomainEventSink, UnitOfWorkDomainEventSink>();
+
         // Register EF Core transaction source for this DbContext
         services.AddScoped<ILocalTransactionSource, EfCoreTransactionSource<TDbContext>>();
+        
+        services.AddScoped(typeof(IDbContextProvider<>), typeof(DbContextProvider<>));
 
         return services;
     }
@@ -85,28 +116,30 @@ public static class AetherEfCoreServiceCollectionExtensions
         where TDbContext : AetherDbContext<TDbContext>
         where TFactory : class, IDbContextFactory<TDbContext>
     {
-        services.AddSingleton<AuditInterceptor>();
-        
-        // Configure DbContextOptions
-        services.AddDbContextOptions<TDbContext>(options);
-        
-        // Register the factory
-        services.AddScoped<IDbContextFactory<TDbContext>, TFactory>();
-
-        return services;
+        // Delegate to the overload that accepts IServiceProvider
+        return services.AddAetherDbContextFactory<TDbContext, TFactory>((_, builder) => options(builder));
     }
 
-    private static IServiceCollection AddDbContextOptions<TDbContext>(
+    /// <summary>
+    /// Adds IDbContextFactory.
+    /// </summary>
+    public static IServiceCollection AddAetherDbContextFactory<TDbContext, TFactory>(
         this IServiceCollection services,
-        Action<DbContextOptionsBuilder> options)
-        where TDbContext : DbContext
+        Action<IServiceProvider, DbContextOptionsBuilder> options)
+        where TDbContext : AetherDbContext<TDbContext>
+        where TFactory : class, IDbContextFactory<TDbContext>
     {
-        services.AddSingleton<DbContextOptions<TDbContext>>(_ =>
+        services.AddSingleton<AuditInterceptor>();
+
+        services.AddSingleton<DbContextOptions<TDbContext>>(sp =>
         {
             var builder = new DbContextOptionsBuilder<TDbContext>();
-            options.Invoke(builder);
+            options.Invoke(sp, builder);
+            builder.AddInterceptors(sp.GetRequiredService<AuditInterceptor>());
             return builder.Options;
         });
+
+        services.AddScoped<IDbContextFactory<TDbContext>, TFactory>();
 
         return services;
     }

@@ -15,7 +15,7 @@ namespace BBT.Aether.Uow.EntityFrameworkCore;
 /// Creates and manages database transactions within a unit of work.
 /// Collects domain events before commit for UoW-level dispatching.
 /// </summary>
-public sealed class EfCoreTransactionSource<TDbContext>(TDbContext dbContext) : ILocalTransactionSource
+public sealed class EfCoreTransactionSource<TDbContext>(IDbContextProvider<TDbContext> dbContextProvider) : ILocalTransactionSource
     where TDbContext : AetherDbContext<TDbContext>
 {
     /// <inheritdoc />
@@ -26,6 +26,8 @@ public sealed class EfCoreTransactionSource<TDbContext>(TDbContext dbContext) : 
         UnitOfWorkOptions options,
         CancellationToken cancellationToken = default)
     {
+        var dbContext = dbContextProvider.GetDbContext();
+        
         IDbContextTransaction? transaction = null;
 
         if (options.IsTransactional)
@@ -43,14 +45,15 @@ public sealed class EfCoreTransactionSource<TDbContext>(TDbContext dbContext) : 
     /// <summary>
     /// Local transaction implementation for EF Core.
     /// Supports lazy transaction escalation and domain event collection.
+    /// Events are automatically pushed via IDomainEventSink during SaveChanges.
     /// </summary>
     private sealed class EfCoreLocalTransaction(
         AetherDbContext<TDbContext> context,
         IDbContextTransaction? transaction)
-        : ILocalTransaction, ITransactionalLocal, ISupportsSaveChanges, IAsyncDisposable
+        : ILocalTransaction, ITransactionalLocal, ISupportsSaveChanges, IAsyncDisposable, ILocalTransactionEventEnqueuer
     {
         private IDbContextTransaction? _transaction = transaction;
-        private List<DomainEventEnvelope> _collectedEvents = new();
+        private readonly List<DomainEventEnvelope> _collectedEvents = new();
 
         /// <inheritdoc />
         public IReadOnlyList<DomainEventEnvelope> CollectedEvents => _collectedEvents;
@@ -74,9 +77,16 @@ public sealed class EfCoreTransactionSource<TDbContext>(TDbContext dbContext) : 
         }
 
         /// <inheritdoc />
-        public void CollectEvents()
+        public void EnqueueEvents(IEnumerable<DomainEventEnvelope> events)
         {
-            _collectedEvents = context.CollectDomainEvents();
+            // Push pattern: events are pushed from DbContext via sink
+            foreach (var evt in events)
+            {
+                if (!_collectedEvents.Contains(evt))
+                {
+                    _collectedEvents.Add(evt);
+                }
+            }
         }
 
         /// <inheritdoc />
@@ -122,3 +132,15 @@ public sealed class EfCoreTransactionSource<TDbContext>(TDbContext dbContext) : 
     }
 }
 
+/// <summary>
+/// Internal interface for local transactions that support event enqueueing.
+/// Allows the sink to push events into transactions.
+/// </summary>
+internal interface ILocalTransactionEventEnqueuer
+{
+    /// <summary>
+    /// Enqueues events that were collected by DbContext during SaveChanges.
+    /// </summary>
+    /// <param name="events">The events to enqueue</param>
+    void EnqueueEvents(IEnumerable<DomainEventEnvelope> events);
+}

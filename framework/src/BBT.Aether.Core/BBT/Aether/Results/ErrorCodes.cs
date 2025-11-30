@@ -20,6 +20,12 @@ public static class ErrorCodes
         /// Maps to HTTP 400 Bad Request.
         /// </summary>
         public const string Validation = "validation";
+
+        /// <summary>
+        /// Not supported error.
+        /// Maps to HTTP 400 Bad Request.
+        /// </summary>
+        public const string NotSupported = "notsupported";
         
         /// <summary>
         /// Conflict errors (duplicate key, concurrent modification).
@@ -161,6 +167,21 @@ public static class ErrorCodes
         /// Operation timed out.
         /// </summary>
         public const string Timeout = "Timeout";
+        
+        /// <summary>
+        /// Concurrency error.
+        /// </summary>
+        public const string Concurrency = "Concurrency";
+        
+        /// <summary>
+        /// User friendly error.
+        /// </summary>
+        public const string UserFriendly = "UserFriendly";
+        
+        /// <summary>
+        /// Business rule error.
+        /// </summary>
+        public const string BusinessRule = "BusinessRule";
     }
 }
 

@@ -30,6 +30,6 @@ public static class AetherActivitySource
     /// <summary>
     /// The shared ActivitySource instance for creating activities (spans) in Aether aspects.
     /// </summary>
-    public static readonly ActivitySource Source = new(SourceName, Version);
+    public readonly static ActivitySource Source = new(SourceName, Version);
 }
 

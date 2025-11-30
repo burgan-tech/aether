@@ -21,6 +21,7 @@ Comprehensive documentation is available in the [docs](docs/) directory:
 ### Core Infrastructure
 - **[Repository Pattern](docs/repository-pattern/README.md)** - Data access abstraction with EF Core support
 - **[Unit of Work](docs/unit-of-work/README.md)** - Transaction management across multiple data sources
+- **[Multi-Schema Support](docs/multi-schema/README.md)** - Dynamic schema resolution for multi-tenant applications
 
 ### Domain-Driven Design
 - **[DDD Building Blocks](docs/ddd/README.md)** - Entities, Value Objects, Aggregates, and Auditing

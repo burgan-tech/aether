@@ -36,5 +36,12 @@ public class AetherOutboxOptions
     /// Default is 1 minute.
     /// </summary>
     public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// Gets or sets the lease duration for message processing.
+    /// Messages are locked for this duration while being processed.
+    /// Default is 30 seconds.
+    /// </summary>
+    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
 }
 

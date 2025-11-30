@@ -31,6 +31,15 @@ public readonly record struct Result
     /// Creates a failed result with the specified error.
     /// </summary>
     public static Result Fail(Error error) => new(false, error);
+    
+    /// <summary>
+    /// Creates a successful Result&lt;T&gt; with the specified value.
+    /// Enables fluent pipeline starts: Result.Ok(cmd).Ensure(...).BindAsync(...)
+    /// </summary>
+    /// <typeparam name="T">The type of the value.</typeparam>
+    /// <param name="value">The value to wrap in a successful result.</param>
+    /// <returns>A successful Result&lt;T&gt; containing the value.</returns>
+    public static Result<T> Ok<T>(T value) => Result<T>.Ok(value);
 
     /// <summary>
     /// Implicit conversion to bool for simplified success checking.

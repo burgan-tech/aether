@@ -85,7 +85,7 @@ public class LogAttribute : AetherMethodInterceptionAspect
             try
             {
                 // Log method entry
-                LogMethodEntry(logger, methodName, className, enrichmentData);
+                LogMethodEntry(logger, methodName, className);
 
                 // Execute the method
                 await args.ProceedAsync();
@@ -163,11 +163,28 @@ public class LogAttribute : AetherMethodInterceptionAspect
             if (enrichAttr != null)
             {
                 var paramValue = args.Arguments[i];
-                var enrichmentName = !string.IsNullOrWhiteSpace(enrichAttr.Name) 
-                    ? enrichAttr.Name 
-                    : parameter.Name ?? $"arg{i}";
+                
+                // Check if parameter is a complex type that should be scanned for enriched properties
+                if (paramValue != null && IsComplexType(paramValue.GetType()))
+                {
+                    // Scan complex object properties for [Enrich] attributes
+                    var propertyEnrichments = ScanPropertiesForEnrichment(paramValue);
+                    
+                    // Add each enriched property to the enrichment data
+                    foreach (var kvp in propertyEnrichments)
+                    {
+                        enrichmentData[kvp.Key] = kvp.Value;
+                    }
+                }
+                else
+                {
+                    // For simple types, add the parameter value directly
+                    var enrichmentName = !string.IsNullOrWhiteSpace(enrichAttr.Name) 
+                        ? enrichAttr.Name 
+                        : parameter.Name ?? $"arg{i}";
 
-                enrichmentData[enrichmentName] = SerializeValue(paramValue);
+                    enrichmentData[enrichmentName] = SerializeValue(paramValue);
+                }
             }
         }
 
@@ -226,7 +243,7 @@ public class LogAttribute : AetherMethodInterceptionAspect
     /// <summary>
     /// Logs method entry with the configured log level.
     /// </summary>
-    private void LogMethodEntry(ILogger logger, string methodName, string className, Dictionary<string, object> enrichmentData)
+    private void LogMethodEntry(ILogger logger, string methodName, string className)
     {
         var message = $"Entering method: {className}.{methodName}";
         logger.Log(Level, message);
@@ -254,7 +271,7 @@ public class LogAttribute : AetherMethodInterceptionAspect
     /// Serializes a value to a safe string representation for logging.
     /// Handles common types and falls back to JSON serialization.
     /// </summary>
-    protected string SerializeValue(object value)
+    protected string SerializeValue(object? value)
     {
         if (value == null)
         {
@@ -279,6 +296,61 @@ public class LogAttribute : AetherMethodInterceptionAspect
             // Fallback to ToString if serialization fails
             return value.ToString() ?? type.Name;
         }
+    }
+
+    /// <summary>
+    /// Determines if a type is a complex type that should be scanned for enriched properties.
+    /// Returns true for non-primitive types excluding strings, DateTime, DateTimeOffset, and Guid.
+    /// </summary>
+    private bool IsComplexType(Type type)
+    {
+        return !type.IsPrimitive 
+            && type != typeof(string) 
+            && type != typeof(DateTime) 
+            && type != typeof(DateTimeOffset) 
+            && type != typeof(Guid);
+    }
+
+    /// <summary>
+    /// Scans a complex object's properties for [Enrich] attributes and returns a dictionary
+    /// of enrichment data. Only scans immediate properties (no recursive scanning).
+    /// </summary>
+    private Dictionary<string, object> ScanPropertiesForEnrichment(object paramValue)
+    {
+        var enrichmentData = new Dictionary<string, object>();
+
+        if (paramValue == null)
+        {
+            return enrichmentData;
+        }
+
+        var type = paramValue.GetType();
+        var properties = type.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+        foreach (var property in properties)
+        {
+            var enrichAttr = property.GetCustomAttributes(typeof(EnrichAttribute), true)
+                .FirstOrDefault() as EnrichAttribute;
+
+            if (enrichAttr != null)
+            {
+                try
+                {
+                    var propertyValue = property.GetValue(paramValue);
+                    var enrichmentName = !string.IsNullOrWhiteSpace(enrichAttr.Name) 
+                        ? enrichAttr.Name 
+                        : property.Name;
+
+                    enrichmentData[enrichmentName] = SerializeValue(propertyValue);
+                }
+                catch
+                {
+                    // Skip properties that fail to read
+                }
+            }
+        }
+
+        return enrichmentData;
     }
 }
 

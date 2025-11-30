@@ -1,5 +1,6 @@
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.MultiSchema;
 using Dapr.Client;
 
 namespace BBT.Aether.Events;
@@ -9,8 +10,9 @@ public class DaprEventBus(
     AetherEventBusOptions options,
     ITopicNameStrategy topicNameStrategy,
     IEventSerializer eventSerializer,
-    IOutboxStore outboxStore)
-    : DistributedEventBusBase(topicNameStrategy, eventSerializer, outboxStore, options)
+    IOutboxStore outboxStore,
+    ICurrentSchema currentSchema)
+    : DistributedEventBusBase(topicNameStrategy, eventSerializer, outboxStore, options, currentSchema)
 {
     private readonly AetherEventBusOptions _options = options;
 

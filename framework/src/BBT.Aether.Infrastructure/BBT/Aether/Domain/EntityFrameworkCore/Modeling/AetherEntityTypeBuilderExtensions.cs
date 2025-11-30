@@ -13,6 +13,7 @@ public static class AetherEntityTypeBuilderExtensions
 {
     public static void ConfigureByConvention(this EntityTypeBuilder b)
     {
+        b.TryConfigureDateTimeUtc();
         b.TryConfigureConcurrencyStamp();
         b.TryConfigureSoftDelete();
         b.TryConfigureDeletionTime();
@@ -23,6 +24,22 @@ public static class AetherEntityTypeBuilderExtensions
         b.TryConfigureCreatedBy();
         b.TryConfigureModifiedBy();
         b.TryConfigureExtraProperties();
+    }
+
+    public static void TryConfigureDateTimeUtc(this EntityTypeBuilder b)
+    {
+        foreach (var property in b.Metadata.GetProperties())
+        {
+            if (property.ClrType == typeof(DateTime) || property.ClrType == typeof(DateTime?))
+            {
+                property.SetColumnType("timestamp with time zone");
+            }
+
+            if (property.ClrType == typeof(DateTimeOffset) || property.ClrType == typeof(DateTimeOffset?))
+            {
+                property.SetColumnType("timestamp with time zone");
+            }
+        }
     }
 
     public static void ConfigureConcurrencyStamp<T>(this EntityTypeBuilder<T> b)

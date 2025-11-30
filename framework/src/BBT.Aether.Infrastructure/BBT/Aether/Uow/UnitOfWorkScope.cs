@@ -14,7 +14,6 @@ public sealed class UnitOfWorkScope : IUnitOfWork
     private readonly CompositeUnitOfWork _root;
     private readonly IAmbientUnitOfWorkAccessor _accessor;
     private readonly IUnitOfWork? _previousAmbient;
-
     private UnitOfWorkOptions? _options;
     private IUnitOfWork? _outer;
     private bool _isPrepared;
@@ -124,13 +123,12 @@ public sealed class UnitOfWorkScope : IUnitOfWork
     /// <inheritdoc />
     public async Task CommitAsync(CancellationToken cancellationToken = default)
     {
-        // No-op if still in prepared state
+        // Prepared ise no-op
         if (_isPrepared)
         {
             return;
         }
 
-        // Delegate to root
         await _root.CommitAsync(cancellationToken);
     }
 
@@ -142,7 +140,7 @@ public sealed class UnitOfWorkScope : IUnitOfWork
         {
             return;
         }
-
+        
         // Delegate to root
         await _root.RollbackAsync(cancellationToken);
     }

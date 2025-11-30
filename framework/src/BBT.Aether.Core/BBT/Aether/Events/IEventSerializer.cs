@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json;
 
 namespace BBT.Aether.Events;
 
@@ -21,6 +22,14 @@ public interface IEventSerializer
     /// <param name="obj">The object to serialize</param>
     /// <returns>Serialized bytes</returns>
     byte[] Serialize(object obj);
+
+    /// <summary>
+    /// Serializes an object to a JsonElement for storage in database entities.
+    /// Useful for storing structured data in JsonElement properties (e.g., BackgroundJobInfo.Payload).
+    /// </summary>
+    /// <param name="obj">The object to serialize</param>
+    /// <returns>JsonElement representation of the object</returns>
+    JsonElement SerializeToElement(object obj);
 
     /// <summary>
     /// Deserializes bytes to a CloudEvent envelope.

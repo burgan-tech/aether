@@ -1,5 +1,6 @@
 using System;
 using System.Text.Json;
+using BBT.Aether.Events;
 
 namespace BBT.Aether.Events;
 
@@ -23,6 +24,12 @@ public sealed class SystemTextJsonEventSerializer : IEventSerializer
     public byte[] Serialize(object obj)
     {
         return JsonSerializer.SerializeToUtf8Bytes(obj, Options);
+    }
+
+    /// <inheritdoc />
+    public JsonElement SerializeToElement(object obj)
+    {
+        return JsonSerializer.SerializeToElement(obj, Options);
     }
 
     /// <inheritdoc />

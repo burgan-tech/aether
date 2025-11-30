@@ -1,6 +1,7 @@
 using System;
 using BBT.Aether.Auditing;
 using BBT.Aether.Domain.Entities;
+using BBT.Aether.Events;
 
 namespace BBT.Aether.Domain.Events;
 
@@ -19,6 +20,7 @@ public class OutboxMessage : Entity<Guid>, IHasExtraProperties, IHasCreatedAt
         EventName = eventName;
         EventData = eventData;
         ExtraProperties = new ExtraPropertyDictionary();
+        Status = OutboxMessageStatus.Pending;
     }
 
     /// <summary>
@@ -30,6 +32,11 @@ public class OutboxMessage : Entity<Guid>, IHasExtraProperties, IHasCreatedAt
     /// Gets or sets the serialized event data (CloudEventEnvelope).
     /// </summary>
     public byte[] EventData { get; private set; } = default!;
+
+    /// <summary>
+    /// Gets or sets the processing status.
+    /// </summary>
+    public OutboxMessageStatus Status { get; set; } = OutboxMessageStatus.Pending;
 
     /// <summary>
     /// Gets or sets when the message was created.
@@ -55,6 +62,16 @@ public class OutboxMessage : Entity<Guid>, IHasExtraProperties, IHasCreatedAt
     /// Gets or sets the next retry time (null if no retry scheduled).
     /// </summary>
     public DateTime? NextRetryAt { get; set; }
+
+    /// <summary>
+    /// Gets or sets the worker ID that currently holds the lock on this message.
+    /// </summary>
+    public string? LockedBy { get; set; }
+
+    /// <summary>
+    /// Gets or sets when the lock expires.
+    /// </summary>
+    public DateTime? LockedUntil { get; set; }
 
     /// <summary>
     /// Gets or sets extra properties for storing metadata (pubSubName, version, topicName, etc.).
