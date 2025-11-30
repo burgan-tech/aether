@@ -2,8 +2,10 @@ using System;
 using BBT.Aether.Auditing;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Entities.Auditing;
+using BBT.Aether.Domain.EntityFrameworkCore.ValueComparers;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace BBT.Aether.Domain.EntityFrameworkCore.Modeling;
 
@@ -11,6 +13,7 @@ public static class AetherEntityTypeBuilderExtensions
 {
     public static void ConfigureByConvention(this EntityTypeBuilder b)
     {
+        b.TryConfigureDateTimeUtc();
         b.TryConfigureConcurrencyStamp();
         b.TryConfigureSoftDelete();
         b.TryConfigureDeletionTime();
@@ -20,12 +23,44 @@ public static class AetherEntityTypeBuilderExtensions
         b.TryConfigureModificationAudited();
         b.TryConfigureCreatedBy();
         b.TryConfigureModifiedBy();
+        b.TryConfigureExtraProperties();
+    }
+
+    public static void TryConfigureDateTimeUtc(this EntityTypeBuilder b)
+    {
+        foreach (var property in b.Metadata.GetProperties())
+        {
+            if (property.ClrType == typeof(DateTime) || property.ClrType == typeof(DateTime?))
+            {
+                property.SetColumnType("timestamp with time zone");
+            }
+
+            if (property.ClrType == typeof(DateTimeOffset) || property.ClrType == typeof(DateTimeOffset?))
+            {
+                property.SetColumnType("timestamp with time zone");
+            }
+        }
     }
 
     public static void ConfigureConcurrencyStamp<T>(this EntityTypeBuilder<T> b)
         where T : class, IHasConcurrencyStamp
     {
         b.As<EntityTypeBuilder>().TryConfigureConcurrencyStamp();
+    }
+    
+    public static void TryConfigureExtraProperties(this EntityTypeBuilder b)
+    {
+        if (!b.Metadata.ClrType.IsAssignableTo<IHasExtraProperties>())
+        {
+            return;
+        }
+
+        var type = typeof(ExtraPropertiesValueConverter<>).MakeGenericType(b.Metadata.ClrType);
+        var extraPropertiesValueConverter = Activator.CreateInstance(type)!.As<ValueConverter<ExtraPropertyDictionary, string>>();
+        b.Property<ExtraPropertyDictionary>(nameof(IHasExtraProperties.ExtraProperties))
+            .HasColumnName(nameof(IHasExtraProperties.ExtraProperties))
+            .HasConversion(extraPropertiesValueConverter)
+            .Metadata.SetValueComparer(new ExtraPropertyDictionaryValueComparer());
     }
 
     public static void TryConfigureConcurrencyStamp(this EntityTypeBuilder b)

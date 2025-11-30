@@ -9,14 +9,15 @@ using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.EntityFrameworkCore.Modeling;
+using BBT.Aether.Events;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace BBT.Aether.Domain.EntityFrameworkCore;
 
 public abstract class AetherDbContext<TDbContext>(
-    DbContextOptions<TDbContext> options
-)
+    DbContextOptions<TDbContext> options,
+    IDomainEventSink? eventSink = null)
     : DbContext(options)
     where TDbContext : DbContext
 {
@@ -42,18 +43,20 @@ public abstract class AetherDbContext<TDbContext>(
         {
             ConfigureBasePropertiesMethodInfo
                 .MakeGenericMethod(entityType.ClrType)
-                .Invoke(this, new object[] { modelBuilder, entityType });
+                .Invoke(this, [modelBuilder, entityType]);
             
             ConfigureValueGeneratedMethodInfo
                 .MakeGenericMethod(entityType.ClrType)
-                .Invoke(this, new object[] { modelBuilder, entityType });
+                .Invoke(this, [modelBuilder, entityType]);
         }
     }
     
      public override int SaveChanges()
     {
         TrackEntityStates();
-        return base.SaveChanges();
+        var result =  base.SaveChanges();
+        PublishDomainEventsToSink();
+        return result;
     }
 
     public async override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess,
@@ -62,7 +65,8 @@ public abstract class AetherDbContext<TDbContext>(
         try
         {
             TrackEntityStates();
-            var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+            var result =  await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+            PublishDomainEventsToSink();
             return result;
         }
         catch (DbUpdateConcurrencyException ex)
@@ -90,7 +94,7 @@ public abstract class AetherDbContext<TDbContext>(
     public virtual Task<int> SaveChangesOnDbContextAsync(bool acceptAllChangesOnSuccess,
         CancellationToken cancellationToken = default)
     {
-        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        return SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
     }
 
     protected virtual void ConfigureBaseProperties<TEntity>(ModelBuilder modelBuilder,
@@ -220,5 +224,71 @@ public abstract class AetherDbContext<TDbContext>(
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Collects all domain events from tracked entities that implement IHasDomainEvents.
+    /// Public to allow UoW to collect events before commit.
+    /// </summary>
+    public List<DomainEventEnvelope> CollectDomainEvents()
+    {
+        var domainEvents = new List<DomainEventEnvelope>();
+
+        var entitiesWithEvents = ChangeTracker.Entries()
+            .Where(e => e.Entity is IHasDomainEvents)
+            .Select(e => e.Entity as IHasDomainEvents)
+            .Where(e => e != null)
+            .ToList();
+
+        foreach (var entity in entitiesWithEvents)
+        {
+            var events = entity!.GetDomainEvents();
+            if (events.Any())
+            {
+                domainEvents.AddRange(events);
+            }
+        }
+
+        return domainEvents;
+    }
+
+    /// <summary>
+    /// Clears all domain events from tracked entities that implement IHasDomainEvents.
+    /// Public to allow UoW to clear events after successful dispatch.
+    /// </summary>
+    public void ClearDomainEvents()
+    {
+        var entitiesWithEvents = ChangeTracker.Entries()
+            .Where(e => e.Entity is IHasDomainEvents)
+            .Select(e => e.Entity as IHasDomainEvents)
+            .Where(e => e != null)
+            .ToList();
+
+        foreach (var entity in entitiesWithEvents)
+        {
+            entity!.ClearDomainEvents();
+        }
+    }
+
+    /// <summary>
+    /// Publishes collected domain events to the sink (Unit of Work).
+    /// Called automatically during SaveChanges to push events into the UoW transaction queue.
+    /// </summary>
+    private void PublishDomainEventsToSink()
+    {
+        if (eventSink is null)
+        {
+            // No sink configured - events will be collected explicitly by UoW (backward compatibility)
+            return;
+        }
+
+        var domainEvents = CollectDomainEvents();
+        if (domainEvents.Count == 0)
+        {
+            return;
+        }
+
+        eventSink.EnqueueDomainEvents(domainEvents);
+        ClearDomainEvents();
     }
 }

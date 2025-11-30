@@ -16,7 +16,7 @@ public interface IDistributedLockService
     /// <param name="expiryInSeconds">Lock expiry time in seconds</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>True if lock was acquired, false otherwise</returns>
-    Task<bool> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60, CancellationToken cancellationToken = default);
+    Task<IAsyncDisposable?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Releases a lock with the specified resource ID
@@ -35,7 +35,7 @@ public interface IDistributedLockService
     /// <param name="expiryInSeconds">Lock expiry time in seconds</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>Result of the function execution, or default if lock couldn't be acquired</returns>
-    Task<T?> ExecuteWithLockAsync<T>(string resourceId, Func<Task<T>> function, int expiryInSeconds = 60, CancellationToken cancellationToken = default);
+    Task<(bool Acquired, T? Result)> ExecuteWithLockAsync<T>(string resourceId, Func<Task<T>> function, int expiryInSeconds = 60, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Executes an action within a distributed lock

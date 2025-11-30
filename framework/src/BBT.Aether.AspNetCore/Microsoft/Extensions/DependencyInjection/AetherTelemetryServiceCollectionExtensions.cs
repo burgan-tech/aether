@@ -1,350 +1,299 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Reflection;
-using System.Text;
 using System.Text.RegularExpressions;
 using BBT.Aether.AspNetCore.Telemetry;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Http.Extensions;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using OpenTelemetry.Exporter;
+using Microsoft.Extensions.Options;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
-using Serilog;
-using Serilog.Events;
-using Serilog.Filters;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
 public static class AetherTelemetryServiceCollectionExtensions
 {
-    // Performance: Cache compiled regex patterns
-    private readonly static ConcurrentDictionary<string, Regex> RegexCache = new();
-    
-    // Performance: Cache base64 encoded credentials
-    private readonly static ConcurrentDictionary<string, string> AuthHeaderCache = new();
-    public static IServiceCollection AddFrameworkTelemetry(
+    public static IServiceCollection AddAetherTelemetry(
         this IServiceCollection services,
         IConfiguration configuration,
-        Action<LoggerConfiguration, TelemetryOptions>? configureLogger = null)
+        IHostEnvironment? environment = null,
+        Action<AetherTelemetryBuilder>? configure = null)
     {
-        try
-        {
-            var options = configuration.GetSection("Telemetry").Get<TelemetryOptions>() ?? new TelemetryOptions();
-            ConfigureOptions(options, configuration);
-            ConfigureTraceProvider(services, options);
-            ConfigureLogProvider(services, options, configureLogger);
+        // Bind and configure options upfront to avoid anti-pattern
+        var opts = new AetherTelemetryOptions();
 
-            return services;
-        }
-        catch (Exception ex)
+        // Try Telemetry section first, then fallback to Aether:Telemetry
+        var section = configuration.GetSection(AetherTelemetryOptions.SectionName);
+        if (!section.Exists())
         {
-            // Log error but don't fail application startup
-            try
-            {
-                using var serviceProvider = services.BuildServiceProvider();
-                var loggerFactory = serviceProvider.GetService<ILoggerFactory>();
-                var logger = loggerFactory?.CreateLogger("AetherTelemetry");
-                logger?.LogError(ex, "Failed to configure telemetry. Continuing without telemetry.");
-            }
-            catch
-            {
-                // Even logging failed, but don't crash the application
-            }
-            return services;
+            section = configuration.GetSection("Telemetry");
         }
-    }
 
-    private static void ConfigureOptions(TelemetryOptions options, IConfiguration configuration)
-    {
-        try
-        {
-            if (options.Environment.IsNullOrWhiteSpace())
-            {
-                options.Environment = configuration["ASPNETCORE_ENVIRONMENT"] ?? "Development";
-            }
-            
-            if (options.ServiceName.IsNullOrWhiteSpace())
-            {
-                options.ServiceName = configuration["OTEL_SERVICE_NAME"] ?? configuration["ApplicationName"] ?? "Unknown";
-            }
+        section.Bind(opts);
 
-            if (options.ServiceVersion.IsNullOrWhiteSpace())
-            {
-                try
-                {
-                    var assemblyLocation = Assembly.GetExecutingAssembly().Location;
-                    if (!string.IsNullOrEmpty(assemblyLocation))
-                    {
-                        options.ServiceVersion = FileVersionInfo.GetVersionInfo(assemblyLocation).FileVersion ?? "1.0.0";
-                    }
-                    else
-                    {
-                        options.ServiceVersion = "1.0.0";
-                    }
-                }
-                catch
-                {
-                    options.ServiceVersion = "1.0.0";
-                }
-            }
-        }
-        catch
-        {
-            // Ensure we have safe defaults
-            options.Environment ??= "Development";
-            options.ServiceName ??= "Unknown";
-            options.ServiceVersion ??= "1.0.0";
-        }
-    }
+        // Apply defaults and environment variables
+        var envName =
+            environment?.EnvironmentName ??
+            Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ??
+            "Production";
 
-    private static void ConfigureTraceProvider(IServiceCollection services, TelemetryOptions options)
-    {
+        var assemblyLocation = Assembly.GetExecutingAssembly().Location;
+        var serviceVersion = FileVersionInfo.GetVersionInfo(assemblyLocation).FileVersion ?? "1.0.0";
+        // Service name: OTEL_SERVICE_NAME > config > entry assembly name > "aether"
+        opts.ServiceName ??=
+            Environment.GetEnvironmentVariable("OTEL_SERVICE_NAME")
+            ?? configuration["ApplicationName"]
+            ?? "aether";
+
+        // Service version: config > entry assembly version > "1.0.0"
+        opts.ServiceVersion ??= serviceVersion;
+
+        // OTLP endpoint: OTEL_EXPORTER_OTLP_ENDPOINT > config > "http://localhost:4318"
+        opts.Otlp.Endpoint ??=
+            Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT")
+            ?? "http://localhost:4318";
+
+        // OTLP protocol: OTEL_EXPORTER_OTLP_PROTOCOL > config
+        opts.Otlp.Protocol =
+            Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_PROTOCOL")
+            ?? opts.Otlp.Protocol;
+
+        opts.ServiceNamespace ??= "aether";
+
+        // Store environment in custom attributes for deployment tracking
+        opts.Logging.Enrichers.CustomAttributes.TryAdd("deployment.environment", envName);
+
+        // Register options for DI consumers
+        services.AddSingleton<IOptions<AetherTelemetryOptions>>(new OptionsWrapper<AetherTelemetryOptions>(opts));
+
+        var builder = new AetherTelemetryBuilder(services);
+        configure?.Invoke(builder);
+
+        // OpenTelemetry: Tracing & Metrics
         services.AddOpenTelemetry()
-            .ConfigureResource(r =>
+            .ConfigureResource(resource =>
             {
-                r.AddEnvironmentVariableDetector()
-                    .AddService(options.ServiceName!)
+                resource
+                    .AddService(
+                        serviceName: opts.ServiceName!,
+                        serviceVersion: opts.ServiceVersion,
+                        serviceInstanceId: Environment.MachineName)
                     .AddAttributes(new Dictionary<string, object>
                     {
-                        ["environment"] = options.Environment,
-                        ["service.name"] = options.ServiceName!,
-                        ["service.version"] = options.ServiceVersion!,
-                        ["deployment.id"] = GetDeploymentId(options)
+                        ["deployment.id"] = GetDeploymentId(opts, envName),
+                        ["service.namespace"] = opts.ServiceNamespace ?? "aether",
+                        ["deployment.environment"] =
+                            opts.Logging.Enrichers.CustomAttributes.GetValueOrDefault("deployment.environment", "Production")
                     });
             })
-            .WithTracing(builder =>
+            .WithTracing(tracing =>
             {
-                builder
-                    .AddSource("Dapr.Client")
-                    .AddHttpClientInstrumentation()
-                    .AddAspNetCoreInstrumentation(b =>
-                    {
-                        b.EnrichWithHttpResponse = (activity, httpResponse) =>
+                if (!opts.TracingEnabled) return;
+
+                var excludedPatterns = CompileRegex(opts.Logging.ExcludedPaths
+                    .Concat(opts.Tracing.ExcludedPaths));
+
+                // Common instrumentation
+                if (opts.Tracing.EnableAspNetCore)
+                {
+                    tracing.AddAspNetCoreInstrumentation(o =>
+                        {
+                        o.Filter = ctx => !IsExcluded(ctx.Request.Path.Value, excludedPatterns);
+
+                        o.EnrichWithHttpRequest = (activity, request) =>
                         {
                             try
                             {
-                                var headersToLog = options.Logging?.Enrichers?.Headers ?? [];
-                                var httpMethod = httpResponse.HttpContext.Request.Method;
-                                
-                                // Get route pattern for better transaction grouping (with error handling)
-                                var routePattern = GetRoutePatternSafe(httpResponse.HttpContext);
-                                
+                                // Add headers
+                                foreach (var header in opts.Logging.Enrichers.Headers)
+                                {
+                                    if (request.Headers.TryGetValue(header, out var value))
+                                    {
+                                        var headerKey = $"http.request.header.{header.ToLowerInvariant()}";
+                                        activity.SetTag(headerKey, value.ToString());
+                                    }
+                                }
+
+                                // Add custom attributes
+                                foreach (var attr in opts.Logging.Enrichers.CustomAttributes)
+                                {
+                                    activity.SetTag(attr.Key, attr.Value);
+                                }
+                            }
+                            catch
+                            {
+                                // Skip problematic enrichment
+                            }
+                        };
+
+                        o.EnrichWithHttpResponse = (activity, response) =>
+                        {
+                            try
+                            {
+                                // Get route pattern for better transaction grouping
+                                var routePattern = GetRoutePatternSafe(response.HttpContext);
+                                var httpMethod = response.HttpContext.Request.Method;
+
                                 activity.DisplayName = $"{httpMethod} {routePattern}";
                                 activity.SetTag("http.route", routePattern);
-                                
-                                // Performance: Avoid allocation if no headers to log
-                                if (headersToLog.Count > 0)
-                                {
-                                    foreach (var header in headersToLog)
-                                    {
-                                        try
-                                        {
-                                            var headerKey = $"http.request.header.{header.ToLowerInvariant()}";
-                                            var headerValue = httpResponse.HttpContext.Request.Headers.TryGetValue(header, out var value)
-                                                ? value.ToString()
-                                                : "-";
-                                            activity.SetTag(headerKey, headerValue);
-                                        }
-                                        catch
-                                        {
-                                            // Skip problematic headers
-                                        }
-                                    }
-                                }
+                                activity.SetTag("http.response.content_length", response.ContentLength);
                             }
                             catch
                             {
-                                // Don't break telemetry for header processing errors
+                                // Skip problematic enrichment
                             }
                         };
+                    });
+                }
 
-                        b.Filter = httpContext =>
-                        {
-                            try
-                            {
-                                var path = httpContext.Request.Path.Value;
-                                if (string.IsNullOrEmpty(path)) return true;
+                if (opts.Tracing.EnableHttpClient)
+                {
+                    tracing.AddHttpClientInstrumentation(o =>
+                    {
+                        o.FilterHttpRequestMessage = req =>
+                            !IsExcluded(req.RequestUri?.ToString(), excludedPatterns);
+                    });
+                }
 
-                                var excludedPaths = options.Logging?.ExcludedPaths;
-                                if (excludedPaths == null || excludedPaths.Count == 0) return true;
-
-                                // Performance: Use cached compiled regex
-                                foreach (var pattern in excludedPaths)
-                                {
-                                    try
-                                    {
-                                        var regex = RegexCache.GetOrAdd(pattern, p => new Regex(p, RegexOptions.IgnoreCase | RegexOptions.Compiled));
-                                        if (regex.IsMatch(path))
-                                        {
-                                            return false;
-                                        }
-                                    }
-                                    catch
-                                    {
-                                        // Skip invalid regex patterns
-                                        continue;
-                                    }
-                                }
-
-                                return true;
-                            }
-                            catch
-                            {
-                                // Default to including the request if filtering fails
-                                return true;
-                            }
-                        };
-                    })
-                    .AddEntityFrameworkCoreInstrumentation(efOptions =>
+                if (opts.Tracing.EnableEntityFrameworkCore)
+                {
+                    tracing.AddEntityFrameworkCoreInstrumentation(efOptions =>
                     {
                         efOptions.SetDbStatementForText = true;
                         efOptions.SetDbStatementForStoredProcedure = true;
-                    })
-                    .AddTraceExporter(options);
+                    });
+                }
+                
+                tracing.AddSource("BBT.Aether.Aspects");
+                
+                // Custom sources
+                foreach (var src in opts.Tracing.AdditionalSources)
+                {
+                    tracing.AddSource(src);
+                }
+
+                // Project/consumer hooks (using lazy service provider access)
+                foreach (var cfg in builder.TracingConfigurators)
+                {
+                    cfg(services, tracing);
+                }
+
+                // Exporters
+                if (opts.Tracing.EnableConsoleExporter)
+                    tracing.AddConsoleExporter();
+
+                if (opts.Tracing.EnableOtlpExporter)
+                    tracing.AddOtlpExporter(o =>
+                        OtlpExporterConfigurator.Configure(o, opts.Otlp, "/v1/traces"));
             })
-            .WithMetrics(builder =>
+            .WithMetrics(metrics =>
             {
-                builder
-                    .AddRuntimeInstrumentation()
-                    .AddProcessInstrumentation()
-                    .AddMetricExporter(options);
+                if (!opts.MetricsEnabled) return;
+
+                if (opts.Metrics.EnableAspNetCore)
+                    metrics.AddAspNetCoreInstrumentation();
+
+                if (opts.Metrics.EnableHttpClient)
+                    metrics.AddHttpClientInstrumentation();
+
+                if (opts.Metrics.EnableRuntime)
+                    metrics.AddRuntimeInstrumentation();
+
+                if (opts.Metrics.EnableProcess)
+                    metrics.AddProcessInstrumentation();
+                
+                metrics.AddMeter("BBT.Aether.Aspects");
+
+                foreach (var m in opts.Metrics.AdditionalMeters)
+                {
+                    metrics.AddMeter(m);
+                }
+
+                foreach (var cfg in builder.MetricsConfigurators)
+                {
+                    cfg(services, metrics);
+                }
+
+                if (opts.Metrics.EnableConsoleExporter)
+                    metrics.AddConsoleExporter();
+
+                if (opts.Metrics.EnableOtlpExporter)
+                    metrics.AddOtlpExporter(o =>
+                        OtlpExporterConfigurator.Configure(o, opts.Otlp, "/v1/metrics"));
             });
+
+        // Logging
+        services.AddLogging(lb =>
+        {
+            lb.AddOpenTelemetry(logging =>
+            {
+                if (!opts.LoggingEnabled) return;
+
+                var excludedPatterns = CompileRegex(opts.Logging.ExcludedPaths);
+
+                logging.SetResourceBuilder(ResourceBuilder.CreateDefault()
+                    .AddService(opts.ServiceName!, opts.ServiceNamespace ?? "aether", opts.ServiceVersion ?? "1.0.0", false, Environment.MachineName)
+                    .AddAttributes(opts.Logging.Enrichers.CustomAttributes
+                        .ToDictionary(x => x.Key, x => (object)x.Value)));
+
+                // Enricher processor
+                logging.AddProcessor(provider =>
+                {
+                    var accessor = provider.GetService<IHttpContextAccessor>();
+                    return new AetherLogEnricherProcessor(opts, excludedPatterns, accessor);
+                });
+
+                logging.IncludeFormattedMessage = opts.Logging.IncludeFormattedMessage;
+                logging.IncludeScopes = opts.Logging.IncludeScopes;
+                logging.ParseStateValues = opts.Logging.ParseStateValues;
+
+                foreach (var cfg in builder.LoggingConfigurators)
+                {
+                    cfg(services, logging);
+                }
+
+                if (opts.Logging.EnableConsoleExporter)
+                    logging.AddConsoleExporter();
+
+                if (opts.Logging.EnableOtlpExporter)
+                    logging.AddOtlpExporter(o =>
+                        OtlpExporterConfigurator.Configure(o, opts.Otlp, "/v1/logs"));
+            });
+        });
+
+        return services;
     }
 
-    private static TracerProviderBuilder AddTraceExporter(this TracerProviderBuilder builder, TelemetryOptions options)
+    private static List<Regex> CompileRegex(IEnumerable<string> patterns)
+        => patterns.Select(p => new Regex(p, RegexOptions.Compiled | RegexOptions.IgnoreCase)).ToList();
+
+    private static bool IsExcluded(string? value, List<Regex> patterns)
     {
-        try
+        if (string.IsNullOrEmpty(value)) return false;
+        foreach (var pattern in patterns)
         {
-            var provider = options.TraceProvider?.ToLowerInvariant();
-            
-            switch (provider)
+            try
             {
-                case "zipkin":
-                    if (!string.IsNullOrEmpty(options.Zipkin?.Endpoint))
-                    {
-                        builder.AddZipkinExporter(zipkinOptions =>
-                        {
-                            if (Uri.TryCreate(options.Zipkin.Endpoint, UriKind.Absolute, out var uri))
-                            {
-                                zipkinOptions.Endpoint = uri;
-                            }
-                        });
-                    }
-                    break;
-                    
-                case "otlp":
-                    builder.AddOtlpExporter(otlpOptions =>
-                    {
-                        // Priority: Environment variables > Code configuration
-                        ConfigureOtlpEndpoint(otlpOptions, "otlp", options);
-                        ConfigureOtlpProtocol(otlpOptions);
-                    });
-                    break;
+                if (pattern.IsMatch(value))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // Skip invalid patterns
             }
         }
-        catch
-        {
-            // Continue without trace exporter if configuration fails
-        }
 
-        return builder;
+        return false;
     }
-
-    private static MeterProviderBuilder AddMetricExporter(this MeterProviderBuilder builder, TelemetryOptions options)
-    {
-        var provider = options.TraceProvider;
-        
-        switch (provider?.ToLower())
-        {
-            case "otlp":
-            case "elastic":
-            case "openobserve":
-                // All these providers use OTLP protocol
-                // Configuration can be done via environment variables (OTEL_EXPORTER_OTLP_METRICS_*)
-                // or via code configuration below
-                builder.AddOtlpExporter(otlpOptions =>
-                {
-                    // Priority: Environment variables > Code configuration
-                    ConfigureOtlpEndpoint(otlpOptions, provider, options);
-                    ConfigureOtlpProtocol(otlpOptions);
-                    ConfigureOtlpHeaders(otlpOptions, provider, options);
-                });
-                break;
-                
-            default:
-                // No metric exporter configured
-                break;
-        }
-
-        return builder;
-    }
-
-    private static void ConfigureLogProvider(IServiceCollection services, TelemetryOptions options,
-        Action<LoggerConfiguration, TelemetryOptions>? configureLogger = null)
-    {
-        if (!options.Logging.Enabled)
-            return;
-
-        var loggerConfig = new LoggerConfiguration()
-            .MinimumLevel.Is(ConvertLogLevel(options.Logging.MinimumLevel))
-            .Enrich.FromLogContext()
-            .Enrich.WithProperty("Environment", options.Environment)
-            .Enrich.WithProperty("ServiceName", options.ServiceName)
-            .Enrich.WithProperty("ServiceVersion", options.ServiceVersion)
-            .Enrich.WithProperty("DeploymentId", GetDeploymentId(options))
-            .Filter.ByExcluding(Matching.FromSource("Microsoft.AspNetCore.StaticFiles"));
-
-        if (options.LogProvider.Contains("file", StringComparison.OrdinalIgnoreCase))
-        {
-            // Configure file logging
-            loggerConfig.WriteTo.File(
-                path: options.Logging.FilePath,
-                rollingInterval: RollingInterval.Day,
-                retainedFileCountLimit: 10,
-                rollOnFileSizeLimit: true,
-                outputTemplate:
-                "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}");
-        }
-
-        if (options.LogProvider.Contains("console", StringComparison.OrdinalIgnoreCase))
-        {
-            // Configure console logging
-            loggerConfig.WriteTo.Console(outputTemplate:
-                "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}");
-        }
-
-        if (options.LogProvider.Contains("otlp", StringComparison.OrdinalIgnoreCase))
-        {
-            loggerConfig.WriteTo.OpenTelemetry();
-        }
-        
-        configureLogger?.Invoke(loggerConfig, options);
-
-        Log.Logger = loggerConfig.CreateLogger();
-
-        services.AddLogging(loggingBuilder =>
-        {
-            loggingBuilder.ClearProviders();
-            loggingBuilder.AddSerilog(dispose: true);
-        });
-    }
-
-    private static LogEventLevel ConvertLogLevel(LogLevel level) => level switch
-    {
-        LogLevel.Trace => LogEventLevel.Verbose,
-        LogLevel.Debug => LogEventLevel.Debug,
-        LogLevel.Information => LogEventLevel.Information,
-        LogLevel.Warning => LogEventLevel.Warning,
-        LogLevel.Error => LogEventLevel.Error,
-        LogLevel.Critical => LogEventLevel.Fatal,
-        _ => LogEventLevel.Information
-    };
 
     private static string GetRoutePatternSafe(HttpContext httpContext)
     {
@@ -359,141 +308,8 @@ public static class AetherTelemetryServiceCollectionExtensions
         }
     }
     
-    private static void ConfigureOtlpEndpoint(dynamic otlpOptions, string provider, TelemetryOptions options)
+    public static string GetDeploymentId(AetherTelemetryOptions options, string environment)
     {
-        try
-        {
-            // Check if endpoint is already set via environment variables
-            if (otlpOptions.Endpoint != null) return;
-            
-            // Get endpoint from environment variables first
-            var envEndpoint = provider switch
-            {
-                "otlp" => Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT") 
-                         ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-                         ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
-                "elastic" => Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-                           ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT"),
-                "openobserve" => Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-                               ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT"),
-                _ => null
-            };
-            
-            // If no env variable, use code configuration
-            if (string.IsNullOrEmpty(envEndpoint))
-            {
-                envEndpoint = provider switch
-                {
-                    "otlp" => options.Otlp?.Endpoint,
-                    "elastic" => options.Elastic?.Endpoint,
-                    "openobserve" => options.OpenObserve?.Endpoint,
-                    _ => null
-                };
-            }
-            
-            if (!string.IsNullOrEmpty(envEndpoint) && Uri.TryCreate(envEndpoint, UriKind.Absolute, out var uri))
-            {
-                otlpOptions.Endpoint = uri;
-            }
-        }
-        catch
-        {
-            // Continue without endpoint configuration if it fails
-        }
-    }
-    
-    private static void ConfigureOtlpProtocol(dynamic otlpOptions)
-    {
-        try
-        {
-            // Check environment variable first
-            var envProtocol = Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_PROTOCOL")
-                           ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL");
-            
-            if (!string.IsNullOrEmpty(envProtocol))
-            {
-                otlpOptions.Protocol = envProtocol.ToLowerInvariant() switch
-                {
-                    "grpc" => OpenTelemetry.Exporter.OtlpExportProtocol.Grpc,
-                    "http/protobuf" => OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf,
-                    _ => OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf
-                };
-            }
-            else if (otlpOptions.Protocol == OpenTelemetry.Exporter.OtlpExportProtocol.Grpc)
-            {
-                // Default to HttpProtobuf for better compatibility
-                otlpOptions.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf;
-            }
-        }
-        catch
-        {
-            // Continue with default protocol if configuration fails
-        }
-    }
-    
-    private static void ConfigureOtlpHeaders(dynamic otlpOptions, string provider, TelemetryOptions options)
-    {
-        try
-        {
-            // Check if headers are already set via environment variables
-            if (!string.IsNullOrEmpty(otlpOptions.Headers)) return;
-            
-            // Check environment variables first
-            var envHeaders = Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_HEADERS")
-                          ?? Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_METRICS_HEADERS");
-            
-            if (!string.IsNullOrEmpty(envHeaders))
-            {
-                otlpOptions.Headers = envHeaders;
-                return;
-            }
-            
-            // If no env headers, use code configuration
-            var authHeader = provider switch
-            {
-                "elastic" when !string.IsNullOrEmpty(options.Elastic?.Username) =>
-                    GetCachedAuthHeader($"elastic:{options.Elastic.Username}:{options.Elastic.Password}"),
-                "openobserve" when !string.IsNullOrEmpty(options.OpenObserve?.Username) =>
-                    GetCachedAuthHeader($"openobserve:{options.OpenObserve.Username}:{options.OpenObserve.Password}"),
-                _ => null
-            };
-            
-            if (!string.IsNullOrEmpty(authHeader))
-            {
-                otlpOptions.Headers = authHeader;
-            }
-        }
-        catch
-        {
-            // Continue without headers if configuration fails
-        }
-    }
-    
-    private static string GetCachedAuthHeader(string key)
-    {
-        return AuthHeaderCache.GetOrAdd(key, k =>
-        {
-            try
-            {
-                var parts = k.Split(':');
-                if (parts.Length >= 3)
-                {
-                    var username = parts[1];
-                    var password = parts[2];
-                    var credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
-                    return $"Authorization=Basic {credentials}";
-                }
-            }
-            catch
-            {
-                // Return empty if encoding fails
-            }
-            return string.Empty;
-        });
-    }
-
-    public static string GetDeploymentId(TelemetryOptions options)
-    {
-        return $"{options.Environment}-{options.ServiceName}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}";
+        return $"{environment}-{options.ServiceName}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}";
     }
 }

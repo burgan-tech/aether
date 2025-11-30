@@ -1,58 +1,76 @@
 using System.Collections.Generic;
-using Microsoft.Extensions.Logging;
 
 namespace BBT.Aether.AspNetCore.Telemetry;
 
-public class TelemetryOptions
+public sealed class AetherTelemetryOptions
 {
-    public string? ServiceName { get; set; } = "";
-    public string? ServiceVersion { get; set; } = "";
-    public string Environment { get; set; } = "Development";
-    public string TraceProvider { get; set; } = "zipkin";
-    public string LogProvider { get; set; } = "console";
-    public LoggingOptions Logging { get; set; } = new();
-    public ZipkinOptions Zipkin { get; set; } = new();
-    public ElasticOptions Elastic { get; set; } = new();
+    public const string SectionName = "Telemetry";
+
+    // Service identity
+    public string? ServiceName { get; set; }
+    public string? ServiceNamespace { get; set; } = "aether";
+    public string? ServiceVersion { get; set; }
+
+    // Feature toggles
+    public bool TracingEnabled { get; set; } = true;
+    public bool MetricsEnabled { get; set; } = true;
+    public bool LoggingEnabled { get; set; } = true;
+
+    // OTLP
     public OtlpOptions Otlp { get; set; } = new();
-    public OpenObserveOptions OpenObserve { get; set; } = new();
+    public AetherLoggingOptions Logging { get; set; } = new();
+    public AetherTracingOptions Tracing { get; set; } = new();
+    public AetherMetricsOptions Metrics { get; set; } = new();
 }
 
-public class LoggingOptions
+public sealed class OtlpOptions
 {
-    public bool Enabled { get; set; } = true;
-    public string FilePath { get; set; } = "logs/app.log";
-    public LogLevel MinimumLevel { get; set; } = LogLevel.Information;
+    public string? Endpoint { get; set; } // e.g. http://otel-collector:4318
+    public string Protocol { get; set; } = "http/protobuf"; // or "grpc"
+}
+
+public sealed class AetherLoggingOptions
+{
+    public bool EnableConsoleExporter { get; set; } = false;
+    public bool EnableOtlpExporter { get; set; } = true;
+
+    public bool IncludeFormattedMessage { get; set; } = true;
+    public bool IncludeScopes { get; set; } = false;
+    public bool ParseStateValues { get; set; } = true;
+
     public List<string> ExcludedPaths { get; set; } = new();
-    public LoggingEnrichers Enrichers { get; set; } = new();
+    public LoggingEnricherOptions Enrichers { get; set; } = new();
 }
 
-public class LoggingEnrichers
+public sealed class LoggingEnricherOptions
 {
-    public List<string> Headers { get; set; } = new(); 
+    public List<string> Headers { get; set; } = new();
+    public Dictionary<string, string> CustomAttributes { get; set; } = new();
 }
 
-public class ZipkinOptions
+public sealed class AetherTracingOptions
 {
-    public string Endpoint { get; set; } = "http://localhost:9411/api/v2/spans";
+    public bool EnableAspNetCore { get; set; } = true;
+    public bool EnableHttpClient { get; set; } = true;
+    public bool EnableEntityFrameworkCore { get; set; } = true;
+    public bool EnableRuntimeSources { get; set; } = true;
+
+    public bool EnableConsoleExporter { get; set; } = false;
+    public bool EnableOtlpExporter { get; set; } = true;
+
+    public List<string> ExcludedPaths { get; set; } = new();
+    public List<string> AdditionalSources { get; set; } = new(); // projects can add their own ActivitySource names
 }
 
-public class ElasticOptions
+public sealed class AetherMetricsOptions
 {
-    public string Endpoint { get; set; } = "http://localhost:8200";
-    public string Username { get; set; } = "";
-    public string Password { get; set; } = "";
-}
+    public bool EnableAspNetCore { get; set; } = true;
+    public bool EnableHttpClient { get; set; } = true;
+    public bool EnableRuntime { get; set; } = true;
+    public bool EnableProcess { get; set; } = true;
 
-public class OtlpOptions
-{
-    public string Endpoint { get; set; } = "http://localhost:4317";
-}
+    public bool EnableConsoleExporter { get; set; } = false;
+    public bool EnableOtlpExporter { get; set; } = true;
 
-public class OpenObserveOptions
-{
-    public string Endpoint { get; set; } = "http://localhost:5080/api/default";
-    public string Username { get; set; } = "";
-    public string Password { get; set; } = "";
-    public string Organization { get; set; } = "default";
-    public string Stream { get; set; } = "default";
+    public List<string> AdditionalMeters { get; set; } = new();
 }

@@ -17,4 +17,21 @@ public static class AetherDateTimeExtensions
             )
         );
     }
+
+    public static DateTime EnsureUtc(this DateTime value)
+    {
+        if (value == default)
+            return value;
+
+        return value.Kind switch
+        {
+            DateTimeKind.Utc => value,
+            DateTimeKind.Local => value.ToUniversalTime(),
+            DateTimeKind.Unspecified => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+            _ => value
+        };
+    }
+
+    public static DateTime? EnsureUtc(this DateTime? value)
+        => value?.EnsureUtc();
 }

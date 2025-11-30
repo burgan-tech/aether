@@ -8,10 +8,23 @@ using BBT.Aether.Domain.Entities;
 
 namespace BBT.Aether.Domain.Repositories;
 
-public abstract class RepositoryBase<TEntity>(IServiceProvider serviceProvider)
-    : BasicRepositoryBase<TEntity>(serviceProvider), IRepository<TEntity>
+public abstract class RepositoryBase<TEntity> : BasicRepositoryBase<TEntity>, IRepository<TEntity>
     where TEntity : class, IEntity
 {
+    /// <summary>
+    /// Initializes a new instance with explicit service provider.
+    /// </summary>
+    protected RepositoryBase(IServiceProvider serviceProvider) : base(serviceProvider)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance relying on AmbientServiceProvider.
+    /// </summary>
+    protected RepositoryBase() : base()
+    {
+    }
+
     public virtual Task<IQueryable<TEntity>> WithDetailsAsync()
     {
         return GetQueryableAsync();
@@ -45,11 +58,11 @@ public abstract class RepositoryBase<TEntity>(IServiceProvider serviceProvider)
     }
 
     public abstract Task DeleteAsync(Expression<Func<TEntity, bool>> predicate,
-        bool saveChanges = true,
+        bool saveChanges = false,
         CancellationToken cancellationToken = default);
 
     public abstract Task DeleteDirectAsync(Expression<Func<TEntity, bool>> predicate,
-        bool saveChanges = true,
+        bool saveChanges = false,
         CancellationToken cancellationToken = default);
 
     protected virtual TQueryable ApplyDataFilters<TQueryable>(TQueryable query)
@@ -65,15 +78,28 @@ public abstract class RepositoryBase<TEntity>(IServiceProvider serviceProvider)
     }
 }
 
-public abstract class RepositoryBase<TEntity, TKey>(IServiceProvider serviceProvider)
-    : RepositoryBase<TEntity>(serviceProvider), IRepository<TEntity, TKey>
+public abstract class RepositoryBase<TEntity, TKey> : RepositoryBase<TEntity>, IRepository<TEntity, TKey>
     where TEntity : class, IEntity<TKey>
 {
+    /// <summary>
+    /// Initializes a new instance with explicit service provider.
+    /// </summary>
+    protected RepositoryBase(IServiceProvider serviceProvider) : base(serviceProvider)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance relying on AmbientServiceProvider.
+    /// </summary>
+    protected RepositoryBase() : base()
+    {
+    }
+
     public abstract Task<TEntity> GetAsync(TKey id, bool includeDetails = true, CancellationToken cancellationToken = default);
 
     public abstract Task<TEntity?> FindAsync(TKey id, bool includeDetails = true, CancellationToken cancellationToken = default);
 
-    public virtual async Task DeleteAsync(TKey id, bool saveChanges = true, CancellationToken cancellationToken = default)
+    public virtual async Task DeleteAsync(TKey id, bool saveChanges = false, CancellationToken cancellationToken = default)
     {
         var entity = await FindAsync(id, cancellationToken: cancellationToken);
         if (entity == null)

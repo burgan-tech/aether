@@ -1,0 +1,185 @@
+using System;
+using System.IO;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using BBT.Aether.Events;
+using BBT.Aether.MultiSchema;
+using BBT.Aether.Uow;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
+
+namespace BBT.Aether.AspNetCore.Events;
+
+/// <summary>
+/// Abstract base class for event receiver endpoints for Dapr event delivery.
+/// Stores events as pending in inbox for background processing.
+/// Developers should inherit from this class and create their own controller actions with custom routes.
+/// </summary>
+public abstract class EventsController(
+    IInboxStore inboxStore,
+    IUnitOfWorkManager unitOfWorkManager,
+    IEventSerializer serializer,
+    ICurrentSchema currentSchema,
+    ILogger<EventsController> logger) : ControllerBase
+{
+    protected readonly IInboxStore InboxStore = inboxStore;
+    protected readonly IUnitOfWorkManager UnitOfWorkManager = unitOfWorkManager;
+    protected readonly IEventSerializer Serializer = serializer;
+    protected readonly ICurrentSchema CurrentSchema = currentSchema;
+    protected readonly ILogger<EventsController> Logger = logger;
+
+    /// <summary>
+    /// Processes incoming events from Dapr.
+    /// Flow: Read body → Extract schema → Set schema context → Check inbox → Store as pending → Return 200 OK
+    /// Background InboxProcessor will handle actual event processing.
+    /// Developers should call this method from their controller action.
+    /// </summary>
+    /// <param name="name">Event name from route</param>
+    /// <param name="version">Event version from route</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Action result indicating success or failure</returns>
+    protected virtual async Task<IActionResult> ProcessEventAsync(
+        string name,
+        string version,
+        CancellationToken cancellationToken)
+    {
+        byte[]? payload = null;
+        string? eventId = null;
+
+        try
+        {
+            // Step 1: Read request body as bytes
+            payload = await ReadRequestBodyAsync(cancellationToken);
+
+            // Step 2: Extract CloudEvent Id from JSON for idempotency check
+            eventId = TryExtractEventId(payload, name, version);
+            if (string.IsNullOrWhiteSpace(eventId))
+            {
+                return Ok(); // Return OK to prevent Dapr retries on malformed/missing ID
+            }
+            
+            // Step 3: Extract and set schema context from CloudEvent envelope
+            var schemaFromEnvelope = TryExtractSchema(payload);
+            if (!string.IsNullOrWhiteSpace(schemaFromEnvelope))
+            {
+                CurrentSchema.Set(schemaFromEnvelope);
+            }
+            
+            // Step 4: Open UoW for storing the event (with schema context set)
+            await using var uow = await UnitOfWorkManager.BeginRequiresNew(cancellationToken);
+
+            // Step 5: Check inbox for duplicate (idempotency)
+            if (await InboxStore.HasProcessedAsync(eventId, cancellationToken))
+            {
+                Logger.LogInformation("Event {EventId} ({Name} v{Version}) has already been processed, skipping", 
+                    eventId, name, version);
+                return Ok();
+            }
+
+            // Step 6: Store event as pending for background processing
+            await TryStorePendingEventAsync(payload, eventId, cancellationToken);
+
+            // Step 7: Commit UoW (flushes inbox)
+            await uow.CommitAsync(cancellationToken);
+            
+            return Ok();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error handling event {Name} v{Version} with ID {EventId}", name, version, eventId);
+            
+            // Return 500 to trigger Dapr retry mechanism
+            return StatusCode(500, new { error = "Internal server error processing event" });
+        }
+    }
+
+    /// <summary>
+    /// Reads the request body as a byte array.
+    /// Can be overridden to customize request body reading.
+    /// </summary>
+    protected virtual async Task<byte[]> ReadRequestBodyAsync(CancellationToken cancellationToken)
+    {
+        await using var memoryStream = new MemoryStream();
+        await Request.Body.CopyToAsync(memoryStream, cancellationToken);
+        return memoryStream.ToArray();
+    }
+
+    /// <summary>
+    /// Attempts to extract the CloudEvent ID from the payload.
+    /// Returns null if extraction fails or ID is missing.
+    /// Can be overridden to customize event ID extraction.
+    /// </summary>
+    protected virtual string? TryExtractEventId(byte[] payload, string name, string version)
+    {
+        try
+        {
+            using var jsonDoc = JsonDocument.Parse(payload);
+            var root = jsonDoc.RootElement;
+
+            if (root.TryGetProperty("id", out var idElement) || root.TryGetProperty("Id", out idElement))
+            {
+                return idElement.GetString();
+            }
+
+            Logger.LogWarning("CloudEvent Id is missing from event {Name} {Version}", name, version);
+            return null;
+        }
+        catch (JsonException ex) 
+        {
+            Logger.LogWarning(ex, "Failed to parse CloudEvent Id from event {Name} {Version}", name, version);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Attempts to extract the Schema from the CloudEvent envelope.
+    /// Returns null if extraction fails or Schema is missing.
+    /// Can be overridden to customize schema extraction.
+    /// </summary>
+    protected virtual string? TryExtractSchema(byte[] payload)
+    {
+        try
+        {
+            using var jsonDoc = JsonDocument.Parse(payload);
+            var root = jsonDoc.RootElement;
+
+            if (root.TryGetProperty("schema", out var schemaElement) || 
+                root.TryGetProperty("Schema", out schemaElement))
+            {
+                return schemaElement.GetString();
+            }
+
+            return null;
+        }
+        catch (JsonException ex)
+        {
+            Logger.LogDebug(ex, "Failed to extract Schema from CloudEvent envelope");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Attempts to store the event as pending in the inbox for background processing.
+    /// Logs a warning if storing fails but does not throw.
+    /// Can be overridden to customize inbox storage behavior.
+    /// </summary>
+    protected virtual async Task TryStorePendingEventAsync(byte[] payload, string eventId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var envelope = Serializer.Deserialize<CloudEventEnvelope>(payload);
+            
+            if (envelope != null)
+            {
+                await InboxStore.StorePendingAsync(envelope, cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to store event {EventId} as pending in inbox", eventId);
+            throw; // Re-throw to trigger retry
+        }
+    }
+}
+

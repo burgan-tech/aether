@@ -1,6 +1,6 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
-    <Import Project="..\..\..\common.props" />
+    <Import Project="..\..\..\common.props"/>
 
     <PropertyGroup>
         <TargetFramework>net9.0</TargetFramework>
@@ -12,11 +12,12 @@
         <GenerateAssemblyConfigurationAttribute>false</GenerateAssemblyConfigurationAttribute>
         <GenerateAssemblyCompanyAttribute>false</GenerateAssemblyCompanyAttribute>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
-        <RootNamespace />
+        <RootNamespace/>
     </PropertyGroup>
 
     <ItemGroup>
-      <ProjectReference Include="..\BBT.Aether.Core\BBT.Aether.Core.csproj" />
+        <ProjectReference Include="..\BBT.Aether.Abstractions\BBT.Aether.Abstractions.csproj"/>
+        <ProjectReference Include="..\BBT.Aether.Core\BBT.Aether.Core.csproj"/>
     </ItemGroup>
 
 </Project>

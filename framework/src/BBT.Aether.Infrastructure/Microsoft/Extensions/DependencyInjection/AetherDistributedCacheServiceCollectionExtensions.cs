@@ -23,7 +23,7 @@ public static class AetherDistributedCacheServiceCollectionExtensions
         configureCache?.Invoke(services);
 
         // Register the cache service
-        services.AddScoped<IDistributedCacheService, NetCoreDistributedCacheService>();
+        services.AddSingleton<IDistributedCacheService, NetCoreDistributedCacheService>();
 
         return services;
     }
@@ -41,7 +41,7 @@ public static class AetherDistributedCacheServiceCollectionExtensions
         }
 
         // Register the Dapr State Store cache service
-        services.AddScoped<IDistributedCacheService>(sp =>
+        services.AddSingleton<IDistributedCacheService>(sp =>
             new DaprDistributedCacheService(
                 sp.GetRequiredService<DaprClient>(),
                 storeName
@@ -57,7 +57,7 @@ public static class AetherDistributedCacheServiceCollectionExtensions
     public static IServiceCollection AddRedisDistributedCache(this IServiceCollection services)
     {
         // Register the Redis cache service
-        services.AddScoped<IDistributedCacheService, RedisDistributedCacheService>();
+        services.AddSingleton<IDistributedCacheService, RedisDistributedCacheService>();
 
         return services;
     }

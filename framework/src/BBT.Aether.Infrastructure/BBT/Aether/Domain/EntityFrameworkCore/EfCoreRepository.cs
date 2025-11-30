@@ -5,32 +5,52 @@ using System.Linq;
 using System.Linq.Expressions;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Repositories;
-using BBT.Aether.Domain.Services;
 using BBT.Aether.Guids;
+using BBT.Aether.Uow;
 using BBT.Aether.Users;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 
 namespace BBT.Aether.Domain.EntityFrameworkCore;
 
-public class EfCoreRepository<TDbContext, TEntity>(
-    TDbContext dbContext,
-    IServiceProvider serviceProvider,
-    ITransactionService transactionService)
-    : RepositoryBase<TEntity>(serviceProvider), IEfCoreRepository<TEntity>
+public class EfCoreRepository<TDbContext, TEntity> : RepositoryBase<TEntity>, IEfCoreRepository<TEntity>
     where TDbContext : AetherDbContext<TDbContext>
     where TEntity : class, IEntity
 {
+    private readonly IDbContextProvider<TDbContext> _dbContextProvider;
+    /// <summary>
+    /// Initializes a new instance with explicit service provider (recommended).
+    /// </summary>
+    public EfCoreRepository(
+        IDbContextProvider<TDbContext> dbContextProvider,
+        IServiceProvider serviceProvider)
+        : base(serviceProvider)
+    {
+        _dbContextProvider = dbContextProvider;
+    }
+
+    /// <summary>
+    /// Initializes a new instance relying on AmbientServiceProvider.
+    /// </summary>
+    public EfCoreRepository(IDbContextProvider<TDbContext> dbContextProvider)
+        : base()
+    {
+        _dbContextProvider = dbContextProvider;
+    }
+
     public IGuidGenerator GuidGenerator =>
         LazyServiceProvider.LazyGetService<IGuidGenerator>(SimpleGuidGenerator.Instance);
 
     public ICurrentUser CurrentUser => LazyServiceProvider.LazyGetRequiredService<ICurrentUser>();
 
+    public IClock Clock => LazyServiceProvider.LazyGetRequiredService<IClock>();
+    
     protected virtual bool ShouldSaveChanges(bool saveChanges)
     {
-        return saveChanges && !transactionService.HasActiveTransaction;
+        return saveChanges;
     }
 
     async Task<DbContext> IEfCoreRepository<TEntity>.GetDbContextAsync()
@@ -40,7 +60,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
 
     protected virtual Task<TDbContext> GetDbContextAsync()
     {
-        return Task.FromResult(dbContext);
+        return Task.FromResult(_dbContextProvider.GetDbContext());
     }
 
     Task<DbSet<TEntity>> IEfCoreRepository<TEntity>.GetDbSetAsync()
@@ -63,7 +83,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
         return (await GetDbContextAsync()).Database.CurrentTransaction?.GetDbTransaction();
     }
 
-    public async override Task<TEntity> InsertAsync(TEntity entity, bool saveChanges = true,
+    public async override Task<TEntity> InsertAsync(TEntity entity, bool saveChanges = false,
         CancellationToken cancellationToken = default)
     {
         CheckAndSetId(entity);
@@ -78,7 +98,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
         return savedEntity;
     }
 
-    public async override Task<TEntity> UpdateAsync(TEntity entity, bool saveChanges = true,
+    public async override Task<TEntity> UpdateAsync(TEntity entity, bool saveChanges = false,
         CancellationToken cancellationToken = default)
     {
         var context = await GetDbContextAsync();
@@ -97,7 +117,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
         return entity;
     }
 
-    public async override Task DeleteAsync(TEntity entity, bool saveChanges = true,
+    public async override Task DeleteAsync(TEntity entity, bool saveChanges = false,
         CancellationToken cancellationToken = default)
     {
         var context = await GetDbContextAsync();
@@ -176,7 +196,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
     }
 
     public async override Task DeleteAsync(Expression<Func<TEntity, bool>> predicate,
-        bool saveChanges = true,
+        bool saveChanges = false,
         CancellationToken cancellationToken = default)
     {
         var context = await GetDbContextAsync();
@@ -198,7 +218,7 @@ public class EfCoreRepository<TDbContext, TEntity>(
     }
 
     public async override Task DeleteDirectAsync(Expression<Func<TEntity, bool>> predicate,
-        bool saveChanges = true,
+        bool saveChanges = false,
         CancellationToken cancellationToken = default)
     {
         var context = await GetDbContextAsync();
@@ -288,15 +308,28 @@ public class EfCoreRepository<TDbContext, TEntity>(
     }
 }
 
-public class EfCoreRepository<TDbContext, TEntity, TKey>(
-    TDbContext dbContext,
-    IServiceProvider serviceProvider,
-    ITransactionService transactionService)
-    : EfCoreRepository<TDbContext, TEntity>(dbContext, serviceProvider, transactionService),
+public class EfCoreRepository<TDbContext, TEntity, TKey> : EfCoreRepository<TDbContext, TEntity>,
         IEfCoreRepository<TEntity, TKey>
     where TDbContext : AetherDbContext<TDbContext>
     where TEntity : class, IEntity<TKey>
 {
+    /// <summary>
+    /// Initializes a new instance with explicit service provider (recommended).
+    /// </summary>
+    public EfCoreRepository(
+        IDbContextProvider<TDbContext> dbContextProvider,
+        IServiceProvider serviceProvider)
+        : base(dbContextProvider, serviceProvider)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance relying on AmbientServiceProvider.
+    /// </summary>
+    public EfCoreRepository(IDbContextProvider<TDbContext> dbContextProvider)
+        : base(dbContextProvider)
+    {
+    }
     public virtual async Task<TEntity> GetAsync(TKey id,
         bool includeDetails = true,
         CancellationToken cancellationToken = default)

@@ -140,6 +140,8 @@ jobs:
           "./framework/src/BBT.Aether.AspNetCore/BBT.Aether.AspNetCore.csproj"
           "./framework/src/BBT.Aether.TestBase/BBT.Aether.TestBase.csproj"
           "./framework/src/BBT.Aether.HttpClient/BBT.Aether.HttpClient.csproj"
+          "./framework/src/BBT.Aether.Abstractions/BBT.Aether.Abstractions.csproj"
+          "./framework/src/BBT.Aether.Aspects/BBT.Aether.Aspects.csproj"
         )
         
         # Check for module projects (if they exist)

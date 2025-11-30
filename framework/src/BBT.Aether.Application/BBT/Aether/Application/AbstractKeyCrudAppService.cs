@@ -57,8 +57,7 @@ public abstract class AbstractKeyCrudAppService<TEntity, TGetOutputDto, TGetList
     public virtual async Task<TGetOutputDto> CreateAsync(TCreateInput input)
     {
         var entity = await MapToEntityAsync(input);
-        await Repository.InsertAsync(entity);
-
+        await Repository.InsertAsync(entity, true);
         return await MapToGetOutputDtoAsync(entity);
     }
 
@@ -66,7 +65,7 @@ public abstract class AbstractKeyCrudAppService<TEntity, TGetOutputDto, TGetList
     {
         var entity = await GetEntityByIdAsync(id);
         await MapToEntityAsync(input, entity);
-        await Repository.UpdateAsync(entity);
+        await Repository.UpdateAsync(entity, true);
 
         return await MapToGetOutputDtoAsync(entity);
     }

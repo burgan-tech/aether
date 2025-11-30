@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using BBT.Aether.ExceptionHandling;
-using BBT.Aether.Http;
+using BBT.Aether.Results;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
@@ -13,7 +13,7 @@ using Microsoft.Extensions.Options;
 
 namespace BBT.Aether.AspNetCore.ExceptionHandling;
 
-public class AetherExceptionFilter : IAsyncExceptionFilter
+public class AetherExceptionFilter(IProblemDetailsFactory problemDetailsFactory) : IAsyncExceptionFilter
 {
     public virtual async Task OnExceptionAsync(ExceptionContext context)
     {
@@ -33,46 +33,48 @@ public class AetherExceptionFilter : IAsyncExceptionFilter
             return false;
         }
         
-        return false;
+        return true;
     }
 
     protected virtual Task HandleAndWrapException(ExceptionContext context)
     {
-        LogException(context, out var serviceErrorInfo);
+        LogException(context, out var error);
+        
+        var problemDetails = problemDetailsFactory.CreateProblemDetails(error, context.HttpContext);
+        
         if (!context.HttpContext.Response.HasStarted)
         {
             context.HttpContext.Response.Headers.Append(AetherExceptionHandler.ErrorFormat, "true");
-            context.HttpContext.Response.StatusCode = (int)context
-                .GetRequiredService<IHttpExceptionStatusCodeFinder>()
-                .GetStatusCode(context.HttpContext, context.Exception);
+            context.HttpContext.Response.StatusCode = problemDetails.Status ?? 500;
         }
 
-        context.Result = new ObjectResult(new ServiceErrorResponse(serviceErrorInfo));
+        context.Result = new ObjectResult(problemDetails);
 
         context.ExceptionHandled = true;
         return Task.CompletedTask;
     }
     
-    protected virtual void LogException(ExceptionContext context, out ServiceErrorInfo serviceErrorInfo)
+    protected virtual void LogException(ExceptionContext context, out Error error)
     {
         var exceptionHandlingOptions = context.GetRequiredService<IOptions<AetherExceptionHandlingOptions>>().Value;
-        var exceptionToErrorInfoConverter = context.GetRequiredService<IExceptionToErrorInfoConverter>();
-        serviceErrorInfo = exceptionToErrorInfoConverter.Convert(context.Exception, options =>
+        var exceptionToErrorConverter = context.GetRequiredService<IExceptionToErrorInfoConverter>();
+        error = exceptionToErrorConverter.ConvertToError(context.Exception, options =>
         {
             options.SendExceptionsDetailsToClients = exceptionHandlingOptions.SendExceptionsDetailsToClients;
             options.SendStackTraceToClients = exceptionHandlingOptions.SendStackTraceToClients;
         });
 
-        var remoteServiceErrorInfoBuilder = new StringBuilder();
-        remoteServiceErrorInfoBuilder.AppendLine($"---------- {nameof(ServiceErrorInfo)} ----------");
-        remoteServiceErrorInfoBuilder.AppendLine(JsonSerializer.Serialize(serviceErrorInfo, new JsonSerializerOptions()
+        var errorBuilder = new StringBuilder();
+        errorBuilder.AppendLine($"---------- {nameof(Error)} ----------");
+        errorBuilder.AppendLine(JsonSerializer.Serialize(error, new JsonSerializerOptions()
         {
             WriteIndented = true
         }));
 
         var logger = context.GetService<ILogger<AetherExceptionFilter>>(NullLogger<AetherExceptionFilter>.Instance)!;
         var logLevel = context.Exception.GetLogLevel();
-        logger.LogWithLevel(logLevel, remoteServiceErrorInfoBuilder.ToString());
+        logger.LogWithLevel(logLevel, errorBuilder.ToString());
         logger.LogException(context.Exception, logLevel);
     }
+
 }

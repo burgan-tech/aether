@@ -4,7 +4,10 @@ using Microsoft.AspNetCore.Http;
 
 namespace BBT.Aether.AspNetCore.Security;
 
-public class HeaderCurrentUserResolver(IHttpContextAccessor httpContextAccessor)
+/// <summary>
+/// Default implementation of <see cref="ICurrentUserResolver"/> that resolves user information from HTTP headers.
+/// </summary>
+public class HeaderCurrentUserResolver(IHttpContextAccessor httpContextAccessor) : ICurrentUserResolver
 {
     public BasicUserInfo? GetCurrentUser()
     {

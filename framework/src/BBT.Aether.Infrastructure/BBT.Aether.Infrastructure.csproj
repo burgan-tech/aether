@@ -20,11 +20,11 @@
         <PackageReference Include="Dapr.Jobs"/>
         <PackageReference Include="AutoMapper"/>
         <PackageReference Include="StackExchange.Redis"/>
-        <PackageReference Include="Microsoft.EntityFrameworkCore"/>
         <PackageReference Include="Microsoft.EntityFrameworkCore.Relational"/>
     </ItemGroup>
     
     <ItemGroup>
+        <ProjectReference Include="..\BBT.Aether.Abstractions\BBT.Aether.Abstractions.csproj" />
         <ProjectReference Include="..\BBT.Aether.Domain\BBT.Aether.Domain.csproj" />
     </ItemGroup>
 
