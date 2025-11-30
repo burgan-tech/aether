@@ -77,7 +77,7 @@ public class DaprDistributedLockService(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Error executing function with Redis lock for resource {ResourceId}", resourceId);
+            logger.LogError(ex, "Error executing function with Dapr lock for resource {ResourceId}", resourceId);
             throw;
         }
     }
@@ -102,7 +102,7 @@ public class DaprDistributedLockService(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Error executing action with Redis lock for resource {ResourceId}", resourceId);
+            logger.LogError(ex, "Error executing action with Dapr lock for resource {ResourceId}", resourceId);
             throw;
         }
     }
