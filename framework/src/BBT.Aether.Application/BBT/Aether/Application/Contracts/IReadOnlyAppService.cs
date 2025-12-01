@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using BBT.Aether.Application.Dtos;
+using BBT.Aether.Domain;
 using BBT.Aether.Domain.Repositories;
 
 namespace BBT.Aether.Application;

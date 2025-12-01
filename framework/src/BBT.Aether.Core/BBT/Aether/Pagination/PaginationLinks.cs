@@ -1,4 +1,4 @@
-namespace BBT.Aether.Application.Dtos;
+namespace BBT.Aether;
 
 /// <summary>
 /// HATEOAS pagination links for API responses.

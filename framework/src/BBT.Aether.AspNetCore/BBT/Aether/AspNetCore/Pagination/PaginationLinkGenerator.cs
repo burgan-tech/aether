@@ -2,10 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using BBT.Aether.Application.Dtos;
-using BBT.Aether.Domain.Repositories;
 using Microsoft.AspNetCore.Http;
 
-namespace BBT.Aether.Domain.Pagination;
+namespace BBT.Aether.AspNetCore.Pagination;
 
 /// <summary>
 /// Generates HATEOAS pagination links using the current HTTP request context.
