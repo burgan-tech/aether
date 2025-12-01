@@ -1,6 +1,7 @@
 using System;
 using System.IO.Compression;
 using System.Linq;
+using BBT.Aether.Domain.Pagination;
 using BBT.Aether.AspNetCore.ExceptionHandling;
 using BBT.Aether.AspNetCore.Security;
 using BBT.Aether.AspNetCore.Tracing;
@@ -38,6 +39,9 @@ public static class AetherAspNetCoreModuleServiceCollectionExtensions
         //ResponseCompression
         services.AddResponseCompression(configuration);
 
+        // Pagination Link Generator
+        services.AddScoped<IPaginationLinkGenerator, PaginationLinkGenerator>();
+
         return services;
     }
 
@@ -46,19 +50,19 @@ public static class AetherAspNetCoreModuleServiceCollectionExtensions
         services.AddSingleton<IProblemDetailsFactory, ProblemDetailsFactory>();
         services.AddExceptionHandler<AetherExceptionHandler>();
         services.AddProblemDetails();
-        
+
         // Disable automatic ModelState validation responses
         // We'll handle validation through ModelStateValidationFilter -> AetherValidationException -> AetherExceptionHandler
         services.Configure<ApiBehaviorOptions>(options =>
         {
             options.SuppressModelStateInvalidFilter = true;
         });
-        
+
         services.AddControllers(options =>
         {
             options.Filters.Add<AetherExceptionFilter>();
         });
-        
+
         return services;
     }
 
@@ -66,7 +70,8 @@ public static class AetherAspNetCoreModuleServiceCollectionExtensions
         IConfiguration configuration)
     {
         var responseCompressionConfig = configuration.GetSection("ResponseCompression");
-        services.Configure<BBT.Aether.AspNetCore.ResponseCompression.ResponseCompressionOptions>(responseCompressionConfig);
+        services.Configure<BBT.Aether.AspNetCore.ResponseCompression.ResponseCompressionOptions>(
+            responseCompressionConfig);
         var enableCompression = responseCompressionConfig.GetValue<bool>("Enable");
 
         if (!enableCompression)
@@ -77,7 +82,7 @@ public static class AetherAspNetCoreModuleServiceCollectionExtensions
         var mimeTypes = responseCompressionConfig.GetSection("MimeTypes").Get<string[]>() ?? [];
         var excludedMimeTypes = responseCompressionConfig.GetSection("ExcludedMimeTypes").Get<string[]>() ?? [];
         var providers = responseCompressionConfig.GetSection("Providers").Get<string[]>() ?? [];
-        
+
         services.AddResponseCompression(options =>
         {
             options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(mimeTypes);
