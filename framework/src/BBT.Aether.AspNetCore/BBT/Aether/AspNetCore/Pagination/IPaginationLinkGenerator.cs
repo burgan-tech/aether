@@ -1,8 +1,7 @@
 using System.Collections.Generic;
 using BBT.Aether.Application.Dtos;
-using BBT.Aether.Domain.Repositories;
 
-namespace BBT.Aether.Domain.Pagination;
+namespace BBT.Aether.AspNetCore.Pagination;
 
 /// <summary>
 /// Generates HATEOAS pagination links for API responses.
