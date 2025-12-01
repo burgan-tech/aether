@@ -1,8 +1,8 @@
 using System;
 using System.IO.Compression;
 using System.Linq;
-using BBT.Aether.Domain.Pagination;
 using BBT.Aether.AspNetCore.ExceptionHandling;
+using BBT.Aether.AspNetCore.Pagination;
 using BBT.Aether.AspNetCore.Security;
 using BBT.Aether.AspNetCore.Tracing;
 using BBT.Aether.Users;

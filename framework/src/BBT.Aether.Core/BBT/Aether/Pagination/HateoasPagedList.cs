@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace BBT.Aether.Domain.Repositories;
+namespace BBT.Aether;
 
 /// <summary>
 /// Represents a paged list optimized for HATEOAS responses.
