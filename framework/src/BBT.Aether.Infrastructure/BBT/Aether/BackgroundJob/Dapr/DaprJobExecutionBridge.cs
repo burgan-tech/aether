@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.MultiSchema;
+using BBT.Aether.Uow;
 using Microsoft.Extensions.Logging;
 
 namespace BBT.Aether.BackgroundJob.Dapr;
@@ -20,6 +21,7 @@ public sealed class DaprJobExecutionBridge(
     IJobStore jobStore,
     ICurrentSchema currentSchema,
     IEventSerializer eventSerializer,
+    IUnitOfWorkManager unitOfWorkManager,
     ILogger<DaprJobExecutionBridge> logger)
     : IJobExecutionBridge
 {
@@ -39,7 +41,7 @@ public sealed class DaprJobExecutionBridge(
                 {
                     currentSchema.Set(envelope.Schema);
                 }
-                
+
                 var argsBytes = eventSerializer.Serialize(envelope.Data);
                 argsPayload = new ReadOnlyMemory<byte>(argsBytes);
             }
@@ -47,16 +49,27 @@ public sealed class DaprJobExecutionBridge(
             {
                 argsPayload = payload;
             }
-            
-            var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
-            if (jobInfo == null)
+
+            await using var uow = await unitOfWorkManager.BeginAsync(cancellationToken: cancellationToken);
+            try
             {
-                logger.LogError("Job with name '{JobName}' not found in store", jobName);
-                throw new InvalidOperationException($"Job with name '{jobName}' not found in store.");
+                var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
+                if (jobInfo == null)
+                {
+                    logger.LogError("Job with name '{JobName}' not found in store", jobName);
+                    throw new InvalidOperationException($"Job with name '{jobName}' not found in store.");
+                }
+
+                // Dispatch to handler using the handler name from job entity
+                await jobDispatcher.DispatchAsync(jobInfo.Id, jobInfo.HandlerName, argsPayload, cancellationToken);
+
+                await uow.CommitAsync(cancellationToken);
             }
-            
-            // Dispatch to handler using the handler name from job entity
-            await jobDispatcher.DispatchAsync(jobInfo.Id, jobInfo.HandlerName, argsPayload, cancellationToken);
+            catch (Exception)
+            {
+                await uow.RollbackAsync(cancellationToken);
+                throw;
+            }
         }
         catch (Exception ex)
         {
@@ -74,7 +87,7 @@ public sealed class DaprJobExecutionBridge(
         try
         {
             var envelope = eventSerializer.Deserialize<CloudEventEnvelope>(payload);
-            
+
             // Validate it's actually an envelope by checking required properties
             if (envelope != null && !string.IsNullOrWhiteSpace(envelope.Type))
             {
@@ -90,4 +103,3 @@ public sealed class DaprJobExecutionBridge(
         }
     }
 }
-

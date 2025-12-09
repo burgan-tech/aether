@@ -192,6 +192,7 @@ public sealed class CompositeUnitOfWork(
 
         try
         {
+            await SaveChangesAsync(cancellationToken);
             var strategy = domainEventOptions?.DispatchStrategy ?? DomainEventDispatchStrategy.AlwaysUseOutbox;
             
             if (strategy == DomainEventDispatchStrategy.AlwaysUseOutbox)

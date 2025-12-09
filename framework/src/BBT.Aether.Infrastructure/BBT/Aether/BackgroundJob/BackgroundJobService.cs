@@ -33,6 +33,7 @@ public sealed class BackgroundJobService(
     : IBackgroundJobService
 {
     private const string Source = "urn:background-job";
+
     /// <inheritdoc/>
     public async Task<Guid> EnqueueAsync<TPayload>(
         string handlerName,
@@ -54,12 +55,13 @@ public sealed class BackgroundJobService(
         if (string.IsNullOrWhiteSpace(schedule))
             throw new ArgumentNullException(nameof(schedule));
 
-        logger.LogInformation("Enqueueing job handler '{HandlerName}' with job name '{JobName}' and schedule '{Schedule}'",
+        logger.LogInformation(
+            "Enqueueing job handler '{HandlerName}' with job name '{JobName}' and schedule '{Schedule}'",
             handlerName, jobName, schedule);
 
         // Create job entity
         var jobId = guidGenerator.Create();
-        
+
         // Convert metadata to nullable dictionary for ExtraPropertyDictionary
         var extraProperties = new ExtraPropertyDictionary();
         if (metadata != null)
@@ -69,7 +71,7 @@ public sealed class BackgroundJobService(
                 extraProperties[kvp.Key] = kvp.Value;
             }
         }
-        
+
         var envelope = new CloudEventEnvelope<TPayload>
         {
             Type = handlerName,
@@ -78,7 +80,7 @@ public sealed class BackgroundJobService(
             Schema = currentSchema.Name,
             DataContentType = "application/json"
         };
-        
+
         var jobInfo = new BackgroundJobInfo(jobId, handlerName, jobName)
         {
             ExpressionValue = schedule,
@@ -90,26 +92,38 @@ public sealed class BackgroundJobService(
         // Serialize envelope for scheduler
         var payloadBytes = eventSerializer.Serialize(envelope);
 
-        await using var uow = await uowManager.BeginAsync(cancellationToken: cancellationToken);
+        await using var uow = await uowManager.BeginAsync(
+            options: new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew },
+            cancellationToken: cancellationToken);
         try
         {
             // Save to job store
             await jobStore.SaveAsync(jobInfo, cancellationToken);
-
-            // Commit transaction
+            await uow.SaveChangesAsync(cancellationToken);
+            // Register scheduler to run AFTER commit is fully persisted to DB
+            // This prevents race condition where scheduler triggers before DB write completes
+            uow.OnCompleted(async _ =>
+            {
+                await jobScheduler.ScheduleAsync(handlerName, jobName, schedule, payloadBytes, cancellationToken);
+                
+                logger.LogInformation(
+                    "Successfully scheduled job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
+                    handlerName, jobName, jobId);
+            });
+        
+            // Commit transaction - OnCompleted handlers run after this completes
             await uow.CommitAsync(cancellationToken);
-            
-            // Schedule with configured scheduler (Dapr, Quartz, etc.)
-            await jobScheduler.ScheduleAsync(handlerName, jobName, schedule, payloadBytes, cancellationToken);
-            
-            logger.LogInformation("Successfully enqueued job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
+
+            logger.LogInformation(
+                "Successfully enqueued job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
                 handlerName, jobName, jobId);
 
             return jobId;
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to enqueue job handler '{HandlerName}' with job name '{JobName}'", handlerName, jobName);
+            logger.LogError(ex, "Failed to enqueue job handler '{HandlerName}' with job name '{JobName}'", handlerName,
+                jobName);
             await uow.RollbackAsync(cancellationToken);
             throw;
         }
@@ -155,7 +169,8 @@ public sealed class BackgroundJobService(
 
             // Reschedule with new schedule
             var payloadBytes = eventSerializer.Serialize(envelope);
-            await jobScheduler.ScheduleAsync(jobInfo.HandlerName, jobInfo.JobName, newSchedule, payloadBytes, cancellationToken);
+            await jobScheduler.ScheduleAsync(jobInfo.HandlerName, jobInfo.JobName, newSchedule, payloadBytes,
+                cancellationToken);
 
             // Save updated entity
             await jobStore.SaveAsync(jobInfo, cancellationToken);
@@ -196,7 +211,8 @@ public sealed class BackgroundJobService(
             await jobScheduler.DeleteAsync(jobInfo.HandlerName, jobInfo.JobName, cancellationToken);
 
             // Update status to Cancelled
-            await jobStore.UpdateStatusAsync(id, BackgroundJobStatus.Cancelled, clock.UtcNow, cancellationToken: cancellationToken);
+            await jobStore.UpdateStatusAsync(id, BackgroundJobStatus.Cancelled, clock.UtcNow,
+                cancellationToken: cancellationToken);
 
             // Commit transaction
             await uow.CommitAsync(cancellationToken);
@@ -212,4 +228,3 @@ public sealed class BackgroundJobService(
         }
     }
 }
-

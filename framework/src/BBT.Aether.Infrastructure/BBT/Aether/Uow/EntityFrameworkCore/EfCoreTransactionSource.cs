@@ -39,19 +39,26 @@ public sealed class EfCoreTransactionSource<TDbContext>(IDbContextProvider<TDbCo
             : await dbContext.Database.BeginTransactionAsync(cancellationToken);
         }
 
-        return new EfCoreLocalTransaction(dbContext, transaction);
+        var localTx = new EfCoreLocalTransaction(dbContext, transaction);
+        
+        // CRITICAL: Establish direct link between DbContext and LocalTransaction
+        // This ensures events are routed to the correct UoW regardless of ambient context
+        dbContext.LocalEventEnqueuer = localTx;
+
+        return localTx;
     }
 
     /// <summary>
     /// Local transaction implementation for EF Core.
     /// Supports lazy transaction escalation and domain event collection.
-    /// Events are automatically pushed via IDomainEventSink during SaveChanges.
+    /// Events are pushed directly from DbContext via LocalEventEnqueuer during SaveChanges.
     /// </summary>
     private sealed class EfCoreLocalTransaction(
         AetherDbContext<TDbContext> context,
         IDbContextTransaction? transaction)
         : ILocalTransaction, ITransactionalLocal, ISupportsSaveChanges, IAsyncDisposable, ILocalTransactionEventEnqueuer
     {
+        private readonly AetherDbContext<TDbContext> _context = context;
         private IDbContextTransaction? _transaction = transaction;
         private readonly List<DomainEventEnvelope> _collectedEvents = new();
 
@@ -72,8 +79,8 @@ public sealed class EfCoreTransactionSource<TDbContext>(IDbContextProvider<TDbCo
 
             // Begin transaction with specified or default isolation level
             _transaction = isolationLevel.HasValue
-                ? await context.Database.BeginTransactionAsync(isolationLevel.Value, cancellationToken)
-                : await context.Database.BeginTransactionAsync(cancellationToken);
+                ? await _context.Database.BeginTransactionAsync(isolationLevel.Value, cancellationToken)
+                : await _context.Database.BeginTransactionAsync(cancellationToken);
         }
 
         /// <inheritdoc />
@@ -111,18 +118,21 @@ public sealed class EfCoreTransactionSource<TDbContext>(IDbContextProvider<TDbCo
         /// <inheritdoc />
         public void ClearCollectedEvents()
         {
-            context.ClearDomainEvents();
+            _context.ClearDomainEvents();
             _collectedEvents.Clear();
         }
 
         public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
         {
-            await context.SaveChangesAsync(cancellationToken);
+            await _context.SaveChangesAsync(cancellationToken);
         }
 
         /// <inheritdoc />
         public async ValueTask DisposeAsync()
         {
+            // Clear the direct link between DbContext and this transaction
+            _context.LocalEventEnqueuer = null;
+            
             if (_transaction != null)
             {
                 await _transaction.DisposeAsync();
@@ -130,17 +140,4 @@ public sealed class EfCoreTransactionSource<TDbContext>(IDbContextProvider<TDbCo
             }
         }
     }
-}
-
-/// <summary>
-/// Internal interface for local transactions that support event enqueueing.
-/// Allows the sink to push events into transactions.
-/// </summary>
-internal interface ILocalTransactionEventEnqueuer
-{
-    /// <summary>
-    /// Enqueues events that were collected by DbContext during SaveChanges.
-    /// </summary>
-    /// <param name="events">The events to enqueue</param>
-    void EnqueueEvents(IEnumerable<DomainEventEnvelope> events);
 }
