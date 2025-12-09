@@ -46,7 +46,6 @@ public class JobDispatcher(
             return;
         }
         
-        await using var uow = await uowManager.BeginAsync(cancellationToken: cancellationToken);
         try
         {
             // Update status to Running
@@ -59,21 +58,18 @@ public class JobDispatcher(
             await jobStore.UpdateStatusAsync(jobId, BackgroundJobStatus.Completed,
                 clock.UtcNow, cancellationToken: cancellationToken);
 
-            // Commit all changes together
-            await uow.CommitAsync(cancellationToken);
-
             logger.LogInformation("Successfully completed handler '{HandlerName}' for job id '{JobId}'", handlerName, jobId);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             logger.LogWarning("Handler '{HandlerName}' for job id '{JobId}' was cancelled", handlerName, jobId);
-            await HandleJobCancellationAsync(uow, jobId, cancellationToken);
+            await HandleJobCancellationAsync(jobId, cancellationToken);
             throw;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Handler '{HandlerName}' for job id '{JobId}' failed", handlerName, jobId);
-            await HandleJobFailureAsync(uow, jobId, ex, cancellationToken);
+            await HandleJobFailureAsync(jobId, ex, cancellationToken);
             throw;
         }
     }
@@ -133,25 +129,23 @@ public class JobDispatcher(
     /// <summary>
     /// Handles job cancellation by updating status within the existing UoW.
     /// </summary>
-    private async Task HandleJobCancellationAsync(IUnitOfWork uow, Guid jobId, CancellationToken cancellationToken)
+    private async Task HandleJobCancellationAsync(Guid jobId, CancellationToken cancellationToken)
     {
         try
         {
             await jobStore.UpdateStatusAsync(jobId, BackgroundJobStatus.Cancelled,
                 clock.UtcNow, "Job was cancelled", cancellationToken);
-            await uow.CommitAsync(cancellationToken);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to update job status to Cancelled");
-            await uow.RollbackAsync(cancellationToken);
         }
     }
 
     /// <summary>
     /// Handles job failure by updating status within the existing UoW.
     /// </summary>
-    private async Task HandleJobFailureAsync(IUnitOfWork uow, Guid jobId, Exception exception,
+    private async Task HandleJobFailureAsync(Guid jobId, Exception exception,
         CancellationToken cancellationToken)
     {
         try
@@ -161,12 +155,10 @@ public class JobDispatcher(
 
             await jobStore.UpdateStatusAsync(jobId, BackgroundJobStatus.Failed,
                 clock.UtcNow, errorMessage, cancellationToken);
-            await uow.CommitAsync(cancellationToken);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to update job status to Failed");
-            await uow.RollbackAsync(cancellationToken);
         }
     }
 

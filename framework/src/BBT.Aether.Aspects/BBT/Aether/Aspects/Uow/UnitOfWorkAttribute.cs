@@ -104,7 +104,7 @@ public class UnitOfWorkAttribute : AetherMethodInterceptionAspect
             throw;
         }
     }
-
+    
     private UnitOfWorkOptions CreateOptions()
     {
         var options = new UnitOfWorkOptions
