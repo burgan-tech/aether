@@ -278,3 +278,7 @@ deploy/ssh-password.txt
 deploy/github-api-key.txt
 deploy/_run_all_log.txt
 **/**/Logs/*.json
+
+
+# AI Documentations
+ai-docs/
