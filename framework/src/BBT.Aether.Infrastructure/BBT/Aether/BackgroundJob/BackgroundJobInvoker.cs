@@ -15,14 +15,14 @@ namespace BBT.Aether.BackgroundJob;
 internal sealed class BackgroundJobInvoker<TArgs> : IBackgroundJobInvoker
 {
     public async Task InvokeAsync(
-        IServiceScopeFactory scopeFactory,
+        IServiceProvider serviceProvider,
         IEventSerializer eventSerializer,
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken)
     {
         // Resolve dependencies from DI
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var handler = scope.ServiceProvider.GetRequiredService<IBackgroundJobHandler<TArgs>>();
+        // await using var scope = scopeFactory.CreateAsyncScope();
+        var handler = serviceProvider.GetRequiredService<IBackgroundJobHandler<TArgs>>();
 
         var args = eventSerializer.Deserialize<TArgs>(payload.Span);
         if (args == null)

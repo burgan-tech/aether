@@ -125,7 +125,7 @@ public class InboxProcessor<TDbContext>(
 
             // Begin a new UoW for handler execution + marking as processed
             await using var handlerUow = await unitOfWorkManager.BeginRequiresNew(cancellationToken);
-
+            
             // Invoke the handler
             await invoker.InvokeAsync(scopedServiceProvider, inboxMessage.EventData, cancellationToken);
 
