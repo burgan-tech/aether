@@ -5,6 +5,7 @@ using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -14,8 +15,6 @@ namespace BBT.Aether.BackgroundJob;
 /// <inheritdoc />
 public class JobDispatcher(
     IServiceScopeFactory scopeFactory,
-    IJobStore jobStore,
-    IUnitOfWorkManager uowManager,
     BackgroundJobOptions options,
     IClock clock,
     IEventSerializer eventSerializer,
@@ -34,43 +33,72 @@ public class JobDispatcher(
 
         if (string.IsNullOrWhiteSpace(handlerName))
             throw new ArgumentNullException(nameof(handlerName));
+
+        await using var scope = scopeFactory.CreateAsyncScope();
         
-        if (await IsJobAlreadyProcessedAsync(jobId, handlerName, cancellationToken))
-            return;
-        
-        if (!options.Invokers.ContainsKey(handlerName))
+        var argsPayload = CloudEventEnvelopeHelper.ExtractDataPayload(eventSerializer, jobPayload, out var envelope);
+
+        if (envelope != null && !string.IsNullOrWhiteSpace(envelope.Schema))
         {
-            logger.LogWarning("No handler found for handler name '{HandlerName}' with job id '{JobId}'", handlerName, jobId);
-            await UpdateStatusWithinUowAsync(jobId, BackgroundJobStatus.Failed,
-                "No handler found for handler type", cancellationToken);
-            return;
+            var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+            currentSchema.Set(envelope.Schema);
         }
-        
-        try
+
+        var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
+
+        // First UoW: Check idempotency and update status to Running
+        await using (var uow = await uowManager.BeginRequiresNew(cancellationToken))
         {
+            if (await IsJobAlreadyProcessedAsync(jobStore, jobId, handlerName, cancellationToken))
+            {
+                await uow.CommitAsync(cancellationToken);
+                return;
+            }
+
+            if (!options.Invokers.ContainsKey(handlerName))
+            {
+                logger.LogWarning("No handler found for handler name '{HandlerName}' with job id '{JobId}'", handlerName,
+                    jobId);
+                await jobStore.UpdateStatusAsync(jobId, BackgroundJobStatus.Failed, clock.UtcNow,
+                    "No handler found for handler type", cancellationToken);
+                await uow.CommitAsync(cancellationToken);
+                return;
+            }
+
             // Update status to Running
             await jobStore.UpdateStatusAsync(jobId, BackgroundJobStatus.Running,
                 cancellationToken: cancellationToken);
+            await uow.CommitAsync(cancellationToken);
+        }
 
-            await InvokeHandlerAsync(handlerName, jobPayload, cancellationToken);
+        // Second UoW: Execute handler and mark as completed
+        try
+        {
+            await using var handlerUow = await uowManager.BeginRequiresNew(cancellationToken);
+
+            await InvokeHandlerAsync(scope.ServiceProvider, handlerName, argsPayload, cancellationToken);
 
             // Update status to Completed
             await jobStore.UpdateStatusAsync(jobId, BackgroundJobStatus.Completed,
                 clock.UtcNow, cancellationToken: cancellationToken);
+            logger.LogInformation("Successfully completed handler '{HandlerName}' for job id '{JobId}'", handlerName,
+                jobId);
 
-            logger.LogInformation("Successfully completed handler '{HandlerName}' for job id '{JobId}'", handlerName, jobId);
+            await handlerUow.CommitAsync(cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             logger.LogWarning("Handler '{HandlerName}' for job id '{JobId}' was cancelled", handlerName, jobId);
-            await HandleJobCancellationAsync(jobId, cancellationToken);
-            throw;
+            await MarkJobStatusAsync(uowManager, jobStore, jobId, BackgroundJobStatus.Cancelled,
+                "Job was cancelled", cancellationToken);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Handler '{HandlerName}' for job id '{JobId}' failed", handlerName, jobId);
-            await HandleJobFailureAsync(jobId, ex, cancellationToken);
-            throw;
+            var errorMessage = $"{ex.GetType().Name}: {ex.Message}".Truncate(4000);
+            await MarkJobStatusAsync(uowManager, jobStore, jobId, BackgroundJobStatus.Failed,
+                errorMessage, cancellationToken);
         }
     }
 
@@ -78,7 +106,8 @@ public class JobDispatcher(
     /// Checks if a job has already been processed (idempotency check).
     /// Returns true if job is in Completed or Cancelled state.
     /// </summary>
-    private async Task<bool> IsJobAlreadyProcessedAsync(Guid jobId, string handlerName, CancellationToken cancellationToken)
+    private async Task<bool> IsJobAlreadyProcessedAsync(IJobStore jobStore, Guid jobId, string handlerName,
+        CancellationToken cancellationToken)
     {
         var jobInfo = await jobStore.GetAsync(jobId, cancellationToken);
         if (jobInfo == null)
@@ -95,7 +124,8 @@ public class JobDispatcher(
 
         if (jobInfo.Status == BackgroundJobStatus.Cancelled)
         {
-            logger.LogWarning("Handler '{HandlerName}' for job id '{JobId}' was cancelled. Skipping reprocessing (idempotency).",
+            logger.LogWarning(
+                "Handler '{HandlerName}' for job id '{JobId}' was cancelled. Skipping reprocessing (idempotency).",
                 handlerName, jobId);
             return true;
         }
@@ -104,61 +134,26 @@ public class JobDispatcher(
     }
 
     /// <summary>
-    /// Updates job status within a UoW transaction.
-    /// Helper method to reduce code duplication.
+    /// Marks job status within a separate UoW to ensure status update is persisted
+    /// even if the main transaction failed.
     /// </summary>
-    private async Task UpdateStatusWithinUowAsync(
+    private async Task MarkJobStatusAsync(
+        IUnitOfWorkManager uowManager,
+        IJobStore jobStore,
         Guid jobId,
         BackgroundJobStatus status,
-        string? error = null,
-        CancellationToken cancellationToken = default)
-    {
-        await using var uow = await uowManager.BeginAsync(cancellationToken: cancellationToken);
-        try
-        {
-            await jobStore.UpdateStatusAsync(jobId, status, clock.UtcNow, error, cancellationToken);
-            await uow.CommitAsync(cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to update job status to {Status}", status);
-            await uow.RollbackAsync(cancellationToken);
-        }
-    }
-
-    /// <summary>
-    /// Handles job cancellation by updating status within the existing UoW.
-    /// </summary>
-    private async Task HandleJobCancellationAsync(Guid jobId, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await jobStore.UpdateStatusAsync(jobId, BackgroundJobStatus.Cancelled,
-                clock.UtcNow, "Job was cancelled", cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to update job status to Cancelled");
-        }
-    }
-
-    /// <summary>
-    /// Handles job failure by updating status within the existing UoW.
-    /// </summary>
-    private async Task HandleJobFailureAsync(Guid jobId, Exception exception,
+        string? errorMessage,
         CancellationToken cancellationToken)
     {
         try
         {
-            var errorMessage = $"{exception.GetType().Name}: {exception.Message}";
-            errorMessage = errorMessage.Truncate(4000);
-
-            await jobStore.UpdateStatusAsync(jobId, BackgroundJobStatus.Failed,
-                clock.UtcNow, errorMessage, cancellationToken);
+            await using var uow = await uowManager.BeginRequiresNew(cancellationToken);
+            await jobStore.UpdateStatusAsync(jobId, status, clock.UtcNow, errorMessage, cancellationToken);
+            await uow.CommitAsync(cancellationToken);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to update job status to Failed");
+            logger.LogError(ex, "Failed to mark job {JobId} as {Status}", jobId, status);
         }
     }
 
@@ -167,7 +162,8 @@ public class JobDispatcher(
     /// Generic type TArgs was closed at registration time (startup), not at runtime.
     /// This method is completely type-safe and fast.
     /// </summary>
-    private async Task InvokeHandlerAsync(string handlerName, ReadOnlyMemory<byte> jobPayload,
+    private async Task InvokeHandlerAsync(IServiceProvider scopedProvider, string handlerName,
+        ReadOnlyMemory<byte> jobPayload,
         CancellationToken cancellationToken)
     {
         // Get pre-created invoker from options (generic already closed at startup)
@@ -177,6 +173,6 @@ public class JobDispatcher(
         }
 
         // Invoke handler - completely type-safe, no reflection at runtime
-        await invoker.InvokeAsync(scopeFactory, eventSerializer, jobPayload, cancellationToken);
+        await invoker.InvokeAsync(scopedProvider, eventSerializer, jobPayload, cancellationToken);
     }
 }

@@ -22,7 +22,7 @@ public interface IBackgroundJobInvoker
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>A task representing the asynchronous operation</returns>
     Task InvokeAsync(
-        IServiceScopeFactory scopeFactory,
+        IServiceProvider scopeFactory,
         IEventSerializer eventSerializer,
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken);
