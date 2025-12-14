@@ -1,11 +1,10 @@
 using System;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.MultiSchema;
-using BBT.Aether.Uow;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace BBT.Aether.BackgroundJob.Dapr;
@@ -13,15 +12,13 @@ namespace BBT.Aether.BackgroundJob.Dapr;
 /// <summary>
 /// Dapr-specific implementation of IJobExecutionBridge.
 /// Bridges Dapr's job execution callback to Aether's JobDispatcher.
-/// Looks up job entity by job name (Dapr's job identifier) and delegates to dispatcher with the handler name.
-/// Extracts schema context from CloudEventEnvelope and sets it before job execution.
+/// Looks up job entity by job name (Dapr's job identifier) and delegates to dispatcher.
+/// Extracts schema context from CloudEventEnvelope before jobStore access for multi-tenant support.
 /// </summary>
 public sealed class DaprJobExecutionBridge(
+    IServiceScopeFactory scopeFactory,
     IJobDispatcher jobDispatcher,
-    IJobStore jobStore,
-    ICurrentSchema currentSchema,
     IEventSerializer eventSerializer,
-    IUnitOfWorkManager unitOfWorkManager,
     ILogger<DaprJobExecutionBridge> logger)
     : IJobExecutionBridge
 {
@@ -32,74 +29,33 @@ public sealed class DaprJobExecutionBridge(
 
         try
         {
-            var envelope = TryParseEnvelope(payload.ToArray());
-            ReadOnlyMemory<byte> argsPayload;
+            await using var scope = scopeFactory.CreateAsyncScope();
 
-            if (envelope != null)
-            {
-                if (!string.IsNullOrWhiteSpace(envelope.Schema))
-                {
-                    currentSchema.Set(envelope.Schema);
-                }
+            // Parse envelope and set schema context before jobStore access (multi-tenant support)
+            var dataPayload = CloudEventEnvelopeHelper.ExtractDataPayload(eventSerializer, payload, out var envelope);
 
-                var argsBytes = eventSerializer.Serialize(envelope.Data);
-                argsPayload = new ReadOnlyMemory<byte>(argsBytes);
-            }
-            else
+            if (envelope != null && !string.IsNullOrWhiteSpace(envelope.Schema))
             {
-                argsPayload = payload;
+                var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+                currentSchema.Set(envelope.Schema);
             }
 
-            await using var uow = await unitOfWorkManager.BeginAsync(cancellationToken: cancellationToken);
-            try
-            {
-                var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
-                if (jobInfo == null)
-                {
-                    logger.LogError("Job with name '{JobName}' not found in store", jobName);
-                    throw new InvalidOperationException($"Job with name '{jobName}' not found in store.");
-                }
+            var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
+            var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
 
-                // Dispatch to handler using the handler name from job entity
-                await jobDispatcher.DispatchAsync(jobInfo.Id, jobInfo.HandlerName, argsPayload, cancellationToken);
-
-                await uow.CommitAsync(cancellationToken);
-            }
-            catch (Exception)
+            if (jobInfo == null)
             {
-                await uow.RollbackAsync(cancellationToken);
-                throw;
+                logger.LogError("Job with name '{JobName}' not found in store", jobName);
+                return;
             }
+
+            // Dispatch to handler with extracted data payload
+            await jobDispatcher.DispatchAsync(jobInfo.Id, jobInfo.HandlerName, dataPayload, cancellationToken);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to execute Dapr job '{JobName}' through execution bridge", jobName);
             throw;
-        }
-    }
-
-    /// <summary>
-    /// Attempts to parse the payload as a CloudEventEnvelope.
-    /// Returns null if the payload is not in envelope format (old format).
-    /// </summary>
-    private CloudEventEnvelope? TryParseEnvelope(byte[] payload)
-    {
-        try
-        {
-            var envelope = eventSerializer.Deserialize<CloudEventEnvelope>(payload);
-
-            // Validate it's actually an envelope by checking required properties
-            if (envelope != null && !string.IsNullOrWhiteSpace(envelope.Type))
-            {
-                return envelope;
-            }
-
-            return null;
-        }
-        catch (Exception ex)
-        {
-            logger.LogDebug(ex, "Payload is not in CloudEventEnvelope format, treating as legacy format");
-            return null;
         }
     }
 }
