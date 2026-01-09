@@ -232,6 +232,28 @@ public static class ResultExtensions
         => result.IsSuccess && !predicate(result.Value!) ? Result<T>.Fail(error) : result;
 
     /// <summary>
+    /// Ensures a predicate is satisfied, otherwise returns an error (lazy evaluation).
+    /// </summary>
+    /// <typeparam name="T">Value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="predicate">Condition that must be true</param>
+    /// <param name="errorFactory">Function to create error if predicate fails</param>
+    /// <returns>The original result if predicate passes, otherwise a failure</returns>
+    public static Result<T> Ensure<T>(this Result<T> result, Func<T, bool> predicate, Func<Error> errorFactory)
+        => result.IsSuccess && !predicate(result.Value!) ? Result<T>.Fail(errorFactory()) : result;
+
+    /// <summary>
+    /// Ensures a predicate is satisfied, otherwise returns an error (lazy evaluation with value access).
+    /// </summary>
+    /// <typeparam name="T">Value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="predicate">Condition that must be true</param>
+    /// <param name="errorFactory">Function to create error based on the value if predicate fails</param>
+    /// <returns>The original result if predicate passes, otherwise a failure</returns>
+    public static Result<T> Ensure<T>(this Result<T> result, Func<T, bool> predicate, Func<T, Error> errorFactory)
+        => result.IsSuccess && !predicate(result.Value!) ? Result<T>.Fail(errorFactory(result.Value!)) : result;
+
+    /// <summary>
     /// Executes a side effect on failure without altering the error.
     /// Useful for logging, alerting, or cleanup actions on failure.
     /// </summary>
@@ -350,6 +372,34 @@ public static class ResultExtensions
     }
 
     /// <summary>
+    /// Async version of Ensure for sync Result with async predicate (lazy error evaluation).
+    /// </summary>
+    /// <typeparam name="T">Value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="predicate">Async predicate that must be true</param>
+    /// <param name="errorFactory">Function to create error if predicate fails</param>
+    /// <returns>The original result if predicate passes, otherwise a failure</returns>
+    public static async Task<Result<T>> EnsureAsync<T>(this Result<T> result, Func<T, Task<bool>> predicate, Func<Error> errorFactory)
+    {
+        if (!result.IsSuccess) return result;
+        return await predicate(result.Value!) ? result : Result<T>.Fail(errorFactory());
+    }
+
+    /// <summary>
+    /// Async version of Ensure for sync Result with async predicate (lazy error evaluation with value access).
+    /// </summary>
+    /// <typeparam name="T">Value type</typeparam>
+    /// <param name="result">The source result</param>
+    /// <param name="predicate">Async predicate that must be true</param>
+    /// <param name="errorFactory">Function to create error based on the value if predicate fails</param>
+    /// <returns>The original result if predicate passes, otherwise a failure</returns>
+    public static async Task<Result<T>> EnsureAsync<T>(this Result<T> result, Func<T, Task<bool>> predicate, Func<T, Error> errorFactory)
+    {
+        if (!result.IsSuccess) return result;
+        return await predicate(result.Value!) ? result : Result<T>.Fail(errorFactory(result.Value!));
+    }
+
+    /// <summary>
     /// Async version of Map for Task-wrapped results.
     /// </summary>
     public static async Task<Result<TU>> MapAsync<T, TU>(this Task<Result<T>> task, Func<T, TU> mapper)
@@ -456,6 +506,34 @@ public static class ResultExtensions
     {
         var result = await task;
         return result.Ensure(predicate, error);
+    }
+
+    /// <summary>
+    /// Async version of Ensure for Task-wrapped results (lazy error evaluation).
+    /// </summary>
+    /// <typeparam name="T">Value type</typeparam>
+    /// <param name="task">The source result task</param>
+    /// <param name="predicate">Condition that must be true</param>
+    /// <param name="errorFactory">Function to create error if predicate fails</param>
+    /// <returns>The original result if predicate passes, otherwise a failure</returns>
+    public static async Task<Result<T>> EnsureAsync<T>(this Task<Result<T>> task, Func<T, bool> predicate, Func<Error> errorFactory)
+    {
+        var result = await task;
+        return result.Ensure(predicate, errorFactory);
+    }
+
+    /// <summary>
+    /// Async version of Ensure for Task-wrapped results (lazy error evaluation with value access).
+    /// </summary>
+    /// <typeparam name="T">Value type</typeparam>
+    /// <param name="task">The source result task</param>
+    /// <param name="predicate">Condition that must be true</param>
+    /// <param name="errorFactory">Function to create error based on the value if predicate fails</param>
+    /// <returns>The original result if predicate passes, otherwise a failure</returns>
+    public static async Task<Result<T>> EnsureAsync<T>(this Task<Result<T>> task, Func<T, bool> predicate, Func<T, Error> errorFactory)
+    {
+        var result = await task;
+        return result.Ensure(predicate, errorFactory);
     }
 
     /// <summary>
