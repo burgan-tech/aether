@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
@@ -189,7 +190,7 @@ public class EfCoreInboxStore<TDbContext>(
                                   FOR UPDATE SKIP LOCKED
                               )
                               RETURNING "Id", "Status", "EventName", "EventData", "CreatedAt",
-                                        "HandledTime", "LockedBy", "LockedUntil", "RetryCount", "NextRetryTime";
+                                        "HandledTime", "LockedBy", "LockedUntil", "RetryCount", "NextRetryTime", "ExtraProperties";
                               """;
 
         AddParameter(command, "@processing", (int)IncomingEventStatus.Processing);
@@ -224,7 +225,7 @@ public class EfCoreInboxStore<TDbContext>(
                 NextRetryTime = reader.IsDBNull(reader.GetOrdinal("NextRetryTime")) 
                     ? null 
                     : reader.GetDateTime(reader.GetOrdinal("NextRetryTime")),
-                ExtraProperties = new Dictionary<string, object>()
+                ExtraProperties = DeserializeExtraProperties(reader)
             };
 
             messages.Add(message);
@@ -239,5 +240,19 @@ public class EfCoreInboxStore<TDbContext>(
         parameter.ParameterName = name;
         parameter.Value = value ?? DBNull.Value;
         command.Parameters.Add(parameter);
+    }
+
+    private static Dictionary<string, object> DeserializeExtraProperties(DbDataReader reader)
+    {
+        var ordinal = reader.GetOrdinal("ExtraProperties");
+        if (reader.IsDBNull(ordinal))
+            return new Dictionary<string, object>();
+
+        var json = reader.GetString(ordinal);
+        if (string.IsNullOrWhiteSpace(json) || json == "{}")
+            return new Dictionary<string, object>();
+
+        return JsonSerializer.Deserialize<Dictionary<string, object>>(json)
+               ?? new Dictionary<string, object>();
     }
 }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
@@ -102,7 +103,7 @@ public class EfCoreOutboxStore<TDbContext>(
                                   FOR UPDATE SKIP LOCKED
                               )
                               RETURNING "Id", "Status", "EventName", "EventData", "CreatedAt",
-                                        "ProcessedAt", "LockedBy", "LockedUntil", "LastError", "RetryCount", "NextRetryAt";
+                                        "ProcessedAt", "LockedBy", "LockedUntil", "LastError", "RetryCount", "NextRetryAt", "ExtraProperties";
                               """;
 
         AddParameter(command, "@processing", (int)OutboxMessageStatus.Processing);
@@ -139,7 +140,8 @@ public class EfCoreOutboxStore<TDbContext>(
                 RetryCount = reader.GetInt32(reader.GetOrdinal("RetryCount")),
                 NextRetryAt = reader.IsDBNull(reader.GetOrdinal("NextRetryAt")) 
                     ? null 
-                    : reader.GetDateTime(reader.GetOrdinal("NextRetryAt"))
+                    : reader.GetDateTime(reader.GetOrdinal("NextRetryAt")),
+                ExtraProperties = DeserializeExtraProperties(reader)
             };
 
             messages.Add(message);
@@ -154,6 +156,20 @@ public class EfCoreOutboxStore<TDbContext>(
         parameter.ParameterName = name;
         parameter.Value = value ?? DBNull.Value;
         command.Parameters.Add(parameter);
+    }
+
+    private static Dictionary<string, object> DeserializeExtraProperties(DbDataReader reader)
+    {
+        var ordinal = reader.GetOrdinal("ExtraProperties");
+        if (reader.IsDBNull(ordinal))
+            return new Dictionary<string, object>();
+
+        var json = reader.GetString(ordinal);
+        if (string.IsNullOrWhiteSpace(json) || json == "{}")
+            return new Dictionary<string, object>();
+
+        return JsonSerializer.Deserialize<Dictionary<string, object>>(json)
+               ?? new Dictionary<string, object>();
     }
 }
 
