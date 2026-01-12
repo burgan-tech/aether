@@ -97,7 +97,7 @@ public class OutboxProcessor<TDbContext>(
                     domainMessage.LockedUntil = null;
                 }
 
-                logger.LogDebug("Successfully published outbox message {MessageId}", message.Id);
+                logger.LogInformation("Successfully published outbox message {MessageId}", message.Id);
             }
             catch (Exception ex)
             {
