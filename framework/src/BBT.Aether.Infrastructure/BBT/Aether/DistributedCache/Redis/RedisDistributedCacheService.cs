@@ -66,7 +66,7 @@ public class RedisDistributedCacheService(
                 expiry = options.SlidingExpiration.Value;
             }
 
-            await database.StringSetAsync(key, serializedValue, Expiration.KeepTtl);
+            await database.StringSetAsync(key, serializedValue, expiry, keepTtl: false);
             _logger.LogDebug("Successfully cached value for key: {Key} with expiry: {Expiry}", key, expiry);
         }
         catch (Exception ex)
