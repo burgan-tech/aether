@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ApiExplorer;
 using Microsoft.AspNetCore.Mvc.Versioning;
-using Microsoft.OpenApi.Models;
+using Microsoft.Extensions.Options;
+using Microsoft.OpenApi;
+using Swashbuckle.AspNetCore.SwaggerGen;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
@@ -25,28 +27,40 @@ public static class AetherApiVersioningServiceCollectionExtensions
             options.SubstituteApiVersionInUrl = true;
         });
 
-        // Explicitly register the ApiVersionDescriptionProvider
-        services.AddSingleton<IApiVersionDescriptionProvider, DefaultApiVersionDescriptionProvider>();
-
-        // Configure Swagger with versioning support
-        services.AddSwaggerGen(options =>
-        {
-            // Add a swagger document for each discovered API version
-            var provider = services.BuildServiceProvider().GetRequiredService<IApiVersionDescriptionProvider>();
-
-            foreach (var description in provider.ApiVersionDescriptions)
-            {
-                options.SwaggerDoc(description.GroupName, new OpenApiInfo()
-                {
-                    Title = apiTitle,
-                    Version = description.ApiVersion.ToString(),
-                    Description = description.IsDeprecated
-                        ? "This API version has been deprecated."
-                        : "API endpoints"
-                });
-            }
-        });
+        services.AddSwaggerGen();
+        
+        // Configure Swagger with versioning support using ConfigureOptions pattern
+        services.AddTransient<IConfigureOptions<SwaggerGenOptions>>(serviceProvider =>
+            new ConfigureSwaggerOptions(serviceProvider.GetRequiredService<IApiVersionDescriptionProvider>(), apiTitle));
 
         return services;
+    }
+}
+
+internal sealed class ConfigureSwaggerOptions : IConfigureOptions<SwaggerGenOptions>
+{
+    private readonly IApiVersionDescriptionProvider _provider;
+    private readonly string _apiTitle;
+
+    public ConfigureSwaggerOptions(IApiVersionDescriptionProvider provider, string apiTitle)
+    {
+        _provider = provider;
+        _apiTitle = apiTitle;
+    }
+
+    public void Configure(SwaggerGenOptions options)
+    {
+        // Add a swagger document for each discovered API version
+        foreach (var description in _provider.ApiVersionDescriptions)
+        {
+            options.SwaggerDoc(description.GroupName, new OpenApiInfo
+            {
+                Title = _apiTitle,
+                Version = description.ApiVersion.ToString(),
+                Description = description.IsDeprecated
+                    ? "This API version has been deprecated."
+                    : "API endpoints"
+            });
+        }
     }
 }

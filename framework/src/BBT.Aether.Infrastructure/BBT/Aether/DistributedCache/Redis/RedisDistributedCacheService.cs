@@ -33,7 +33,7 @@ public class RedisDistributedCacheService(
                 return null;
             }
 
-            var result = JsonSerializer.Deserialize<T>(cachedValue!, _jsonOptions);
+            var result = JsonSerializer.Deserialize<T>((string)cachedValue!, _jsonOptions);
             _logger.LogDebug("Cache hit for key: {Key}", key);
             return result;
         }
@@ -66,7 +66,7 @@ public class RedisDistributedCacheService(
                 expiry = options.SlidingExpiration.Value;
             }
 
-            await database.StringSetAsync(key, serializedValue, expiry);
+            await database.StringSetAsync(key, serializedValue, Expiration.KeepTtl);
             _logger.LogDebug("Successfully cached value for key: {Key} with expiry: {Expiry}", key, expiry);
         }
         catch (Exception ex)
