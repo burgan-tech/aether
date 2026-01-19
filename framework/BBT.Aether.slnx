@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BBT.Aether.Abstractions/BBT.Aether.Abstractions.csproj" />
+    <Project Path="src/BBT.Aether.Application/BBT.Aether.Application.csproj" />
+    <Project Path="src/BBT.Aether.Aspects/BBT.Aether.Aspects.csproj" />
+    <Project Path="src/BBT.Aether.AspNetCore/BBT.Aether.AspNetCore.csproj" />
+    <Project Path="src/BBT.Aether.Cli/BBT.Aether.Cli.csproj" />
+    <Project Path="src/BBT.Aether.Core/BBT.Aether.Core.csproj" />
+    <Project Path="src/BBT.Aether.Domain/BBT.Aether.Domain.csproj" />
+    <Project Path="src/BBT.Aether.HttpClient/BBT.Aether.HttpClient.csproj" />
+    <Project Path="src/BBT.Aether.Infrastructure/BBT.Aether.Infrastructure.csproj" />
+    <Project Path="src/BBT.Aether.TestBase/BBT.Aether.TestBase.csproj" />
+  </Folder>
+</Solution>

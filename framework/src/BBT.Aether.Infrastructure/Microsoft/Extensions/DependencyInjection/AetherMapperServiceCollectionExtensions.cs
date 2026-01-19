@@ -12,8 +12,12 @@ public static class AetherMapperServiceCollectionExtensions
         this IServiceCollection services,
         List<Type> autoMapperTypes)
     {
-        services.AddAutoMapper(autoMapperTypes.Select(s => s.Assembly).ToArray());
-        
+        services.AddAutoMapper(_ =>
+            {
+            },
+            autoMapperTypes.Select(s => s.Assembly).ToArray()
+        );
+
         services.AddSingleton<IObjectMapper, AutoMapperAdapter>();
         services.AddSingleton(typeof(IObjectMapper<,>), typeof(AutoMapperAdapter<,>));
 

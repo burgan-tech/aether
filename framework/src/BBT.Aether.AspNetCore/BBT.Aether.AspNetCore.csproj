@@ -1,9 +1,9 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
-    <Import Project="..\..\..\common.props"/>
+    <Import Project="..\..\..\common.props" />
 
     <PropertyGroup>
-        <TargetFramework>net9.0</TargetFramework>
+        <TargetFramework>net10.0</TargetFramework>
         <Nullable>enable</Nullable>
         <WarningsAsErrors>Nullable</WarningsAsErrors>
         <AssemblyName>BBT.Aether.AspNetCore</AssemblyName>
@@ -12,7 +12,7 @@
         <GenerateAssemblyConfigurationAttribute>false</GenerateAssemblyConfigurationAttribute>
         <GenerateAssemblyCompanyAttribute>false</GenerateAssemblyCompanyAttribute>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
-        <RootNamespace/>
+        <RootNamespace />
     </PropertyGroup>
 
     <ItemGroup>
@@ -21,23 +21,24 @@
         <PackageReference Include="Microsoft.AspNetCore.Mvc.Versioning" />
         <PackageReference Include="Microsoft.AspNetCore.Mvc.Versioning.ApiExplorer" />
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+        <PackageReference Include="Microsoft.OpenApi" />
         <PackageReference Include="Swashbuckle.AspNetCore" />
-        <PackageReference Include="Microsoft.AspNetCore.Diagnostics.Middleware"/>
-        <PackageReference Include="OpenTelemetry"/>
-        <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol"/>
-        <PackageReference Include="OpenTelemetry.Extensions.Hosting"/>
-        <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore"/>
-        <PackageReference Include="OpenTelemetry.Instrumentation.Http"/>
-        <PackageReference Include="OpenTelemetry.Exporter.Zipkin"/>
-        <PackageReference Include="OpenTelemetry.Instrumentation.EntityFrameworkCore"/>
-        <PackageReference Include="OpenTelemetry.Instrumentation.Runtime"/>
-        <PackageReference Include="OpenTelemetry.Instrumentation.Process"/>
-        <PackageReference Include="OpenTelemetry.Exporter.Console"/>
-        <PackageReference Include="Microsoft.Extensions.Diagnostics"/>
-        <PackageReference Include="Microsoft.AspNetCore.ResponseCompression"/>
-        <ProjectReference Include="..\BBT.Aether.Abstractions\BBT.Aether.Abstractions.csproj"/>
-        <ProjectReference Include="..\BBT.Aether.Application\BBT.Aether.Application.csproj"/>
-        <ProjectReference Include="..\BBT.Aether.Core\BBT.Aether.Core.csproj"/>
+        <PackageReference Include="Microsoft.AspNetCore.Diagnostics.Middleware" />
+        <PackageReference Include="OpenTelemetry" />
+        <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+        <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+        <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+        <PackageReference Include="OpenTelemetry.Instrumentation.Http" />
+        <PackageReference Include="OpenTelemetry.Exporter.Zipkin" />
+        <PackageReference Include="OpenTelemetry.Instrumentation.EntityFrameworkCore" />
+        <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
+        <PackageReference Include="OpenTelemetry.Instrumentation.Process" />
+        <PackageReference Include="OpenTelemetry.Exporter.Console" />
+        <PackageReference Include="Microsoft.Extensions.Diagnostics" />
+        <PackageReference Include="Microsoft.AspNetCore.ResponseCompression" />
+        <ProjectReference Include="..\BBT.Aether.Abstractions\BBT.Aether.Abstractions.csproj" />
+        <ProjectReference Include="..\BBT.Aether.Application\BBT.Aether.Application.csproj" />
+        <ProjectReference Include="..\BBT.Aether.Core\BBT.Aether.Core.csproj" />
         <ProjectReference Include="..\BBT.Aether.Infrastructure\BBT.Aether.Infrastructure.csproj" />
     </ItemGroup>
 

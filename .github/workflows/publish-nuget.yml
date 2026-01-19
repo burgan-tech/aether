@@ -37,8 +37,7 @@ jobs:
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: |
-          8.0.x
-          9.0.x
+          10.0.x
     
     - name: Calculate version
       id: version
@@ -99,11 +98,11 @@ jobs:
     
     - name: Restore dependencies
       run: |
-        dotnet restore ./framework/BBT.Aether.sln
+        dotnet restore ./framework/BBT.Aether.slnx
     
     - name: Build solution
       run: |
-        dotnet build ./framework/BBT.Aether.sln \
+        dotnet build ./framework/BBT.Aether.slnx \
           --configuration Release \
           --no-restore \
           -p:Version=${{ steps.version.outputs.version }}
