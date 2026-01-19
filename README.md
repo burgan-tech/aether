@@ -2,7 +2,7 @@
 
 **Enterprise-grade .NET SDK for building scalable, cloud-native applications with Domain-Driven Design and distributed architecture patterns.**
 
-[![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0-512BD4?logo=dotnet)](https://dotnet.microsoft.com/)
+[![.NET](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## 🎯 Purpose

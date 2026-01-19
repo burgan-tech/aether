@@ -51,7 +51,7 @@ public abstract class CachedServiceProviderBase : ICachedServiceProviderBase
     {
         return CachedServices.GetOrAdd(
             new ServiceIdentifier(serviceKey, serviceType),
-            _ => new Lazy<object?>(() =>  ServiceProvider.GetKeyedService(serviceType, serviceKey))
+            _ => new Lazy<object?>(() => ((IKeyedServiceProvider)ServiceProvider).GetKeyedService(serviceType, serviceKey))
         ).Value;
     }
 
@@ -59,7 +59,7 @@ public abstract class CachedServiceProviderBase : ICachedServiceProviderBase
     {
         return CachedServices.GetOrAdd(
             new ServiceIdentifier(serviceKey, serviceType),
-            _ => new Lazy<object?>(() =>  ServiceProvider.GetRequiredKeyedService(serviceType, serviceKey))
+            _ => new Lazy<object?>(() => ((IKeyedServiceProvider)ServiceProvider).GetRequiredKeyedService(serviceType, serviceKey))
         ).Value!;
     }
 }

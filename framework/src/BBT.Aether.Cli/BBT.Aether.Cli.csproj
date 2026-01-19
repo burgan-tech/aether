@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
     <Import Project="..\..\..\common.props" />
 
@@ -6,7 +6,7 @@
         <OutputType>Exe</OutputType>
         <Nullable>enable</Nullable>
         <WarningsAsErrors>Nullable</WarningsAsErrors>
-        <TargetFramework>net9.0</TargetFramework>
+        <TargetFramework>net10.0</TargetFramework>
         <PackAsTool>true</PackAsTool>
         <ToolCommandName>aether</ToolCommandName>
         <RootNamespace />
