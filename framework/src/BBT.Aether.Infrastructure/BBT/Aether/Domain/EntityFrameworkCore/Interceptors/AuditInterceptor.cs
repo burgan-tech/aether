@@ -22,6 +22,10 @@ public class AuditInterceptor(
     IClock clock)
     : SaveChangesInterceptor
 {
+    /// <summary>
+    /// Fallback value used for required audit user properties when current user is not available.
+    /// </summary>
+    private const string UnknownAuditUser = "System";
     public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
     {
         SetAuditEntity(eventData.Context!);
@@ -123,24 +127,17 @@ public class AuditInterceptor(
     {
         if (entry.Entity is IHasCreatedAt)
         {
-            entry.Property("CreatedAt").CurrentValue = clock.UtcNow;
+            var createdAtProperty = entry.Property("CreatedAt");
+            if (createdAtProperty.CurrentValue == null)
+            {
+                createdAtProperty.CurrentValue = clock.UtcNow;
+            }
         }
 
         if (entry.Entity is ICreationAuditedObject)
         {
-            if (!currentUser.UserName.IsNullOrEmpty())
-            {
-                entry.Property("CreatedBy").CurrentValue = currentUser.UserName;
-            }
-            else
-            {
-                entry.Property("CreatedBy").CurrentValue = guidGenerator.Create().ToString("N");
-            }
-
-            if (!currentUser.ActorUserName.IsNullOrEmpty())
-            {
-                entry.Property("CreatedByBehalfOf").CurrentValue = currentUser.ActorUserName;
-            }
+            SetAuditProperty(entry, "CreatedBy", currentUser.ActorUserName);
+            SetAuditProperty(entry, "CreatedByBehalfOf", currentUser.UserName);
         }
     }
 
@@ -165,25 +162,36 @@ public class AuditInterceptor(
     {
         if (entry.Entity is IHasModifyTime)
         {
-            entry.Property("ModifiedAt").CurrentValue = clock.UtcNow;
+            var modifiedAtProperty = entry.Property("ModifiedAt");
+            if (modifiedAtProperty.CurrentValue == null)
+            {
+                modifiedAtProperty.CurrentValue = clock.UtcNow;
+            }
         }
 
         if (entry.Entity is IModifyAuditedObject)
         {
-            if (!currentUser.UserName.IsNullOrEmpty())
-            {
-                entry.Property("ModifiedBy").CurrentValue = currentUser.UserName;
-            }
-            else
-            {
-                //TODO: Warning! Should always come from currentuser
-                entry.Property("ModifiedBy").CurrentValue = guidGenerator.Create().ToString("N");
-            }
+            SetAuditProperty(entry, "ModifiedBy", currentUser.ActorUserName);
+            SetAuditProperty(entry, "ModifiedByBehalfOf", currentUser.UserName);
+        }
+    }
 
-            if (!currentUser.ActorUserName.IsNullOrEmpty())
-            {
-                entry.Property("ModifiedByBehalfOf").CurrentValue = currentUser.ActorUserName;
-            }
+    private void SetAuditProperty(EntityEntry entry, string propertyName, string? value)
+    {
+        var property = entry.Property(propertyName);
+        var current = property.CurrentValue as string;
+        if (!current.IsNullOrEmpty())
+        {
+            return;
+        }
+
+        if (!value.IsNullOrEmpty())
+        {
+            property.CurrentValue = value;
+        }
+        else
+        {
+            property.CurrentValue = property.Metadata.IsNullable ? null : UnknownAuditUser;
         }
     }
 
@@ -191,19 +199,16 @@ public class AuditInterceptor(
     {
         if (entry.Entity is IHasDeletionTime)
         {
-            entry.Property("DeletedAt").CurrentValue = clock.UtcNow;
+            var deletedAtProperty = entry.Property("DeletedAt");
+            if (deletedAtProperty.CurrentValue == null)
+            {
+                deletedAtProperty.CurrentValue = clock.UtcNow;
+            }
         }
 
         if (entry.Entity is IDeletionAuditedObject)
         {
-            if (!currentUser.UserName.IsNullOrEmpty())
-            {
-                entry.Property("DeletedBy").CurrentValue = currentUser.UserName;
-            }
-            else
-            {
-                entry.Property("DeletedBy").CurrentValue = guidGenerator.Create().ToString("N");
-            }
+            SetAuditProperty(entry, "DeletedBy", currentUser.ActorUserName);
         }
     }
 
