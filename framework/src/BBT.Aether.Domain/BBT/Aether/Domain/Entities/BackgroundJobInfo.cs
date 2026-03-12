@@ -26,6 +26,7 @@ public class BackgroundJobInfo : FullAuditedEntity<Guid>, IHasExtraProperties
         HandlerName = handlerName;
         JobName = jobName;
         ExtraProperties = new ExtraPropertyDictionary();
+        CreatedAt =  DateTime.UtcNow;
     }
 
     /// <summary>

@@ -111,8 +111,7 @@ public static class AetherTelemetryServiceCollectionExtensions
                         {
                             try
                             {
-                                // Add headers
-                                foreach (var header in opts.Logging.Enrichers.Headers)
+                                foreach (var header in opts.Tracing.Headers ?? [])
                                 {
                                     if (request.Headers.TryGetValue(header, out var value))
                                     {
@@ -236,23 +235,17 @@ public static class AetherTelemetryServiceCollectionExtensions
             {
                 if (!opts.LoggingEnabled) return;
 
-                var excludedPatterns = CompileRegex(opts.Logging.ExcludedPaths);
-
                 logging.SetResourceBuilder(ResourceBuilder.CreateDefault()
                     .AddService(opts.ServiceName!, opts.ServiceNamespace ?? "aether", opts.ServiceVersion ?? "1.0.0", false, Environment.MachineName)
                     .AddAttributes(opts.Logging.Enrichers.CustomAttributes
                         .ToDictionary(x => x.Key, x => (object)x.Value)));
 
-                // Enricher processor
-                logging.AddProcessor(provider =>
-                {
-                    var accessor = provider.GetService<IHttpContextAccessor>();
-                    return new AetherLogEnricherProcessor(opts, excludedPatterns, accessor);
-                });
-
                 logging.IncludeFormattedMessage = opts.Logging.IncludeFormattedMessage;
                 logging.IncludeScopes = opts.Logging.IncludeScopes;
                 logging.ParseStateValues = opts.Logging.ParseStateValues;
+
+                logging.AddProcessor(provider =>
+                    new EnricherLogProcessor(opts, provider.GetService<IHttpContextAccessor>()));
 
                 foreach (var cfg in builder.LoggingConfigurators)
                 {
