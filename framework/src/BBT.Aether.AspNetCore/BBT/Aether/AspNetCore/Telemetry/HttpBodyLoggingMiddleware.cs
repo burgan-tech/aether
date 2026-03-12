@@ -27,6 +27,7 @@ public sealed class HttpBodyLoggingMiddleware
     private readonly List<Regex> _excludedPatterns;
     private readonly HashSet<string> _sensitiveJsonFields;
     private readonly HashSet<string> _sensitiveHeaderNames;
+    private readonly HashSet<string> _allowedContentTypes;
 
     public HttpBodyLoggingMiddleware(
         RequestDelegate next,
@@ -45,6 +46,7 @@ public sealed class HttpBodyLoggingMiddleware
         _sensitiveHeaderNames = new HashSet<string>(
             HttpBodyLoggingOptions.DefaultSensitiveHeaderNames.Concat(_bodyOptions.AdditionalSensitiveHeaderNames ?? []),
             StringComparer.OrdinalIgnoreCase);
+        _allowedContentTypes = new HashSet<string>(_bodyOptions.AllowedContentTypes ?? [], StringComparer.OrdinalIgnoreCase);
     }
 
     public async Task Invoke(HttpContext context)
@@ -199,9 +201,8 @@ public sealed class HttpBodyLoggingMiddleware
     private bool IsAllowedContentType(string contentType)
     {
         var normalized = contentType.Split(';', 2)[0].Trim();
-        var allowed = new HashSet<string>(_bodyOptions.AllowedContentTypes ?? [], StringComparer.OrdinalIgnoreCase);
-
-        if (allowed.Contains(normalized))
+        
+        if (_allowedContentTypes.Contains(normalized))
             return true;
 
         if (normalized.EndsWith("+json", StringComparison.OrdinalIgnoreCase))
@@ -384,12 +385,18 @@ public sealed class HttpBodyLoggingMiddleware
 
     private static string TruncateUtf8(string value, int maxBytes)
     {
-        var bytes = Encoding.UTF8.GetBytes(value);
-        if (bytes.Length <= maxBytes)
+        if (Encoding.UTF8.GetByteCount(value) <= maxBytes)
             return value;
 
-        var truncated = Encoding.UTF8.GetString(bytes, 0, maxBytes);
-        return truncated + "…[TRUNCATED]";
+        var bytes = Encoding.UTF8.GetBytes(value);
+    
+        // Use a decoder to prevent splitting multi-byte characters.
+        var decoder = Encoding.UTF8.GetDecoder();
+        var charCount = decoder.GetCharCount(bytes, 0, maxBytes, flush: true);
+        var chars = new char[charCount];
+        decoder.GetChars(bytes, 0, maxBytes, chars, 0, flush: true);
+    
+        return new string(chars) + "…[TRUNCATED]";
     }
 
     private static string RedactIfPossible(string text, string? contentType, HashSet<string> sensitiveJsonFields)
