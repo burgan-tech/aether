@@ -12,7 +12,9 @@ Aether provides comprehensive OpenTelemetry integration for distributed tracing,
 - **OTLP Exporters** - Export to any OTLP-compatible backend
 - **Environment Variable Support** - Standard OTEL_* variables
 - **Custom Instrumentation** - Extensible builder pattern
-- **Header Enrichment** - Automatic context propagation
+- **Trace header tags** - Configurable request headers added to spans (`Tracing:Headers`)
+- **Log enrichers** - CustomAttributes and Headers added to every log record for consistent querying
+- **Optional HTTP body logging** - Middleware to log request/response body and headers per request (configurable, exclude by path)
 
 ## Configuration
 
@@ -46,56 +48,66 @@ services.AddAetherTelemetry(configuration, environment, telemetry =>
 
 ### appsettings.json Configuration
 
+Config section key: `Telemetry` or `Aether:Telemetry`.
+
 ```json
 {
-  "Aether": {
-    "Telemetry": {
-      "ServiceName": "my-service",
-      "ServiceVersion": "1.0.0",
-      "ServiceNamespace": "production",
-      "TracingEnabled": true,
-      "MetricsEnabled": true,
-      "LoggingEnabled": true,
-      "Otlp": {
-        "Endpoint": "http://otel-collector:4318",
-        "Protocol": "http/protobuf"
+  "Telemetry": {
+    "ServiceName": "my-service",
+    "ServiceVersion": "1.0.0",
+    "ServiceNamespace": "production",
+    "TracingEnabled": true,
+    "MetricsEnabled": true,
+    "LoggingEnabled": true,
+    "Otlp": {
+      "Endpoint": "http://otel-collector:4318",
+      "Protocol": "http/protobuf"
+    },
+    "Tracing": {
+      "EnableAspNetCore": true,
+      "EnableHttpClient": true,
+      "AdditionalSources": ["MyApp.*"],
+      "ExcludedPaths": ["/health", "/metrics"],
+      "Headers": ["x-correlation-id", "x-request-id"],
+      "EnableOtlpExporter": true,
+      "EnableConsoleExporter": false
+    },
+    "Metrics": {
+      "EnableAspNetCore": true,
+      "EnableHttpClient": true,
+      "EnableRuntime": true,
+      "EnableProcess": true,
+      "AdditionalMeters": ["MyApp.Metrics"],
+      "EnableOtlpExporter": true,
+      "EnableConsoleExporter": false
+    },
+    "Logging": {
+      "EnableOtlpExporter": true,
+      "EnableConsoleExporter": false,
+      "ExcludedPaths": ["/health", "/metrics", "/swagger"],
+      "IncludeFormattedMessage": true,
+      "IncludeScopes": true,
+      "ParseStateValues": true,
+      "Enrichers": {
+        "CustomAttributes": { "env": "Production", "team": "platform" },
+        "Headers": ["x-correlation-id", "x-request-id"]
       },
-      "Tracing": {
-        "EnableAspNetCore": true,
-        "EnableHttpClient": true,
-        "AdditionalSources": ["MyApp.*"],
-        "ExcludedPaths": ["/health", "/metrics"],
-        "EnableOtlpExporter": true,
-        "EnableConsoleExporter": false
-      },
-      "Metrics": {
-        "EnableAspNetCore": true,
-        "EnableHttpClient": true,
-        "EnableRuntime": true,
-        "EnableProcess": true,
-        "AdditionalMeters": ["MyApp.Metrics"],
-        "EnableOtlpExporter": true,
-        "EnableConsoleExporter": false
-      },
-      "Logging": {
-        "EnableOtlpExporter": true,
-        "EnableConsoleExporter": true,
-        "ExcludedPaths": ["/health"],
-        "IncludeFormattedMessage": true,
-        "IncludeScopes": false,
-        "ParseStateValues": true,
-        "Enrichers": {
-          "Headers": ["X-Correlation-Id", "X-User-Id"],
-          "CustomAttributes": {
-            "deployment.environment": "production",
-            "team": "platform"
-          }
-        }
+      "Body": {
+        "EnableRequestBody": false,
+        "EnableResponseBody": false,
+        "MaxBodyLengthToCapture": 16384,
+        "AllowedContentTypes": ["application/json", "application/problem+json", "text/plain"],
+        "AdditionalSensitiveJsonFields": [],
+        "AdditionalSensitiveHeaderNames": []
       }
     }
   }
 }
 ```
+
+- **Tracing.Headers**: Request header names added as activity tags on spans (no wildcard).
+- **Logging.Enrichers**: CustomAttributes and Headers are added as attributes to **all** log records (via EnricherLogProcessor) and to the HTTP body log event (via middleware scope). Header values in the sensitive list are redacted.
+- **Logging.Body**: Options for HTTP request/response body logging when `UseHttpBodyLogging()` is used. Path exclusion uses `Logging.ExcludedPaths`.
 
 ### Environment Variables
 
@@ -255,6 +267,13 @@ public class OrderMetrics
 
 ## Structured Logging
 
+### Enrichers on All Logs
+
+`Telemetry:Logging:Enrichers` (CustomAttributes and Headers) are added as attributes to **every** log record in the application via `EnricherLogProcessor`. This allows querying all logs with the same enrich fields (e.g. `env`, `app`, `RequestHeader.x_correlation_id`) in a single observability query.
+
+- **CustomAttributes**: Key-value pairs added to every log.
+- **Headers**: Listed request/response headers are added as `RequestHeader.<name>` and `ResponseHeader.<name>`; values for headers in the sensitive list are redacted. When there is no HTTP context (e.g. background job), only CustomAttributes are added.
+
 ### Automatic Enrichment
 
 ```csharp
@@ -262,15 +281,36 @@ public class OrderMetrics
 public async Task<IActionResult> CreateOrder(CreateOrderDto dto)
 {
     // Logs automatically enriched with:
-    // - Trace ID
-    // - Span ID
-    // - Service name
-    // - Custom headers (if configured)
+    // - Trace ID, Span ID, Service name (OpenTelemetry resource)
+    // - Enrichers: CustomAttributes + Headers (RequestHeader.*, ResponseHeader.*) from config
     _logger.LogInformation("Creating order for customer {CustomerId}", dto.CustomerId);
     
     return Ok();
 }
 ```
+
+### HTTP Request/Response Body and Header Logging
+
+Optional middleware logs one event per HTTP request with path, status code, headers (JSON), and optionally request/response body. Configure under `Telemetry:Logging:Body` and add the middleware to the pipeline.
+
+**Pipeline order** (after auth, before MapControllers):
+
+```csharp
+app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseHttpBodyLogging();
+app.MapControllers();
+```
+
+**Configuration**:
+
+- **ExcludedPaths**: Regex patterns; matching paths are not logged by the body middleware.
+- **EnableRequestBody / EnableResponseBody**: Whether to capture and include body in the log (e.g. enable in Development, disable in Production).
+- **MaxBodyLengthToCapture**, **AllowedContentTypes**: Limit and content-type filter for body capture.
+- **AdditionalSensitiveJsonFields / AdditionalSensitiveHeaderNames**: Merged with built-in defaults; these fields/headers are redacted in logs.
+
+The same **Enrichers** (CustomAttributes + Headers) are also attached to this log event via the middleware scope. Full request/response headers remain in the `RequestHeaders` and `ResponseHeaders` JSON attributes; listed Enrichers.Headers are additionally available as individual scope properties (sensitive ones redacted).
 
 ### Custom Log Enrichment with Aspects
 
@@ -390,15 +430,20 @@ _logger.LogInformation("Order {OrderId} processed", orderId);
 _logger.LogInformation($"Order {orderId} processed");
 ```
 
-### 4. Exclude Health Checks
+### 4. Exclude Health Checks and Noisy Paths
 
 ```json
 {
   "Tracing": {
     "ExcludedPaths": ["/health", "/metrics", "/ready"]
+  },
+  "Logging": {
+    "ExcludedPaths": ["/health", "/metrics", "/swagger"]
   }
 }
 ```
+
+`Logging.ExcludedPaths` is used by the HTTP body logging middleware; paths matching these regex patterns are not logged. Use `Body.EnableRequestBody` / `Body.EnableResponseBody` per environment (e.g. only in Development) to control body capture.
 
 ## Monitoring Dashboards
 

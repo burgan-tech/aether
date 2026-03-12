@@ -42,6 +42,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (existingJob != null)
         {
             // Update existing job
+            jobInfo.ModifiedAt  = DateTime.UtcNow;
             _dbContext.Entry(existingJob).CurrentValues.SetValues(jobInfo);
             existingJob.ExtraProperties = jobInfo.ExtraProperties;
             existingJob.Payload = jobInfo.Payload;
@@ -112,7 +113,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
             throw new InvalidOperationException($"Job with id '{id}' not found.");
 
         job.Status = status;
-        
+        job.ModifiedAt  = DateTime.UtcNow;
         if (handledTime.HasValue)
         {
             job.HandledTime = handledTime.Value;

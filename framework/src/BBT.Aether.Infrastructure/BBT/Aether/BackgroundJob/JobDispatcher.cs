@@ -46,13 +46,25 @@ public class JobDispatcher(
 
         var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
         var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
+        var jobScheduler = scope.ServiceProvider.GetRequiredService<IJobScheduler>();
+
+        string? jobName = null;
 
         // First UoW: Check idempotency and update status to Running
         await using (var uow = await uowManager.BeginRequiresNew(cancellationToken))
         {
-            if (await IsJobAlreadyProcessedAsync(jobStore, jobId, handlerName, cancellationToken))
+            var jobInfo = await jobStore.GetAsync(jobId, cancellationToken);
+            if (jobInfo == null)
+            {
+                return;
+            }
+
+            jobName = jobInfo.JobName;
+
+            if (IsJobAlreadyProcessed(jobInfo, jobId, handlerName))
             {
                 await uow.CommitAsync(cancellationToken);
+                await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
                 return;
             }
 
@@ -63,6 +75,7 @@ public class JobDispatcher(
                 await jobStore.UpdateStatusAsync(jobId, BackgroundJobStatus.Failed, clock.UtcNow,
                     "No handler found for handler type", cancellationToken);
                 await uow.CommitAsync(cancellationToken);
+                await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
                 return;
             }
 
@@ -86,12 +99,14 @@ public class JobDispatcher(
                 jobId);
 
             await handlerUow.CommitAsync(cancellationToken);
+            await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             logger.LogWarning("Handler '{HandlerName}' for job id '{JobId}' was cancelled", handlerName, jobId);
             await MarkJobStatusAsync(uowManager, jobStore, jobId, BackgroundJobStatus.Cancelled,
                 "Job was cancelled", cancellationToken);
+            await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -99,6 +114,7 @@ public class JobDispatcher(
             var errorMessage = $"{ex.GetType().Name}: {ex.Message}".Truncate(4000);
             await MarkJobStatusAsync(uowManager, jobStore, jobId, BackgroundJobStatus.Failed,
                 errorMessage, cancellationToken);
+            await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
         }
     }
 
@@ -106,13 +122,8 @@ public class JobDispatcher(
     /// Checks if a job has already been processed (idempotency check).
     /// Returns true if job is in Completed or Cancelled state.
     /// </summary>
-    private async Task<bool> IsJobAlreadyProcessedAsync(IJobStore jobStore, Guid jobId, string handlerName,
-        CancellationToken cancellationToken)
+    private bool IsJobAlreadyProcessed(BackgroundJobInfo jobInfo, Guid jobId, string handlerName)
     {
-        var jobInfo = await jobStore.GetAsync(jobId, cancellationToken);
-        if (jobInfo == null)
-            return false;
-
         // If job is already completed or cancelled, skip reprocessing
         if (jobInfo.Status == BackgroundJobStatus.Completed)
         {
@@ -131,6 +142,29 @@ public class JobDispatcher(
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Attempts to delete the job from the scheduler (e.g. Dapr) so it stops triggering.
+    /// Logs a warning and does not throw if delete fails; DB state remains consistent.
+    /// </summary>
+    private async Task TryDeleteFromSchedulerAsync(
+        IJobScheduler jobScheduler,
+        string handlerName,
+        string? jobName,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(jobName))
+            return;
+
+        try
+        {
+            await jobScheduler.DeleteAsync(handlerName, jobName, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to delete job '{JobName}' from scheduler; job may continue to trigger until manually removed", jobName);
+        }
     }
 
     /// <summary>
