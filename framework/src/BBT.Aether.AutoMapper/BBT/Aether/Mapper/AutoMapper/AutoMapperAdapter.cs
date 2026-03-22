@@ -1,4 +1,5 @@
 using AutoMapper;
+using BBT.Aether.Mapper;
 
 namespace BBT.Aether.Mapper.AutoMapper;
 

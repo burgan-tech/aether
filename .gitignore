@@ -282,3 +282,10 @@ deploy/_run_all_log.txt
 
 # AI Documentations
 ai-docs/
+
+# Claude
+.claude/worktrees/*
+
+#Cursor
+.cursor/plans/*
+.cursor/*.log
