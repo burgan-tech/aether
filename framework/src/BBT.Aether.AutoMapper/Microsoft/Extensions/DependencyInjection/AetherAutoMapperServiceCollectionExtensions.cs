@@ -17,7 +17,7 @@ public static class AetherAutoMapperServiceCollectionExtensions
     /// <param name="configure">Optional action to configure <see cref="AutoMapperOptions"/> (e.g. set the license key).</param>
     public static IServiceCollection AddAetherAutoMapperMapper(
         this IServiceCollection services,
-        List<Type> autoMapperTypes,
+        IEnumerable<Type> autoMapperTypes,
         Action<AutoMapperOptions>? configure = null)
     {
         var options = new AutoMapperOptions();

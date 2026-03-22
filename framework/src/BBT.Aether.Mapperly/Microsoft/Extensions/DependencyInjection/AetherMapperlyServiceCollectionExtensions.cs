@@ -37,26 +37,27 @@ public static class AetherMapperlyServiceCollectionExtensions
     /// </param>
     public static IServiceCollection AddAetherMapperlyMapper(
         this IServiceCollection services,
-        List<Type> mapperTypes)
+        IEnumerable<Type> mapperTypes)
     {
         var assemblies = mapperTypes.Select(t => t.Assembly).Distinct();
+
+        var mapperInterfaces = new[]
+        {
+            typeof(IMapperlyMapper<,>),
+            typeof(IReverseMapperlyMapper<,>),
+            typeof(IObjectMapper<,>)
+        };
 
         foreach (var assembly in assemblies)
         {
             foreach (var type in assembly.GetTypes().Where(t => !t.IsAbstract && !t.IsInterface))
             {
-                foreach (var iface in type.GetInterfaces().Where(i =>
-                    i.IsGenericType &&
-                    i.GetGenericTypeDefinition() == typeof(IMapperlyMapper<,>)))
+                foreach (var iface in type.GetInterfaces())
                 {
-                    services.AddSingleton(iface, type);
-                }
-
-                foreach (var iface in type.GetInterfaces().Where(i =>
-                    i.IsGenericType &&
-                    i.GetGenericTypeDefinition() == typeof(IReverseMapperlyMapper<,>)))
-                {
-                    services.AddSingleton(iface, type);
+                    if (iface.IsGenericType && mapperInterfaces.Contains(iface.GetGenericTypeDefinition()))
+                    {
+                        services.AddSingleton(iface, type);
+                    }
                 }
             }
         }

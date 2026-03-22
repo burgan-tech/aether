@@ -52,6 +52,16 @@ public class MapperlyAdapter(IServiceProvider serviceProvider) : IObjectMapper
             mapper.AfterMap(source, destination);
             return;
         }
+        
+        // Reverse fallback: look for a TwoWayMapper registered for the opposite direction.
+        var reverseMapper = serviceProvider.GetService<IReverseMapperlyMapper<TDestination, TSource>>();
+        if (reverseMapper is not null)
+        {
+            reverseMapper.BeforeReverseMap(source);
+            reverseMapper.ReverseMap(source, destination);
+            reverseMapper.AfterReverseMap(source, destination);
+            return;
+        }
 
         throw new InvalidOperationException(
             $"No mapper registered for {typeof(TSource).Name} → {typeof(TDestination).Name}. " +
