@@ -128,6 +128,7 @@
     <PackageVersion Include="Quartz.Plugins.TimeZoneConverter" Version="3.13.1" />
     <PackageVersion Include="Quartz.Serialization.Json" Version="3.13.1" />
     <PackageVersion Include="RabbitMQ.Client" Version="7.0.0" />
+    <PackageVersion Include="Riok.Mapperly" Version="4.1.1" />
     <PackageVersion Include="Rebus" Version="8.7.1" />
     <PackageVersion Include="Rebus.ServiceProvider" Version="10.3.0" />
     <PackageVersion Include="Scriban" Version="5.12.1" />

@@ -2,21 +2,20 @@
 
 ## Overview
 
-Aether provides an abstraction layer for object-to-object mapping with built-in AutoMapper integration. It enables clean separation between domain entities and DTOs while maintaining type safety and consistency.
+Aether provides an abstraction layer for object-to-object mapping via two separate NuGet packages:
 
-## Key Features
+| Package | Default | Description |
+|---|---|---|
+| `BBT.Aether.Mapperly` | ✅ Yes | Compile-time source generator, zero-reflection, free (MIT) |
+| `BBT.Aether.AutoMapper` | No | Runtime reflection, opt-in, requires commercial license (v13+) |
 
-- **Provider Abstraction** - Single interface for all mappers
-- **AutoMapper Integration** - Built-in AutoMapper adapter
-- **Generic Mapping** - `IObjectMapper<TSource, TDestination>`
-- **Non-Generic Mapping** - `IObjectMapper` for dynamic scenarios
-- **Application Service Integration** - Automatic mapping in CRUD services
+---
 
-## Core Interfaces
+## Core Interfaces (`BBT.Aether.Core`)
 
 ### IObjectMapper
 
-Non-generic mapper interface for dynamic scenarios.
+Non-generic mapper interface for dynamic dispatch scenarios.
 
 ```csharp
 public interface IObjectMapper
@@ -26,9 +25,9 @@ public interface IObjectMapper
 }
 ```
 
-### IObjectMapper<TSource, TDestination>
+### IObjectMapper\<TSource, TDestination\>
 
-Generic mapper interface for type-specific mapping.
+Generic mapper interface for type-specific injection.
 
 ```csharp
 public interface IObjectMapper<in TSource, TDestination>
@@ -38,367 +37,309 @@ public interface IObjectMapper<in TSource, TDestination>
 }
 ```
 
-## Configuration
+---
+
+## Mapperly (Default) — `BBT.Aether.Mapperly`
+
+Mapperly generates mapping code at **compile time** using a Roslyn source generator. There is no runtime reflection — the generated code is plain property assignments, as fast as hand-written mapping.
+
+### Mapperly-Specific Interfaces
+
+```csharp
+// One-way mapper with lifecycle hooks
+public interface IMapperlyMapper<TSource, TDestination>
+{
+    TDestination Map(TSource source);
+    TDestination Map(TSource source, TDestination destination);
+    void BeforeMap(TSource source);
+    void AfterMap(TSource source, TDestination destination);
+}
+
+// Bidirectional mapper
+public interface IReverseMapperlyMapper<TSource, TDestination> : IMapperlyMapper<TSource, TDestination>
+{
+    TSource ReverseMap(TDestination destination);
+    void ReverseMap(TDestination destination, TSource source);
+    void BeforeReverseMap(TDestination destination);
+    void AfterReverseMap(TDestination destination, TSource source);
+}
+```
+
+### Base Classes
+
+Inherit from one of these instead of implementing the interfaces directly.
+
+#### `MapperBase<TSource, TDestination>` — One-way
+
+```csharp
+public abstract class MapperBase<TSource, TDestination>
+    : IMapperlyMapper<TSource, TDestination>, IObjectMapper<TSource, TDestination>
+{
+    public abstract TDestination Map(TSource source);
+    public abstract TDestination Map(TSource source, TDestination destination);
+    public virtual void BeforeMap(TSource source) { }
+    public virtual void AfterMap(TSource source, TDestination destination) { }
+}
+```
+
+#### `TwoWayMapperBase<TSource, TDestination>` — Bidirectional
+
+```csharp
+public abstract class TwoWayMapperBase<TSource, TDestination>
+    : MapperBase<TSource, TDestination>, IReverseMapperlyMapper<TSource, TDestination>
+{
+    public abstract TSource ReverseMap(TDestination destination);
+    public abstract void ReverseMap(TDestination destination, TSource source);
+    public virtual void BeforeReverseMap(TDestination destination) { }
+    public virtual void AfterReverseMap(TDestination destination, TSource source) { }
+}
+```
+
+### Service Registration
+
+Pass a list of marker types; assemblies are derived automatically.
+
+```csharp
+services.AddAetherMapperlyMapper(
+[
+    typeof(OrderMapper),
+    typeof(UserMapper)
+]);
+```
+
+The method scans the assemblies for all `IMapperlyMapper<,>` and `IReverseMapperlyMapper<,>` implementations and registers them as singletons. `IObjectMapper` is fulfilled by `MapperlyAdapter`.
+
+### Defining Mappers
+
+#### Simple One-Way Mapper
+
+```csharp
+using Riok.Mapperly.Abstractions;
+
+[Mapper]
+public partial class ProductMapper : MapperBase<Product, ProductDto>
+{
+    // Mapperly generates both Map overloads at compile time
+    public override partial ProductDto Map(Product source);
+    public override partial ProductDto Map(Product source, ProductDto destination);
+}
+```
+
+#### Mapper with Custom Property Mapping
+
+```csharp
+[Mapper(RequiredMappingStrategy = RequiredMappingStrategy.Target)]
+public partial class OrderMapper : MapperBase<Order, OrderDto>
+{
+    [MapProperty(nameof(Order.Customer.Name), nameof(OrderDto.CustomerName))]
+    [MapperIgnoreTarget(nameof(OrderDto.ItemCount))]
+    public override partial OrderDto Map(Order source);
+
+    [MapProperty(nameof(Order.Customer.Name), nameof(OrderDto.CustomerName))]
+    [MapperIgnoreTarget(nameof(OrderDto.ItemCount))]
+    public override partial OrderDto Map(Order source, OrderDto destination);
+}
+```
+
+#### Mapper with Lifecycle Hooks
+
+```csharp
+[Mapper]
+public partial class UserMapper : MapperBase<User, UserDto>
+{
+    [MapperIgnoreTarget(nameof(UserDto.RoleNames))]
+    [MapperIgnoreTarget(nameof(UserDto.IsLockedOut))]
+    public override partial UserDto Map(User source);
+
+    [MapperIgnoreTarget(nameof(UserDto.RoleNames))]
+    [MapperIgnoreTarget(nameof(UserDto.IsLockedOut))]
+    public override partial UserDto Map(User source, UserDto destination);
+
+    public override void AfterMap(User source, UserDto destination)
+    {
+        destination.RoleNames = source.Roles.Select(r => r.Name).ToList();
+    }
+}
+```
+
+#### Bidirectional Mapper
+
+Register once — the adapter automatically uses `ReverseMap` when mapping in the reverse direction.
+
+```csharp
+[Mapper]
+public partial class OrderMapper : TwoWayMapperBase<Order, OrderDto>
+{
+    public override partial OrderDto Map(Order source);
+    public override partial OrderDto Map(Order source, OrderDto destination);
+    public override partial Order ReverseMap(OrderDto destination);
+    public override partial void ReverseMap(OrderDto destination, Order source);
+}
+```
+
+```csharp
+// Forward:  Order → OrderDto
+var dto = mapper.Map<Order, OrderDto>(order);
+
+// Reverse:  OrderDto → Order (resolved via IReverseMapperlyMapper automatically)
+var order = mapper.Map<OrderDto, Order>(dto);
+```
+
+### How the Adapter Dispatches
+
+`MapperlyAdapter` (registered as `IObjectMapper`) follows this resolution order for `Map<TSource, TDestination>`:
+
+1. Resolve `IMapperlyMapper<TSource, TDestination>` → call `BeforeMap` → `Map` → `AfterMap`
+2. Resolve `IReverseMapperlyMapper<TDestination, TSource>` → call `BeforeReverseMap` → `ReverseMap` → `AfterReverseMap`
+3. Throw `InvalidOperationException` if neither is found
+
+### Using the Mapper
+
+```csharp
+// Via non-generic IObjectMapper (dispatches through MapperlyAdapter)
+public class ProductService(IObjectMapper mapper)
+{
+    public ProductDto Get(Product product)
+        => mapper.Map<Product, ProductDto>(product);
+}
+
+// Via typed IObjectMapper<TSource, TDestination> (direct injection)
+public class ProductService(IObjectMapper<Product, ProductDto> mapper)
+{
+    public ProductDto Get(Product product)
+        => mapper.Map(product);
+}
+
+// Via typed IMapperlyMapper<TSource, TDestination> (includes hook access)
+public class ProductService(IMapperlyMapper<Product, ProductDto> mapper)
+{
+    public ProductDto Get(Product product)
+        => mapper.Map(product);
+}
+```
+
+---
+
+## AutoMapper (Opt-In) — `BBT.Aether.AutoMapper`
+
+AutoMapper performs mapping at **runtime** using reflection and is suitable for teams that already hold a commercial license.
+
+> **License required:** AutoMapper v13+ is a commercial product. You must configure a valid license key for production use.
+>
+> **Build-time warning:** Adding `BBT.Aether.AutoMapper` will emit a `NU1903` vulnerability warning because AutoMapper 16.x has a known CVE. This is intentional — it signals that the developer is consciously opting in to a commercial dependency.
 
 ### Service Registration
 
 ```csharp
-services.AddAetherAutoMapperMapper(new List<Type>
-{
-    typeof(ApplicationMappingProfile),
-    typeof(DomainMappingProfile)
-});
-```
-
-### AutoMapper Profiles
-
-```csharp
-public class ApplicationMappingProfile : Profile
-{
-    public ApplicationMappingProfile()
+services.AddAetherAutoMapperMapper(
+    new List<Type>
     {
-        // Simple mapping
-        CreateMap<Product, ProductDto>();
-        CreateMap<ProductDto, Product>();
-        
-        // Custom mapping
-        CreateMap<Order, OrderDto>()
-            .ForMember(d => d.CustomerName, opt => opt.MapFrom(s => s.Customer.Name))
-            .ForMember(d => d.TotalAmount, opt => opt.MapFrom(s => s.Items.Sum(i => i.TotalPrice)));
-        
-        // Value object mapping
-        CreateMap<Money, decimal>()
-            .ConvertUsing(m => m.Amount);
-        
-        CreateMap<decimal, Money>()
-            .ConvertUsing(d => new Money(d, "USD"));
-    }
-}
+        typeof(ApplicationMappingProfile),
+        typeof(DomainMappingProfile)
+    },
+    options => options.LicenseKey = configuration["AutoMapper:LicenseKey"]
+);
 ```
 
-## Usage Examples
+The `LicenseKey` is optional — omit it for development/evaluation environments.
 
-### Basic Mapping
-
-```csharp
-public class ProductService
-{
-    private readonly IObjectMapper _mapper;
-    
-    public async Task<ProductDto> GetProductAsync(Guid id)
-    {
-        var product = await _repository.GetAsync(id);
-        return _mapper.Map<Product, ProductDto>(product);
-    }
-    
-    public async Task<Product> CreateProductAsync(CreateProductDto dto)
-    {
-        var product = _mapper.Map<CreateProductDto, Product>(dto);
-        await _repository.InsertAsync(product);
-        return product;
-    }
-}
-```
-
-### Mapping Collections
-
-```csharp
-public async Task<List<ProductDto>> GetProductsAsync()
-{
-    var products = await _repository.GetListAsync();
-    return products.Select(p => _mapper.Map<Product, ProductDto>(p)).ToList();
-}
-```
-
-### Update Mapping
-
-```csharp
-public async Task UpdateProductAsync(Guid id, UpdateProductDto dto)
-{
-    var product = await _repository.GetAsync(id);
-    
-    // Map DTO properties to existing entity
-    _mapper.Map(dto, product);
-    
-    await _repository.UpdateAsync(product);
-}
-```
-
-### Using Generic Mapper
-
-```csharp
-public class ProductService
-{
-    private readonly IObjectMapper<Product, ProductDto> _productMapper;
-    private readonly IObjectMapper<CreateProductDto, Product> _createMapper;
-    
-    public ProductDto GetProduct(Guid id)
-    {
-        var product = _repository.Get(id);
-        return _productMapper.Map(product);
-    }
-    
-    public Product CreateProduct(CreateProductDto dto)
-    {
-        var product = _createMapper.Map(dto);
-        _repository.Insert(product);
-        return product;
-    }
-}
-```
-
-## AutoMapper Profiles
-
-### Simple Mappings
+### Defining Profiles
 
 ```csharp
 public class ProductMappingProfile : Profile
 {
     public ProductMappingProfile()
     {
-        // Two-way mapping
-        CreateMap<Product, ProductDto>().ReverseMap();
-        
-        // One-way mapping
-        CreateMap<Product, ProductListDto>();
-    }
-}
-```
+        CreateMap<Product, ProductDto>();
+        CreateMap<CreateProductDto, Product>();
 
-### Complex Mappings
-
-```csharp
-public class OrderMappingProfile : Profile
-{
-    public OrderMappingProfile()
-    {
         CreateMap<Order, OrderDto>()
-            // Map from nested property
-            .ForMember(d => d.CustomerName, 
-                opt => opt.MapFrom(s => s.Customer.Name))
-            
-            // Calculated property
-            .ForMember(d => d.ItemCount, 
-                opt => opt.MapFrom(s => s.Items.Count))
-            
-            // Custom conversion
-            .ForMember(d => d.Status, 
-                opt => opt.MapFrom(s => s.Status.ToString()))
-            
-            // Ignore property
-            .ForMember(d => d.TempData, 
-                opt => opt.Ignore());
-        
-        CreateMap<CreateOrderDto, Order>()
-            .ConstructUsing(dto => new Order(dto.CustomerName, dto.OrderNumber))
-            .ForMember(o => o.Items, opt => opt.Ignore()); // Handle separately
+            .ForMember(d => d.CustomerName, opt => opt.MapFrom(s => s.Customer.Name))
+            .ForMember(d => d.ItemCount, opt => opt.MapFrom(s => s.Items.Count));
     }
 }
 ```
 
-### Value Object Mappings
+---
+
+## Usage Examples
+
+### Basic Mapping
 
 ```csharp
-public class ValueObjectMappingProfile : Profile
+public class ProductService(IObjectMapper mapper, IRepository<Product, Guid> repository)
 {
-    public ValueObjectMappingProfile()
+    public async Task<ProductDto> GetProductAsync(Guid id)
     {
-        // Money to decimal
-        CreateMap<Money, decimal>()
-            .ConvertUsing(m => m.Amount);
-        
-        // Address to string
-        CreateMap<Address, string>()
-            .ConvertUsing(a => $"{a.Street}, {a.City}, {a.ZipCode}");
-        
-        // Enum to string
-        CreateMap<OrderStatus, string>()
-            .ConvertUsing(s => s.ToString());
+        var product = await repository.GetAsync(id);
+        return mapper.Map<Product, ProductDto>(product);
     }
 }
 ```
+
+### Update Mapping (map onto existing entity)
+
+```csharp
+public async Task UpdateProductAsync(Guid id, UpdateProductDto dto)
+{
+    var product = await repository.GetAsync(id);
+    mapper.Map(dto, product);
+    await repository.UpdateAsync(product);
+}
+```
+
+### Collection Mapping
+
+```csharp
+var dtos = products.Select(p => mapper.Map<Product, ProductDto>(p)).ToList();
+```
+
+---
 
 ## Application Service Integration
 
-### Automatic Mapping in CRUD Services
+`ApplicationService`, `AbstractKeyReadOnlyAppService`, and `AbstractKeyCrudAppService` expose `ObjectMapper` (resolves `IObjectMapper` lazily from DI):
 
 ```csharp
 public class ProductAppService : CrudAppService<Product, ProductDto, Guid>
 {
-    public ProductAppService(
-        IServiceProvider serviceProvider,
-        IRepository<Product, Guid> repository)
-        : base(serviceProvider, repository)
-    {
-    }
-    
-    // Mapping happens automatically:
-    // - GetAsync maps Product -> ProductDto
-    // - CreateAsync maps ProductDto -> Product
-    // - UpdateAsync maps ProductDto -> Product
+    public ProductAppService(IServiceProvider sp, IRepository<Product, Guid> repo)
+        : base(sp, repo) { }
+
+    // GetAsync    → maps Product → ProductDto automatically
+    // CreateAsync → maps CreateProductDto → Product automatically
+    // UpdateAsync → maps UpdateProductDto → Product automatically
 }
 ```
 
-### Override Mapping
+Override the protected `MapTo*` methods to customise:
 
 ```csharp
-public class ProductAppService : CrudAppService<Product, ProductDto, Guid>
+protected override Task<ProductDto> MapToGetOutputDtoAsync(Product entity)
 {
-    protected override Task<Product> MapToEntityAsync(CreateProductDto createInput)
-    {
-        // Custom mapping logic
-        var product = new Product(
-            createInput.Name,
-            new Money(createInput.Price, createInput.Currency)
-        );
-        
-        return Task.FromResult(product);
-    }
-    
-    protected override Task<ProductDto> MapToGetOutputDtoAsync(Product entity)
-    {
-        // Custom mapping for output
-        var dto = ObjectMapper.Map<Product, ProductDto>(entity);
-        dto.ImageUrl = GenerateImageUrl(entity.Id);
-        return Task.FromResult(dto);
-    }
+    var dto = ObjectMapper.Map<Product, ProductDto>(entity);
+    dto.ImageUrl = GenerateImageUrl(entity.Id);
+    return Task.FromResult(dto);
 }
 ```
 
-## Best Practices
+---
 
-### 1. Use DTOs for API Boundaries
+## Choosing Between Mapperly and AutoMapper
 
-```csharp
-// ✅ Good: Separate DTOs for different purposes
-public class CreateProductDto { /* Only creation fields */ }
-public class UpdateProductDto { /* Only update fields */ }
-public class ProductDto { /* All fields for reading */ }
-public class ProductListDto { /* Summary fields */ }
+| Criterion | Mapperly (default) | AutoMapper (opt-in) |
+|---|---|---|
+| Performance | Compile-time, zero-reflection | Runtime reflection |
+| License | Free (MIT) | Commercial (v13+) |
+| Configuration | `MapperBase` / `TwoWayMapperBase` | `Profile` classes |
+| Bidirectional mapping | `TwoWayMapperBase` (single class) | `ReverseMap()` in profile |
+| Lifecycle hooks | `BeforeMap` / `AfterMap` | `BeforeMap` / `AfterMap` actions in profile |
+| Null safety | Source-generator enforces nullable | Runtime checks |
+| Build warnings | None | NU1903 (AutoMapper CVE) |
 
-// ❌ Bad: Single DTO for everything
-public class ProductDto { /* All fields, used everywhere */ }
-```
-
-### 2. Keep Profiles Organized
-
-```csharp
-// ✅ Good: One profile per module/feature
-public class ProductMappingProfile : Profile { }
-public class OrderMappingProfile : Profile { }
-public class CustomerMappingProfile : Profile { }
-
-// ❌ Bad: Single giant profile
-public class ApplicationMappingProfile : Profile
-{
-    // Hundreds of mappings...
-}
-```
-
-### 3. Use Constructor Mapping for Immutable Entities
-
-```csharp
-public class OrderMappingProfile : Profile
-{
-    public OrderMappingProfile()
-    {
-        CreateMap<CreateOrderDto, Order>()
-            .ConstructUsing(dto => new Order(
-                dto.CustomerId,
-                dto.OrderNumber
-            ));
-    }
-}
-```
-
-### 4. Validate Mapping Configuration
-
-```csharp
-[Fact]
-public void AutoMapper_Configuration_IsValid()
-{
-    var config = new MapperConfiguration(cfg =>
-    {
-        cfg.AddProfile<ApplicationMappingProfile>();
-    });
-    
-    config.AssertConfigurationIsValid();
-}
-```
-
-## Testing
-
-### Testing Mappings
-
-```csharp
-public class ProductMappingTests
-{
-    private readonly IMapper _mapper;
-    
-    public ProductMappingTests()
-    {
-        var config = new MapperConfiguration(cfg =>
-        {
-            cfg.AddProfile<ProductMappingProfile>();
-        });
-        _mapper = config.CreateMapper();
-    }
-    
-    [Fact]
-    public void Map_Product_To_ProductDto()
-    {
-        // Arrange
-        var product = new Product(Guid.NewGuid(), "Test Product")
-        {
-            Price = new Money(99.99m, "USD"),
-            Category = "Electronics"
-        };
-        
-        // Act
-        var dto = _mapper.Map<Product, ProductDto>(product);
-        
-        // Assert
-        Assert.Equal(product.Id, dto.Id);
-        Assert.Equal(product.Name, dto.Name);
-        Assert.Equal(99.99m, dto.Price);
-    }
-}
-```
-
-### Testing Service with Mapper
-
-```csharp
-public class ProductServiceTests
-{
-    private readonly Mock<IObjectMapper> _mockMapper;
-    private readonly ProductService _service;
-    
-    [Fact]
-    public async Task GetProduct_ShouldMapToDto()
-    {
-        // Arrange
-        var product = new Product(Guid.NewGuid(), "Test");
-        var dto = new ProductDto { Id = product.Id, Name = "Test" };
-        
-        _mockRepository
-            .Setup(r => r.GetAsync(product.Id, true, default))
-            .ReturnsAsync(product);
-        
-        _mockMapper
-            .Setup(m => m.Map<Product, ProductDto>(product))
-            .Returns(dto);
-        
-        // Act
-        var result = await _service.GetProductAsync(product.Id);
-        
-        // Assert
-        Assert.Equal(dto.Id, result.Id);
-    }
-}
-```
+---
 
 ## Related Features
 
 - **[Application Services](../application-services/README.md)** - Uses mapper for DTOs
 - **[DDD Building Blocks](../ddd/README.md)** - Domain entities to map
-
