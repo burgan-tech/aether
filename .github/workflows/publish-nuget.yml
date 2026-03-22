@@ -141,6 +141,8 @@ jobs:
           "./framework/src/BBT.Aether.HttpClient/BBT.Aether.HttpClient.csproj"
           "./framework/src/BBT.Aether.Abstractions/BBT.Aether.Abstractions.csproj"
           "./framework/src/BBT.Aether.Aspects/BBT.Aether.Aspects.csproj"
+          "./framework/src/BBT.Aether.AutoMapper/BBT.Aether.AutoMapper.csproj"
+          "./framework/src/BBT.Aether.Mapperly/BBT.Aether.Mapperly.csproj"
         )
         
         # Check for module projects (if they exist)

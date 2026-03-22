@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <Import Project="..\..\..\common.props" />
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <WarningsAsErrors>Nullable</WarningsAsErrors>
+        <AssemblyName>BBT.Aether.AutoMapper</AssemblyName>
+        <PackageId>BBT.Aether.AutoMapper</PackageId>
+        <IsPackable>true</IsPackable>
+        <OutputType>Library</OutputType>
+        <RootNamespace />
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="AutoMapper"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\BBT.Aether.Core\BBT.Aether.Core.csproj" />
+    </ItemGroup>
+
+</Project>
