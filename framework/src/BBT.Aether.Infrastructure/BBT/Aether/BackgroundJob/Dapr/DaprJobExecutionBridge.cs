@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.MultiSchema;
@@ -41,11 +42,13 @@ public sealed class DaprJobExecutionBridge(
             }
 
             var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
-            var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
+            var jobInfo = await jobStore.GetByJobNameAsync(jobName, BackgroundJobStatus.Scheduled, cancellationToken);
 
             if (jobInfo == null)
             {
-                logger.LogError("Job with name '{JobName}' not found in store", jobName);
+                logger.LogWarning(
+                    "Job '{JobName}' not found in Scheduled state — it may have already been completed, failed, or cancelled",
+                    jobName);
                 return;
             }
 

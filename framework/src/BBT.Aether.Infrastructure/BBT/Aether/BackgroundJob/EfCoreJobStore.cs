@@ -77,6 +77,21 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     }
 
     /// <inheritdoc/>
+    public async Task<BackgroundJobInfo?> GetByJobNameAsync(string jobName, BackgroundJobStatus? status, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(jobName))
+            throw new ArgumentNullException(nameof(jobName));
+
+        var query = _dbContext.BackgroundJobs.Where(j => j.JobName == jobName);
+        if (status.HasValue)
+        {
+            query = query.Where(j => j.Status == status.Value);
+        }
+
+        return await query.FirstOrDefaultAsync(cancellationToken);
+    }
+
+    /// <inheritdoc/>
     public async Task<IEnumerable<BackgroundJobInfo>> GetByHandlerNameAsync(string handlerName, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(handlerName))

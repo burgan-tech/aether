@@ -35,15 +35,23 @@ public class DomainEventDispatcher(
 
             if (useOutboxDirectly)
             {
-                logger.LogDebug("Writing domain event to outbox: {EventType} (Name: {EventName}, Version: {Version})",
-                    metadata.EventType.Name, metadata.EventName, metadata.Version);
+                try
+                {
+                    logger.LogDebug("Writing domain event to outbox: {EventType} (Name: {EventName}, Version: {Version})",
+                        metadata.EventType.Name, metadata.EventName, metadata.Version);
 
-                // Write directly to outbox within the transaction
-                await eventBus.PublishAsync(@event, metadata, 
-                    subject: EventSubjectExtractor.ExtractSubject(@event),
-                    useOutbox: true, cancellationToken);
+                    await eventBus.PublishAsync(@event, metadata, 
+                        subject: EventSubjectExtractor.ExtractSubject(@event),
+                        useOutbox: true, cancellationToken);
 
-                logger.LogDebug("Successfully wrote domain event to outbox: {EventType}", metadata.EventType.Name);
+                    logger.LogDebug("Successfully wrote domain event to outbox: {EventType}", metadata.EventType.Name);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex,
+                        "Failed to publish domain event to outbox: {EventType}. Continuing with remaining events",
+                        metadata.EventType.Name);
+                }
             }
             else
             {
