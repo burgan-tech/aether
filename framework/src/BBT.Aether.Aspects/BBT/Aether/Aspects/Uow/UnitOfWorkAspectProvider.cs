@@ -21,7 +21,7 @@ public class UnitOfWorkAspectProvider : IAspectProvider
     /// </summary>
     private readonly static HashSet<string> MarkerInterfaceNames = new()
     {
-        "BBT.Aether.Application.IApplicationService"
+        //"BBT.Aether.Application.IApplicationService"
     };
 
     /// <summary>

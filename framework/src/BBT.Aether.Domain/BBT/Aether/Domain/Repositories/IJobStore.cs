@@ -37,7 +37,7 @@ public interface IJobStore
     Task<BackgroundJobInfo?> GetAsync(Guid id, CancellationToken cancellationToken = default);
     
     /// <summary>
-    /// Retrieves background job information by the job name (external scheduler identifier).
+    /// Retrieves active background job information by the job name to active (external scheduler identifier).
     /// </summary>
     /// <param name="jobName">The unique job name used by the external scheduler (e.g., "send-email-order-123").</param>
     /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
@@ -47,22 +47,6 @@ public interface IJobStore
     /// </returns>
     /// <exception cref="ArgumentNullException">Thrown when jobName is null or empty.</exception>
     Task<BackgroundJobInfo?> GetByJobNameAsync(string jobName, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Retrieves background job information by the job name, optionally filtering by status.
-    /// </summary>
-    /// <param name="jobName">The unique job name used by the external scheduler (e.g., "send-email-order-123").</param>
-    /// <param name="status">
-    /// When provided, only returns the job if its current status matches this value.
-    /// When <c>null</c>, no status filter is applied (equivalent to <see cref="GetByJobNameAsync(string, CancellationToken)"/>).
-    /// </param>
-    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
-    /// <returns>
-    /// A task representing the asynchronous retrieval operation.
-    /// The result contains the job information if found with the matching status; otherwise, null.
-    /// </returns>
-    /// <exception cref="ArgumentNullException">Thrown when jobName is null or empty.</exception>
-    Task<BackgroundJobInfo?> GetByJobNameAsync(string jobName, BackgroundJobStatus? status, CancellationToken cancellationToken = default);
     
     /// <summary>
     /// Retrieves a collection of background jobs by handler name.

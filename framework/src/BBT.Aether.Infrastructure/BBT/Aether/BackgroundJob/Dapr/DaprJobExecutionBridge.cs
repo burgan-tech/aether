@@ -42,7 +42,7 @@ public sealed class DaprJobExecutionBridge(
             }
 
             var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
-            var jobInfo = await jobStore.GetByJobNameAsync(jobName, BackgroundJobStatus.Scheduled, cancellationToken);
+            var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
 
             if (jobInfo == null)
             {

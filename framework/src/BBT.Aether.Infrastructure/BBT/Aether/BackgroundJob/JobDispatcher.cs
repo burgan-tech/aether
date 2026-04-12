@@ -120,11 +120,11 @@ public class JobDispatcher(
 
     /// <summary>
     /// Checks if a job has already been processed (idempotency check).
-    /// Returns true if job is in Completed or Cancelled state.
+    /// Returns true if job is in Completed or Cancelled or Failed state.
     /// </summary>
     private bool IsJobAlreadyProcessed(BackgroundJobInfo jobInfo, Guid jobId, string handlerName)
     {
-        // If job is already completed or cancelled, skip reprocessing
+        // If job is already completed or cancelled or failed, skip reprocessing
         if (jobInfo.Status == BackgroundJobStatus.Completed)
         {
             logger.LogWarning(
@@ -137,6 +137,14 @@ public class JobDispatcher(
         {
             logger.LogWarning(
                 "Handler '{HandlerName}' for job id '{JobId}' was cancelled. Skipping reprocessing (idempotency).",
+                handlerName, jobId);
+            return true;
+        }
+        
+        if (jobInfo.Status == BackgroundJobStatus.Failed)
+        {
+            logger.LogWarning(
+                "Handler '{HandlerName}' for job id '{JobId}' was failed. Skipping reprocessing (idempotency).",
                 handlerName, jobId);
             return true;
         }
