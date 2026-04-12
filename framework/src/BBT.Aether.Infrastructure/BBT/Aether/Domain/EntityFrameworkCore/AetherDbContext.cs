@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.EntityFrameworkCore.Modeling;
 using BBT.Aether.Events;
@@ -18,7 +19,8 @@ namespace BBT.Aether.Domain.EntityFrameworkCore;
 
 public abstract class AetherDbContext<TDbContext>(
     DbContextOptions<TDbContext> options,
-    IDomainEventSink? eventSink = null)
+    IDomainEventSink? eventSink = null,
+    IClock? clock = null)
     : DbContext(options)
     where TDbContext : DbContext
 {
@@ -120,7 +122,7 @@ public abstract class AetherDbContext<TDbContext>(
             return;
         }
 
-        modelBuilder.Entity<TEntity>().ConfigureByConvention();
+        modelBuilder.Entity<TEntity>().ConfigureByConvention(clock);
         ConfigureGlobalFilters<TEntity>(modelBuilder, mutableEntityType);
     }
 

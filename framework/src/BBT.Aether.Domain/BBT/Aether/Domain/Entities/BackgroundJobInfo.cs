@@ -58,6 +58,8 @@ public class BackgroundJobInfo : FullAuditedEntity<Guid>, IHasExtraProperties
     /// </summary>
     public BackgroundJobStatus Status { get; set; } = BackgroundJobStatus.Scheduled;
 
+    public bool IsActive => Status == BackgroundJobStatus.Scheduled || Status == BackgroundJobStatus.Running;
+
     /// <summary>
     /// Gets or sets when the job was handled (completed or failed).
     /// </summary>

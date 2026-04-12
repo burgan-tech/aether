@@ -36,13 +36,12 @@ public class EfCoreJobStore<TDbContext> : IJobStore
             throw new ArgumentNullException(nameof(jobInfo));
 
         // Check if job already exists
-        var existingJob = await _dbContext.BackgroundJobs
-            .FirstOrDefaultAsync(j => j.Id == jobInfo.Id, cancellationToken);
+        var existingJob = await GetByJobNameAsync(jobInfo.JobName, cancellationToken);
 
         if (existingJob != null)
         {
             // Update existing job
-            jobInfo.ModifiedAt  = DateTime.UtcNow;
+            jobInfo.ModifiedAt = DateTime.UtcNow;
             _dbContext.Entry(existingJob).CurrentValues.SetValues(jobInfo);
             existingJob.ExtraProperties = jobInfo.ExtraProperties;
             existingJob.Payload = jobInfo.Payload;
@@ -67,17 +66,21 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     }
 
     /// <inheritdoc/>
-    public async Task<BackgroundJobInfo?> GetByJobNameAsync(string jobName, CancellationToken cancellationToken = default)
+    public async Task<BackgroundJobInfo?> GetByJobNameAsync(string jobName,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(jobName))
             throw new ArgumentNullException(nameof(jobName));
 
         return await _dbContext.BackgroundJobs
-            .FirstOrDefaultAsync(j => j.JobName == jobName, cancellationToken);
+            .FirstOrDefaultAsync(j => j.JobName == jobName
+                    && (j.Status == BackgroundJobStatus.Scheduled || j.Status == BackgroundJobStatus.Running),
+                cancellationToken);
     }
 
     /// <inheritdoc/>
-    public async Task<IEnumerable<BackgroundJobInfo>> GetByHandlerNameAsync(string handlerName, CancellationToken cancellationToken = default)
+    public async Task<IEnumerable<BackgroundJobInfo>> GetByHandlerNameAsync(string handlerName,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(handlerName))
             throw new ArgumentNullException(nameof(handlerName));
@@ -113,7 +116,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
             throw new InvalidOperationException($"Job with id '{id}' not found.");
 
         job.Status = status;
-        job.ModifiedAt  = DateTime.UtcNow;
+        job.ModifiedAt = DateTime.UtcNow;
         if (handledTime.HasValue)
         {
             job.HandledTime = handledTime.Value;
@@ -127,4 +130,3 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         // SaveChanges removed - will be flushed by UoW Commit or calling code
     }
 }
-

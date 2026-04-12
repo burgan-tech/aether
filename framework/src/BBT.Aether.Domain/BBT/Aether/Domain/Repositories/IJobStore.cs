@@ -37,7 +37,7 @@ public interface IJobStore
     Task<BackgroundJobInfo?> GetAsync(Guid id, CancellationToken cancellationToken = default);
     
     /// <summary>
-    /// Retrieves background job information by the job name (external scheduler identifier).
+    /// Retrieves active background job information by the job name (external scheduler identifier).
     /// </summary>
     /// <param name="jobName">The unique job name used by the external scheduler (e.g., "send-email-order-123").</param>
     /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>

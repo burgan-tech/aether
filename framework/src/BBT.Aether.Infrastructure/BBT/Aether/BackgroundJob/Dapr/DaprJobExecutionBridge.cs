@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.MultiSchema;
@@ -45,7 +46,9 @@ public sealed class DaprJobExecutionBridge(
 
             if (jobInfo == null)
             {
-                logger.LogError("Job with name '{JobName}' not found in store", jobName);
+                logger.LogWarning(
+                    "Job '{JobName}' not found in Scheduled state — it may have already been completed, failed, or cancelled",
+                    jobName);
                 return;
             }
 

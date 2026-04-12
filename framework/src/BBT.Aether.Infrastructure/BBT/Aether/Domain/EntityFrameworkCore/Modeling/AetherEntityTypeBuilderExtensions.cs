@@ -1,5 +1,6 @@
 using System;
 using BBT.Aether.Auditing;
+using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Entities.Auditing;
 using BBT.Aether.Domain.EntityFrameworkCore.ValueComparers;
@@ -11,9 +12,9 @@ namespace BBT.Aether.Domain.EntityFrameworkCore.Modeling;
 
 public static class AetherEntityTypeBuilderExtensions
 {
-    public static void ConfigureByConvention(this EntityTypeBuilder b)
+    public static void ConfigureByConvention(this EntityTypeBuilder b, IClock? clock = null)
     {
-        b.TryConfigureDateTimeUtc();
+        b.TryConfigureDateTimeUtc(clock);
         b.TryConfigureConcurrencyStamp();
         b.TryConfigureSoftDelete();
         b.TryConfigureDeletionTime();
@@ -26,18 +27,29 @@ public static class AetherEntityTypeBuilderExtensions
         b.TryConfigureExtraProperties();
     }
 
-    public static void TryConfigureDateTimeUtc(this EntityTypeBuilder b)
+    public static void TryConfigureDateTimeUtc(this EntityTypeBuilder b, IClock? clock = null)
     {
+        ClockDateTimeValueConverter? dateTimeConverter = clock != null ? new ClockDateTimeValueConverter(clock) : null;
+        ClockDateTimeOffsetValueConverter? dateTimeOffsetConverter = clock != null ? new ClockDateTimeOffsetValueConverter(clock) : null;
+
         foreach (var property in b.Metadata.GetProperties())
         {
             if (property.ClrType == typeof(DateTime) || property.ClrType == typeof(DateTime?))
             {
                 property.SetColumnType("timestamp with time zone");
+                if (dateTimeConverter != null)
+                {
+                    property.SetValueConverter(dateTimeConverter);
+                }
             }
 
             if (property.ClrType == typeof(DateTimeOffset) || property.ClrType == typeof(DateTimeOffset?))
             {
                 property.SetColumnType("timestamp with time zone");
+                if (dateTimeOffsetConverter != null)
+                {
+                    property.SetValueConverter(dateTimeOffsetConverter);
+                }
             }
         }
     }

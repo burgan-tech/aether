@@ -51,6 +51,7 @@ public class DaprJobScheduler(
                 jobName: jobName, // Use jobName as the unique identifier in Dapr
                 schedule: daprSchedule,
                 payload: new ReadOnlyMemory<byte>(payloadBytes),
+                overwrite: true,
                 cancellationToken: cancellationToken);
         }
         catch (Exception ex)
