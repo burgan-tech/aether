@@ -1,4 +1,5 @@
 using System;
+using BBT.Aether.Application.Pagination;
 using BBT.Aether.Clock;
 using BBT.Aether.DependencyInjection;
 using BBT.Aether.Guids;
@@ -48,4 +49,12 @@ public abstract class ApplicationService : IApplicationService, IServiceProvider
     protected ILoggerFactory LoggerFactory => LazyServiceProvider.LazyGetRequiredService<ILoggerFactory>();
     protected ILogger Logger => LoggerFactory?.CreateLogger(GetType().FullName!) ?? NullLogger.Instance;
     protected IClock Clock => LazyServiceProvider.LazyGetRequiredService<IClock>();
+
+    /// <summary>
+    /// HATEOAS pagination link generator. Resolves transparently to the host's transport context:
+    /// HTTP requests yield absolute links; non-HTTP hosts produce route-only (relative) links.
+    /// Pass an explicit <c>baseUrl</c> at the call site to override either behavior.
+    /// </summary>
+    protected IPaginationLinkGenerator PaginationLinkGenerator
+        => LazyServiceProvider.LazyGetRequiredService<IPaginationLinkGenerator>();
 }

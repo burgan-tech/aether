@@ -1,6 +1,7 @@
 using System;
 using System.IO.Compression;
 using System.Linq;
+using BBT.Aether.Application.Pagination;
 using BBT.Aether.AspNetCore.ExceptionHandling;
 using BBT.Aether.AspNetCore.Pagination;
 using BBT.Aether.AspNetCore.Security;
@@ -10,6 +11,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
@@ -39,8 +41,10 @@ public static class AetherAspNetCoreModuleServiceCollectionExtensions
         //ResponseCompression
         services.AddResponseCompression(configuration);
 
-        // Pagination Link Generator
-        services.AddScoped<IPaginationLinkGenerator, PaginationLinkGenerator>();
+        // Replace the transport-agnostic pagination context with the HTTP-aware adapter.
+        // The PaginationLinkGenerator itself (in BBT.Aether.Application) is unchanged and
+        // automatically picks up the HTTP context for base URL and query parameters.
+        services.Replace(ServiceDescriptor.Scoped<IPaginationContext, HttpPaginationContext>());
 
         return services;
     }
