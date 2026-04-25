@@ -1,5 +1,7 @@
 using System;
+using System.Diagnostics;
 using System.Threading.Tasks;
+using BBT.Aether.Telemetry;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis;
 
@@ -31,6 +33,14 @@ public sealed class RedisLockHandle(
 
         _disposed = true;
 
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "DistributedLock.Release",
+            ActivityKind.Client,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("lock.provider", "redis");
+        activity?.SetTag("lock.resource_id", resourceId);
+
         try
         {
             var script = @"
@@ -50,19 +60,33 @@ public sealed class RedisLockHandle(
                 logger.LogDebug(
                     "Released Redis lock for resource {ResourceId} with owner {LockOwner}",
                     resourceId, lockOwner);
+                activity?.SetTag("lock.released", true);
             }
             else
             {
                 logger.LogDebug(
                     "No Redis lock to release or owner mismatch for resource {ResourceId} with owner {LockOwner}",
                     resourceId, lockOwner);
+                activity?.SetTag("lock.released", false);
             }
+
+            activity?.SetStatus(ActivityStatusCode.Ok);
         }
         catch (Exception ex)
         {
             logger.LogError(ex,
                 "Error releasing Redis lock for resource {ResourceId} with owner {LockOwner}",
                 resourceId, lockOwner);
+
+            if (activity != null)
+            {
+                activity.SetStatus(ActivityStatusCode.Error, ex.Message);
+                activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
+                {
+                    { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
+                    { "exception.message", ex.Message },
+                }));
+            }
         }
     }
 }

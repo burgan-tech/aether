@@ -1,6 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Telemetry;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis;
 
@@ -18,14 +20,14 @@ public class RedisDistributedLockService(
     public async Task<IAsyncDisposable?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
         CancellationToken cancellationToken = default)
     {
+        using var activity = StartLockActivity("DistributedLock.Acquire", resourceId, expiryInSeconds);
+
         try
         {
             var database = redisConnection.GetDatabase();
             var lockOwner = GetClientIdentifier();
             var expiry = TimeSpan.FromSeconds(expiryInSeconds);
 
-            // Use atomic SETNX (SET if Not eXists) with expiry
-            // Key: resourceId, Value: lockOwner
             var acquired = await database.StringSetAsync(
                 resourceId,
                 lockOwner,
@@ -37,27 +39,39 @@ public class RedisDistributedLockService(
             {
                 logger.LogDebug("Successfully acquired Redis lock for resource {ResourceId} with owner {LockOwner}",
                     resourceId, lockOwner);
+                activity?.SetTag("lock.acquired", true);
+                activity?.SetStatus(ActivityStatusCode.Ok);
                 return new RedisLockHandle(database, resourceId, lockOwner, logger);
             }
 
             logger.LogWarning("Failed to acquire Redis lock for resource {ResourceId}", resourceId);
+            activity?.SetTag("lock.acquired", false);
+            activity?.SetStatus(ActivityStatusCode.Ok);
             return null;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error acquiring Redis lock for resource {ResourceId}", resourceId);
+            RecordException(activity, ex);
             return null;
         }
     }
 
     public async Task<bool> ReleaseLockAsync(string resourceId, CancellationToken cancellationToken = default)
     {
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "DistributedLock.Release",
+            ActivityKind.Client,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("lock.provider", "redis");
+        activity?.SetTag("lock.resource_id", resourceId);
+
         try
         {
             var database = redisConnection.GetDatabase();
             var lockOwner = GetClientIdentifier();
 
-            // Use Lua script to ensure atomic delete only if the lock exists and is owned by this client
             var script = @"
                 if redis.call('get', KEYS[1]) == ARGV[1] then
                     return redis.call('del', KEYS[1])
@@ -84,11 +98,14 @@ public class RedisDistributedLockService(
                     resourceId, lockOwner);
             }
 
+            activity?.SetTag("lock.released", released);
+            activity?.SetStatus(ActivityStatusCode.Ok);
             return released;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error releasing Redis lock for resource {ResourceId}", resourceId);
+            RecordException(activity, ex);
             return false;
         }
     }
@@ -101,22 +118,30 @@ public class RedisDistributedLockService(
             throw new ArgumentNullException(nameof(function));
         }
 
+        using var activity = StartLockActivity("DistributedLock.Execute", resourceId, expiryInSeconds);
+
         await using var lockAcquired = await TryAcquireLockAsync(resourceId, expiryInSeconds, cancellationToken);
 
         if (lockAcquired == null)
         {
             logger.LogWarning("Could not acquire lock for resource {ResourceId}", resourceId);
+            activity?.SetTag("lock.acquired", false);
+            activity?.SetStatus(ActivityStatusCode.Ok);
             return (false, default);
         }
+
+        activity?.SetTag("lock.acquired", true);
 
         try
         {
             var result = await function();
+            activity?.SetStatus(ActivityStatusCode.Ok);
             return (true, result);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error executing function with Redis lock for resource {ResourceId}", resourceId);
+            RecordException(activity, ex);
             throw;
         }
     }
@@ -129,24 +154,58 @@ public class RedisDistributedLockService(
             throw new ArgumentNullException(nameof(action));
         }
 
+        using var activity = StartLockActivity("DistributedLock.Execute", resourceId, expiryInSeconds);
+
         await using var lockAcquired = await TryAcquireLockAsync(resourceId, expiryInSeconds, cancellationToken);
 
         if (lockAcquired == null)
         {
             logger.LogWarning("Could not acquire lock for resource {ResourceId}", resourceId);
+            activity?.SetTag("lock.acquired", false);
+            activity?.SetStatus(ActivityStatusCode.Ok);
             return false;
         }
+
+        activity?.SetTag("lock.acquired", true);
 
         try
         {
             await action();
+            activity?.SetStatus(ActivityStatusCode.Ok);
             return true;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error executing action with Redis lock for resource {ResourceId}", resourceId);
+            RecordException(activity, ex);
             throw;
         }
+    }
+
+    private static Activity? StartLockActivity(string operationName, string resourceId, int expiryInSeconds)
+    {
+        var activity = InfrastructureActivitySource.Source.StartActivity(
+            operationName,
+            ActivityKind.Client,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("lock.provider", "redis");
+        activity?.SetTag("lock.resource_id", resourceId);
+        activity?.SetTag("lock.expiry_seconds", expiryInSeconds);
+
+        return activity;
+    }
+
+    private static void RecordException(Activity? activity, Exception ex)
+    {
+        if (activity == null) return;
+
+        activity.SetStatus(ActivityStatusCode.Error, ex.Message);
+        activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
+        {
+            { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
+            { "exception.message", ex.Message },
+        }));
     }
 
     private string GetClientIdentifier()

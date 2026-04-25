@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,6 +10,7 @@ using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.Guids;
 using BBT.Aether.MultiSchema;
+using BBT.Aether.Telemetry;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.Logging;
 
@@ -55,12 +57,22 @@ public sealed class BackgroundJobService(
         if (string.IsNullOrWhiteSpace(schedule))
             throw new ArgumentNullException(nameof(schedule));
 
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "BackgroundJob.Enqueue",
+            ActivityKind.Producer,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("job.handler_name", handlerName);
+        activity?.SetTag("job.name", jobName);
+        activity?.SetTag("job.schedule", schedule);
+
         logger.LogInformation(
             "Enqueueing job handler '{HandlerName}' with job name '{JobName}' and schedule '{Schedule}'",
             handlerName, jobName, schedule);
 
         // Create job entity
         var jobId = guidGenerator.Create();
+        activity?.SetTag("job.id", jobId.ToString());
 
         // Convert metadata to nullable dictionary for ExtraPropertyDictionary
         var extraProperties = new ExtraPropertyDictionary();
@@ -118,12 +130,14 @@ public sealed class BackgroundJobService(
                 "Successfully enqueued job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
                 handlerName, jobName, jobId);
 
+            activity?.SetStatus(ActivityStatusCode.Ok);
             return jobId;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to enqueue job handler '{HandlerName}' with job name '{JobName}'", handlerName,
                 jobName);
+            RecordException(activity, ex);
             await uow.RollbackAsync(cancellationToken);
             throw;
         }
@@ -138,6 +152,14 @@ public sealed class BackgroundJobService(
         if (string.IsNullOrWhiteSpace(newSchedule))
             throw new ArgumentNullException(nameof(newSchedule));
 
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "BackgroundJob.Update",
+            ActivityKind.Producer,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("job.id", id.ToString());
+        activity?.SetTag("job.schedule", newSchedule);
+
         logger.LogInformation("Updating job with entity id '{Id}' to new schedule '{NewSchedule}'", id, newSchedule);
 
         await using var uow = await uowManager.BeginAsync(cancellationToken: cancellationToken);
@@ -149,6 +171,9 @@ public sealed class BackgroundJobService(
             {
                 throw new InvalidOperationException($"Job with id '{id}' not found.");
             }
+
+            activity?.SetTag("job.handler_name", jobInfo.HandlerName);
+            activity?.SetTag("job.name", jobInfo.JobName);
 
             // Update schedule in entity
             jobInfo.ExpressionValue = newSchedule;
@@ -179,10 +204,12 @@ public sealed class BackgroundJobService(
             await uow.CommitAsync(cancellationToken);
 
             logger.LogInformation("Successfully updated job with entity id '{Id}'", id);
+            activity?.SetStatus(ActivityStatusCode.Ok);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to update job with entity id '{Id}'", id);
+            RecordException(activity, ex);
             await uow.RollbackAsync(cancellationToken);
             throw;
         }
@@ -194,6 +221,13 @@ public sealed class BackgroundJobService(
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "BackgroundJob.Delete",
+            ActivityKind.Producer,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("job.id", id.ToString());
+
         logger.LogInformation("Deleting job with entity id '{Id}'", id);
 
         await using var uow = await uowManager.BeginAsync(cancellationToken: cancellationToken);
@@ -204,8 +238,12 @@ public sealed class BackgroundJobService(
             if (jobInfo == null)
             {
                 logger.LogWarning("Job with entity id '{Id}' not found", id);
+                activity?.SetStatus(ActivityStatusCode.Ok);
                 return false;
             }
+
+            activity?.SetTag("job.handler_name", jobInfo.HandlerName);
+            activity?.SetTag("job.name", jobInfo.JobName);
 
             // Delete from scheduler
             await jobScheduler.DeleteAsync(jobInfo.HandlerName, jobInfo.JobName, cancellationToken);
@@ -218,13 +256,27 @@ public sealed class BackgroundJobService(
             await uow.CommitAsync(cancellationToken);
 
             logger.LogInformation("Successfully deleted job with entity id '{Id}'", id);
+            activity?.SetStatus(ActivityStatusCode.Ok);
             return true;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to delete job with entity id '{Id}'", id);
+            RecordException(activity, ex);
             await uow.RollbackAsync(cancellationToken);
             throw;
         }
+    }
+
+    private static void RecordException(Activity? activity, Exception ex)
+    {
+        if (activity == null) return;
+
+        activity.SetStatus(ActivityStatusCode.Error, ex.Message);
+        activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
+        {
+            { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
+            { "exception.message", ex.Message },
+        }));
     }
 }

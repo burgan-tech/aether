@@ -160,6 +160,57 @@ Scheduled → Running → Completed
                    → Cancelled
 ```
 
+## Tracing
+
+All background job operations automatically emit OpenTelemetry spans via the `BBT.Aether.Infrastructure` ActivitySource. No additional configuration is needed when using `AddAetherTelemetry`.
+
+### Scheduling Spans
+
+| Span | Description |
+|------|-------------|
+| `BackgroundJob.Enqueue` | Job creation + persistence via `IBackgroundJobService` |
+| `BackgroundJob.Update` | Schedule update via `IBackgroundJobService` |
+| `BackgroundJob.Delete` | Job cancellation via `IBackgroundJobService` |
+| `BackgroundJob.Schedule` | Scheduler-level job registration (e.g. Dapr) |
+| `BackgroundJob.Schedule.Update` | Scheduler-level reschedule |
+| `BackgroundJob.Schedule.Delete` | Scheduler-level job removal |
+
+### Execution Spans
+
+| Span | Description |
+|------|-------------|
+| `BackgroundJob.Execute` | Dapr callback entry point (execution bridge) |
+| `BackgroundJob.Dispatch` | Handler invocation with idempotency check |
+
+### Tags
+
+| Tag | Description |
+|-----|-------------|
+| `job.handler_name` | Handler type name (e.g. `"SendEmail"`) |
+| `job.name` | Unique job identifier (e.g. `"send-email-order-123"`) |
+| `job.schedule` | Schedule expression (e.g. `"@daily"`, `"*/15 * * * *"`) |
+| `job.id` | Entity ID from BackgroundJobInfo |
+| `job.scheduler` | Scheduler backend (e.g. `"dapr"`) |
+| `job.status` | Final dispatch status (`"completed"`, `"failed"`, `"cancelled"`) |
+
+### Example Trace Hierarchy
+
+**Scheduling:**
+```
+[ASP.NET Core] POST /api/orders
+  [BBT.Aether.Infrastructure] BackgroundJob.Enqueue
+    [BBT.Aether.Infrastructure] BackgroundJob.Schedule
+      [HTTP Client] POST http://localhost:3500/...
+```
+
+**Execution (Dapr callback):**
+```
+[ASP.NET Core] POST /job
+  [BBT.Aether.Infrastructure] BackgroundJob.Execute
+    [BBT.Aether.Infrastructure] BackgroundJob.Dispatch
+      [EF Core] SELECT/UPDATE ...
+```
+
 ## Best Practices
 
 1. **Make handlers idempotent** - Jobs may be retried on failure
@@ -195,3 +246,4 @@ public class ProcessPaymentJobHandler : IBackgroundJobHandler<ProcessPaymentJobA
 
 - [Unit of Work](../unit-of-work/README.md) - Transaction management for handlers
 - [Distributed Lock](../distributed-lock/README.md) - Coordinate job execution
+- [OpenTelemetry](../telemetry/README.md) - Tracing configuration

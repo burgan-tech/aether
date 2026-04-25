@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
@@ -6,6 +7,7 @@ using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.MultiSchema;
+using BBT.Aether.Telemetry;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -34,6 +36,14 @@ public class JobDispatcher(
         if (string.IsNullOrWhiteSpace(handlerName))
             throw new ArgumentNullException(nameof(handlerName));
 
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "BackgroundJob.Dispatch",
+            ActivityKind.Internal,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("job.id", jobId.ToString());
+        activity?.SetTag("job.handler_name", handlerName);
+
         await using var scope = scopeFactory.CreateAsyncScope();
         
         var argsPayload = CloudEventEnvelopeHelper.ExtractDataPayload(eventSerializer, jobPayload, out var envelope);
@@ -56,13 +66,17 @@ public class JobDispatcher(
             var jobInfo = await jobStore.GetAsync(jobId, cancellationToken);
             if (jobInfo == null)
             {
+                activity?.SetStatus(ActivityStatusCode.Ok);
                 return;
             }
 
             jobName = jobInfo.JobName;
+            activity?.SetTag("job.name", jobName);
 
             if (IsJobAlreadyProcessed(jobInfo, jobId, handlerName))
             {
+                activity?.SetTag("job.status", jobInfo.Status.ToString().ToLowerInvariant());
+                activity?.SetStatus(ActivityStatusCode.Ok);
                 await uow.CommitAsync(cancellationToken);
                 await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
                 return;
@@ -74,6 +88,8 @@ public class JobDispatcher(
                     jobId);
                 await jobStore.UpdateStatusAsync(jobId, BackgroundJobStatus.Failed, clock.UtcNow,
                     "No handler found for handler type", cancellationToken);
+                activity?.SetTag("job.status", "failed");
+                activity?.SetStatus(ActivityStatusCode.Error, "No handler found for handler type");
                 await uow.CommitAsync(cancellationToken);
                 await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
                 return;
@@ -98,12 +114,17 @@ public class JobDispatcher(
             logger.LogInformation("Successfully completed handler '{HandlerName}' for job id '{JobId}'", handlerName,
                 jobId);
 
+            activity?.SetTag("job.status", "completed");
+            activity?.SetStatus(ActivityStatusCode.Ok);
+
             await handlerUow.CommitAsync(cancellationToken);
             await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             logger.LogWarning("Handler '{HandlerName}' for job id '{JobId}' was cancelled", handlerName, jobId);
+            activity?.SetTag("job.status", "cancelled");
+            activity?.SetStatus(ActivityStatusCode.Ok);
             await MarkJobStatusAsync(uowManager, jobStore, jobId, BackgroundJobStatus.Cancelled,
                 "Job was cancelled", cancellationToken);
             await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
@@ -112,6 +133,18 @@ public class JobDispatcher(
         {
             logger.LogError(ex, "Handler '{HandlerName}' for job id '{JobId}' failed", handlerName, jobId);
             var errorMessage = $"{ex.GetType().Name}: {ex.Message}".Truncate(4000);
+
+            activity?.SetTag("job.status", "failed");
+            if (activity != null)
+            {
+                activity.SetStatus(ActivityStatusCode.Error, ex.Message);
+                activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
+                {
+                    { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
+                    { "exception.message", ex.Message },
+                }));
+            }
+
             await MarkJobStatusAsync(uowManager, jobStore, jobId, BackgroundJobStatus.Failed,
                 errorMessage, cancellationToken);
             await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
