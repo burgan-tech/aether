@@ -171,6 +171,7 @@ public static class AetherTelemetryServiceCollectionExtensions
                 }
                 
                 tracing.AddSource("BBT.Aether.Aspects");
+                tracing.AddSource("BBT.Aether.Infrastructure");
                 
                 // Custom sources
                 foreach (var src in opts.Tracing.AdditionalSources)

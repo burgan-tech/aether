@@ -159,6 +159,35 @@ public async Task GenerateDailyReportAsync()
 }
 ```
 
+## Tracing
+
+All lock operations automatically emit OpenTelemetry spans via the `BBT.Aether.Infrastructure` ActivitySource. No additional configuration is needed when using `AddAetherTelemetry`.
+
+Span names:
+- `DistributedLock.Acquire` - lock acquisition attempts
+- `DistributedLock.Release` - explicit or dispose-based lock release
+- `DistributedLock.Execute` - `ExecuteWithLockAsync` (covers acquire + execute + release)
+
+Tags added to each span:
+
+| Tag | Description |
+|-----|-------------|
+| `lock.provider` | `"dapr"` or `"redis"` |
+| `lock.resource_id` | The resource identifier being locked |
+| `lock.store_name` | Dapr component name (Dapr provider only) |
+| `lock.expiry_seconds` | Lock TTL |
+| `lock.acquired` | Whether the lock was successfully obtained |
+| `lock.released` | Whether the lock was successfully released |
+
+Example trace hierarchy:
+
+```
+[ASP.NET Core] POST /api/orders
+  [BBT.Aether.Aspects] OrderService.ProcessOrder
+    [BBT.Aether.Infrastructure] DistributedLock.Execute
+      [HTTP Client] POST http://localhost:3500/v1.0-alpha1/lock/lockstore
+```
+
 ## Best Practices
 
 1. **Choose appropriate lock duration** - Match to expected operation time + buffer
@@ -171,3 +200,4 @@ public async Task GenerateDailyReportAsync()
 
 - [Distributed Cache](../distributed-cache/README.md) - Cache stampede prevention
 - [Background Jobs](../background-job/README.md) - Coordinate job execution
+- [OpenTelemetry](../telemetry/README.md) - Tracing configuration

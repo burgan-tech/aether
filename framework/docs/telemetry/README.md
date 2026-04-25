@@ -8,7 +8,7 @@ Aether provides comprehensive OpenTelemetry integration for distributed tracing,
 
 - **OpenTelemetry Standard** - Industry-standard observability
 - **Three Pillars** - Traces, Metrics, and Logs
-- **Automatic Instrumentation** - AspNetCore, HttpClient, EF Core
+- **Automatic Instrumentation** - AspNetCore, HttpClient, EF Core, Distributed Lock, Distributed Cache, Event Bus
 - **OTLP Exporters** - Export to any OTLP-compatible backend
 - **Environment Variable Support** - Standard OTEL_* variables
 - **Custom Instrumentation** - Extensible builder pattern
@@ -344,12 +344,28 @@ _logger.LogInformation(
 
 ## Context Propagation
 
+### Infrastructure Spans
+
+Distributed lock, cache, and background job operations automatically create spans under the `BBT.Aether.Infrastructure` ActivitySource:
+
+- `DistributedLock.Acquire` / `DistributedLock.Release` / `DistributedLock.Execute`
+- `DistributedCache.Get` / `DistributedCache.Set` / `DistributedCache.Remove` / `DistributedCache.Refresh`
+- `BackgroundJob.Enqueue` / `BackgroundJob.Update` / `BackgroundJob.Delete`
+- `BackgroundJob.Schedule` / `BackgroundJob.Schedule.Update` / `BackgroundJob.Schedule.Delete`
+- `BackgroundJob.Execute` / `BackgroundJob.Dispatch`
+- `EventBus.Publish` / `EventBus.PublishEnvelope` / `EventBus.PublishToBroker`
+- `Outbox.Process`
+- `Inbox.Process` / `Inbox.Invoke`
+
+Each span includes provider-specific tags (`lock.provider`, `cache.provider`, `job.handler_name`, `job.scheduler`, `event.name`, `event.topic`, `event.broker`, etc.) and records exceptions following OpenTelemetry semantic conventions.
+
 ### Automatic Propagation
 
 Trace context is automatically propagated:
 - HTTP requests (W3C Trace Context headers)
 - Dapr service invocation
 - Event bus messages
+- Distributed lock, cache, background job, and event bus operations (via `BBT.Aether.Infrastructure` ActivitySource)
 
 ### Manual Propagation
 

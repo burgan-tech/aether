@@ -1,6 +1,9 @@
+using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.MultiSchema;
+using BBT.Aether.Telemetry;
 using Dapr.Client;
 
 namespace BBT.Aether.Events;
@@ -26,26 +29,65 @@ public class DaprEventBus(
         return eventInfo.PubSubName ?? _options.PubSubName;
     }
 
-    protected override Task PublishToBrokerAsync<TEvent>(string topic, byte[] serializedEnvelope, CancellationToken cancellationToken = default)
+    protected override async Task PublishToBrokerAsync<TEvent>(string topic, byte[] serializedEnvelope, CancellationToken cancellationToken = default)
     {
-        // Resolve PubSub component name from event type attribute or default
         var pubSubName = ResolvePubSubName<TEvent>();
 
-        // Deserialize the envelope to object so Dapr can serialize it properly
-        // This prevents double-serialization (string wrapping) by Dapr
-        var envelope = EventSerializer.Deserialize<object>(serializedEnvelope);
-        
-        // Publish as object - Dapr will serialize it as JSON object (not string-wrapped)
-        return daprClient.PublishEventAsync(pubSubName, topic, envelope, cancellationToken);
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "EventBus.PublishToBroker",
+            ActivityKind.Producer,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("event.topic", topic);
+        activity?.SetTag("event.pubsub_name", pubSubName);
+        activity?.SetTag("event.broker", "dapr");
+
+        try
+        {
+            var envelope = EventSerializer.Deserialize<object>(serializedEnvelope);
+            await daprClient.PublishEventAsync(pubSubName, topic, envelope, cancellationToken);
+            activity?.SetStatus(ActivityStatusCode.Ok);
+        }
+        catch (Exception ex)
+        {
+            RecordException(activity, ex);
+            throw;
+        }
     }
 
-    protected override Task PublishToBrokerAsync(string topic, string pubSubName, byte[] serializedEnvelope, CancellationToken cancellationToken = default)
+    protected override async Task PublishToBrokerAsync(string topic, string pubSubName, byte[] serializedEnvelope, CancellationToken cancellationToken = default)
     {
-        // Deserialize the envelope to object so Dapr can serialize it properly
-        // This prevents double-serialization (string wrapping) by Dapr
-        var envelope = EventSerializer.Deserialize<object>(serializedEnvelope);
-        
-        // Publish as object - Dapr will serialize it as JSON object (not string-wrapped)
-        return daprClient.PublishEventAsync(pubSubName, topic, envelope, cancellationToken);
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "EventBus.PublishToBroker",
+            ActivityKind.Producer,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("event.topic", topic);
+        activity?.SetTag("event.pubsub_name", pubSubName);
+        activity?.SetTag("event.broker", "dapr");
+
+        try
+        {
+            var envelope = EventSerializer.Deserialize<object>(serializedEnvelope);
+            await daprClient.PublishEventAsync(pubSubName, topic, envelope, cancellationToken);
+            activity?.SetStatus(ActivityStatusCode.Ok);
+        }
+        catch (Exception ex)
+        {
+            RecordException(activity, ex);
+            throw;
+        }
+    }
+
+    private static void RecordException(Activity? activity, Exception ex)
+    {
+        if (activity == null) return;
+
+        activity.SetStatus(ActivityStatusCode.Error, ex.Message);
+        activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
+        {
+            { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
+            { "exception.message", ex.Message },
+        }));
     }
 }

@@ -1,9 +1,11 @@
 using System;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.DistributedLock;
 using BBT.Aether.Persistence;
+using BBT.Aether.Telemetry;
 using BBT.Aether.Uow;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -86,11 +88,17 @@ public class InboxProcessor<TDbContext>(
         IServiceProvider scopedServiceProvider,
         CancellationToken cancellationToken)
     {
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "Inbox.Process",
+            ActivityKind.Consumer,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("event.id", inboxMessage.Id);
+
         logger.LogInformation("Start processing incoming event with id = {EventId}", inboxMessage.Id);
 
         try
         {
-            // Begin a new UoW for this event processing
             var unitOfWorkManager = scopedServiceProvider.GetRequiredService<IUnitOfWorkManager>();
             await using var uow = await unitOfWorkManager.BeginRequiresNew(cancellationToken);
 
@@ -108,11 +116,15 @@ public class InboxProcessor<TDbContext>(
             {
                 logger.LogWarning("Failed to deserialize event {EventId}, marking as failed", inboxMessage.Id);
                 await MarkEventAsFailedAsync(inboxMessage.Id, scopedServiceProvider, cancellationToken);
+                activity?.SetStatus(ActivityStatusCode.Error, "Failed to deserialize event envelope");
                 return;
             }
 
             var eventName = envelope.Type;
             var version = envelope.Version ?? 1;
+
+            activity?.SetTag("event.name", eventName);
+            activity?.SetTag("event.version", version);
 
             // Lookup invoker from registry
             if (!invokerRegistry.TryGet(eventName, version, out var invoker))
@@ -120,6 +132,7 @@ public class InboxProcessor<TDbContext>(
                 logger.LogWarning("No handler registered for event {EventName} v{Version}, marking as failed",
                     eventName, version);
                 await MarkEventAsFailedAsync(inboxMessage.Id, scopedServiceProvider, cancellationToken);
+                activity?.SetStatus(ActivityStatusCode.Error, $"No handler registered for {eventName} v{version}");
                 return;
             }
 
@@ -134,12 +147,14 @@ public class InboxProcessor<TDbContext>(
             // Commit handler changes + processed status
             await handlerUow.CommitAsync(cancellationToken);
 
+            activity?.SetStatus(ActivityStatusCode.Ok);
             logger.LogInformation("Successfully processed event {EventId} ({EventName} v{Version})",
                 inboxMessage.Id, eventName, version);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to process event {EventId}", inboxMessage.Id);
+            RecordException(activity, ex);
             await MarkEventAsFailedAsync(inboxMessage.Id, scopedServiceProvider, cancellationToken);
         }
     }
@@ -205,5 +220,17 @@ public class InboxProcessor<TDbContext>(
         {
             logger.LogError(ex, "Error cleaning up old inbox messages");
         }
+    }
+
+    private static void RecordException(Activity? activity, Exception ex)
+    {
+        if (activity == null) return;
+
+        activity.SetStatus(ActivityStatusCode.Error, ex.Message);
+        activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
+        {
+            { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
+            { "exception.message", ex.Message },
+        }));
     }
 }

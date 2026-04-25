@@ -1,6 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Telemetry;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace BBT.Aether.Events;
@@ -38,20 +40,47 @@ public sealed class DistributedEventInvoker<T> : IDistributedEventInvoker
     /// <inheritdoc />
     public async Task InvokeAsync(IServiceProvider serviceProvider, ReadOnlyMemory<byte> body, CancellationToken cancellationToken)
     {
-        // Resolve dependencies from service provider
-        var serializer = serviceProvider.GetRequiredService<IEventSerializer>();
-        var handler = serviceProvider.GetRequiredService<IEventHandler<T>>();
-        
-        // Deserialize to strongly-typed CloudEventEnvelope<T>
-        var envelope = serializer.Deserialize<CloudEventEnvelope<T>>(body.Span);
-        
-        if (envelope == null)
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "Inbox.Invoke",
+            ActivityKind.Internal,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("event.name", Name);
+        activity?.SetTag("event.version", Version);
+
+        try
         {
-            throw new InvalidOperationException($"Failed to deserialize CloudEventEnvelope<{typeof(T).Name}>");
+            var serializer = serviceProvider.GetRequiredService<IEventSerializer>();
+            var handler = serviceProvider.GetRequiredService<IEventHandler<T>>();
+            
+            activity?.SetTag("event.handler", handler.GetType().Name);
+
+            var envelope = serializer.Deserialize<CloudEventEnvelope<T>>(body.Span);
+            
+            if (envelope == null)
+            {
+                throw new InvalidOperationException($"Failed to deserialize CloudEventEnvelope<{typeof(T).Name}>");
+            }
+            
+            await handler.HandleAsync(envelope, cancellationToken);
+            activity?.SetStatus(ActivityStatusCode.Ok);
         }
-        
-        // Invoke handler with strongly-typed envelope
-        await handler.HandleAsync(envelope, cancellationToken);
+        catch (Exception ex)
+        {
+            RecordException(activity, ex);
+            throw;
+        }
+    }
+
+    private static void RecordException(Activity? activity, Exception ex)
+    {
+        if (activity == null) return;
+
+        activity.SetStatus(ActivityStatusCode.Error, ex.Message);
+        activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
+        {
+            { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
+            { "exception.message", ex.Message },
+        }));
     }
 }
-
