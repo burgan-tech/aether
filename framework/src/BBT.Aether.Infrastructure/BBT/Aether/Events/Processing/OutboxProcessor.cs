@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
+using BBT.Aether.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -69,24 +71,31 @@ public class OutboxProcessor<TDbContext>(
             {
                 break;
             }
-            
+
+            using var activity = InfrastructureActivitySource.Source.StartActivity(
+                "Outbox.Process",
+                ActivityKind.Producer,
+                Activity.Current?.Context ?? default);
+
+            // Get topicName and pubSubName from ExtraProperties
+            var topicName = message.ExtraProperties.TryGetValue("TopicName", out var topicObj) 
+                ? topicObj?.ToString() ?? message.EventName 
+                : message.EventName;
+            var pubSubName = message.ExtraProperties.TryGetValue("PubSubName", out var pubSubObj)
+                ? pubSubObj?.ToString() ?? eventBusOptions.PubSubName
+                : eventBusOptions.PubSubName;
+
+            activity?.SetTag("event.name", message.EventName);
+            activity?.SetTag("event.topic", topicName);
+            activity?.SetTag("event.pubsub_name", pubSubName);
+            activity?.SetTag("outbox.message_id", message.Id.ToString());
+            activity?.SetTag("outbox.retry_count", message.RetryCount);
+
             try
             {
-                // Get topicName and pubSubName from ExtraProperties
-                var topicName = message.ExtraProperties.TryGetValue("TopicName", out var topicObj) 
-                    ? topicObj?.ToString() ?? message.EventName 
-                    : message.EventName;
-                var pubSubName = message.ExtraProperties.TryGetValue("PubSubName", out var pubSubObj)
-                    ? pubSubObj?.ToString() ?? eventBusOptions.PubSubName
-                    : eventBusOptions.PubSubName;
-
-                // EventData is already serialized CloudEventEnvelope bytes
                 var serializedEnvelope = message.EventData;
-
-                // Publish using IDistributedEventBus abstraction
                 await eventBus.PublishEnvelopeAsync(serializedEnvelope, topicName, pubSubName, cancellationToken);
 
-                // Find and update the domain entity
                 var domainMessage = await dbContext.OutboxMessages.FindAsync(new object[] { message.Id }, cancellationToken);
                 if (domainMessage != null)
                 {
@@ -97,13 +106,14 @@ public class OutboxProcessor<TDbContext>(
                     domainMessage.LockedUntil = null;
                 }
 
+                activity?.SetStatus(ActivityStatusCode.Ok);
                 logger.LogInformation("Successfully published outbox message {MessageId}", message.Id);
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to publish outbox message {MessageId}", message.Id);
+                RecordException(activity, ex);
 
-                // Find and update the domain entity for retry
                 var domainMessage = await dbContext.OutboxMessages.FindAsync(new object[] { message.Id }, cancellationToken);
                 if (domainMessage != null)
                 {
@@ -147,5 +157,17 @@ public class OutboxProcessor<TDbContext>(
         // Exponential backoff: baseDelay * 2^(retryCount - 1)
         var delay = options.RetryBaseDelay * Math.Pow(2, retryCount - 1);
         return clock.UtcNow.Add(TimeSpan.FromMilliseconds(delay.TotalMilliseconds));
+    }
+
+    private static void RecordException(Activity? activity, Exception ex)
+    {
+        if (activity == null) return;
+
+        activity.SetStatus(ActivityStatusCode.Error, ex.Message);
+        activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
+        {
+            { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
+            { "exception.message", ex.Message },
+        }));
     }
 }

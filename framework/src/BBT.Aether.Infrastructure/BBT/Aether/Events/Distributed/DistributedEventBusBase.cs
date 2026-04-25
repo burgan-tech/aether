@@ -1,7 +1,9 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.MultiSchema;
+using BBT.Aether.Telemetry;
 
 namespace BBT.Aether.Events;
 
@@ -71,15 +73,33 @@ public abstract class DistributedEventBusBase(
         // Use Topic for routing to the message broker (includes environment prefix if enabled)
         var topicName = envelope.Topic ?? envelope.Type;
 
-        if (useOutbox)
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "EventBus.Publish",
+            ActivityKind.Producer,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("event.name", envelope.Type);
+        activity?.SetTag("event.topic", topicName);
+        activity?.SetTag("event.use_outbox", useOutbox);
+
+        try
         {
-            await StoreInOutboxAsync(envelope, cancellationToken);
+            if (useOutbox)
+            {
+                await StoreInOutboxAsync(envelope, cancellationToken);
+            }
+            else
+            {
+                var serialized = EventSerializer.Serialize(envelope);
+                await PublishToBrokerAsync<TEvent>(topicName, serialized, cancellationToken);
+            }
+
+            activity?.SetStatus(ActivityStatusCode.Ok);
         }
-        else
+        catch (Exception ex)
         {
-            // Serialize envelope using IEventSerializer for consistent format
-            var serialized = EventSerializer.Serialize(envelope);
-            await PublishToBrokerAsync<TEvent>(topicName, serialized, cancellationToken);
+            RecordException(activity, ex);
+            throw;
         }
     }
 
@@ -93,19 +113,37 @@ public abstract class DistributedEventBusBase(
     {
         // Create envelope using metadata - no reflection needed
         var envelope = CreateEnvelopeFromMetadata(@event, metadata, subject);
-        
-        if (useOutbox)
+        var topicName = envelope.Topic ?? envelope.Type;
+
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "EventBus.Publish",
+            ActivityKind.Producer,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("event.name", envelope.Type);
+        activity?.SetTag("event.topic", topicName);
+        activity?.SetTag("event.use_outbox", useOutbox);
+
+        try
         {
-            await StoreInOutboxAsync(envelope, cancellationToken);
+            if (useOutbox)
+            {
+                await StoreInOutboxAsync(envelope, cancellationToken);
+            }
+            else
+            {
+                var serialized = EventSerializer.Serialize(envelope);
+                var pubSubName = metadata.PubSubName ?? AetherEventBusOptions.PubSubName;
+                activity?.SetTag("event.pubsub_name", pubSubName);
+                await PublishToBrokerAsync(topicName, pubSubName, serialized, cancellationToken);
+            }
+
+            activity?.SetStatus(ActivityStatusCode.Ok);
         }
-        else
+        catch (Exception ex)
         {
-            var serialized = EventSerializer.Serialize(envelope);
-            // Use PubSubName from metadata or fall back to default from options
-            var pubSubName = metadata.PubSubName ?? AetherEventBusOptions.PubSubName;
-            // Use Topic for routing to the message broker
-            var topicName = envelope.Topic ?? envelope.Type;
-            await PublishToBrokerAsync(topicName, pubSubName, serialized, cancellationToken);
+            RecordException(activity, ex);
+            throw;
         }
     }
 
@@ -155,13 +193,30 @@ public abstract class DistributedEventBusBase(
     /// Publishes a pre-serialized CloudEventEnvelope directly to the broker.
     /// Used internally by the outbox processor to republish stored events.
     /// </summary>
-    public Task PublishEnvelopeAsync(
+    public async Task PublishEnvelopeAsync(
         byte[] serializedEnvelope,
         string topicName,
         string pubSubName,
         CancellationToken cancellationToken = default)
     {
-        return PublishToBrokerAsync(topicName, pubSubName, serializedEnvelope, cancellationToken);
+        using var activity = InfrastructureActivitySource.Source.StartActivity(
+            "EventBus.PublishEnvelope",
+            ActivityKind.Producer,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("event.topic", topicName);
+        activity?.SetTag("event.pubsub_name", pubSubName);
+
+        try
+        {
+            await PublishToBrokerAsync(topicName, pubSubName, serializedEnvelope, cancellationToken);
+            activity?.SetStatus(ActivityStatusCode.Ok);
+        }
+        catch (Exception ex)
+        {
+            RecordException(activity, ex);
+            throw;
+        }
     }
     
     /// <summary>
@@ -183,4 +238,16 @@ public abstract class DistributedEventBusBase(
     /// <param name="serializedEnvelope">The serialized CloudEventEnvelope</param>
     /// <param name="cancellationToken">Cancellation token</param>
     protected abstract Task PublishToBrokerAsync(string topic, string pubSubName, byte[] serializedEnvelope, CancellationToken cancellationToken = default);
+
+    private static void RecordException(Activity? activity, Exception ex)
+    {
+        if (activity == null) return;
+
+        activity.SetStatus(ActivityStatusCode.Error, ex.Message);
+        activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
+        {
+            { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
+            { "exception.message", ex.Message },
+        }));
+    }
 }

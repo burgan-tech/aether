@@ -1,7 +1,9 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Events;
+using BBT.Aether.Telemetry;
 using Dapr.Jobs;
 using Dapr.Jobs.Models;
 using Microsoft.Extensions.Logging;
@@ -37,6 +39,9 @@ public class DaprJobScheduler(
         if (string.IsNullOrWhiteSpace(schedule))
             throw new ArgumentNullException(nameof(schedule));
 
+        using var activity = StartSchedulerActivity("BackgroundJob.Schedule", handlerName, jobName);
+        activity?.SetTag("job.schedule", schedule);
+
         try
         {
             var daprSchedule = ParseSchedule(schedule);
@@ -48,15 +53,18 @@ public class DaprJobScheduler(
             var payloadBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(envelopeObject);
 
             await daprJobsClient.ScheduleJobAsync(
-                jobName: jobName, // Use jobName as the unique identifier in Dapr
+                jobName: jobName,
                 schedule: daprSchedule,
                 payload: new ReadOnlyMemory<byte>(payloadBytes),
                 overwrite: true,
                 cancellationToken: cancellationToken);
+
+            activity?.SetStatus(ActivityStatusCode.Ok);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to schedule Dapr job handler '{HandlerName}' with job name '{JobName}'", handlerName, jobName);
+            RecordException(activity, ex);
             throw new InvalidOperationException($"Failed to schedule job handler '{handlerName}' with job name '{jobName}'.", ex);
         }
     }
@@ -77,15 +85,21 @@ public class DaprJobScheduler(
         if (string.IsNullOrWhiteSpace(newSchedule))
             throw new ArgumentNullException(nameof(newSchedule));
 
+        using var activity = StartSchedulerActivity("BackgroundJob.Schedule.Update", handlerName, jobName);
+        activity?.SetTag("job.schedule", newSchedule);
+
         try
         {
             var jobInfo = await daprJobsClient.GetJobAsync(jobName, cancellationToken);
             await daprJobsClient.DeleteJobAsync(jobName, cancellationToken);
             await ScheduleAsync(handlerName, jobName, newSchedule, jobInfo.Payload, cancellationToken);
+
+            activity?.SetStatus(ActivityStatusCode.Ok);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to update Dapr job handler '{HandlerName}' with job name '{JobName}'", handlerName, jobName);
+            RecordException(activity, ex);
             throw new InvalidOperationException($"Failed to update job handler '{handlerName}' with job name '{jobName}'.", ex);
         }
     }
@@ -99,17 +113,48 @@ public class DaprJobScheduler(
         if (string.IsNullOrWhiteSpace(jobName))
             throw new ArgumentNullException(nameof(jobName));
 
+        using var activity = StartSchedulerActivity("BackgroundJob.Schedule.Delete", handlerName, jobName);
+
         try
         {
             await daprJobsClient.DeleteJobAsync(
-                jobName: jobName, // Use jobName as the unique identifier in Dapr
+                jobName: jobName,
                 cancellationToken: cancellationToken);
+
+            activity?.SetStatus(ActivityStatusCode.Ok);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to delete Dapr job handler '{HandlerName}' with job name '{JobName}'", handlerName, jobName);
+            RecordException(activity, ex);
             throw new InvalidOperationException($"Failed to delete job handler '{handlerName}' with job name '{jobName}'.", ex);
         }
+    }
+
+    private static Activity? StartSchedulerActivity(string operationName, string handlerName, string jobName)
+    {
+        var activity = InfrastructureActivitySource.Source.StartActivity(
+            operationName,
+            ActivityKind.Client,
+            Activity.Current?.Context ?? default);
+
+        activity?.SetTag("job.scheduler", "dapr");
+        activity?.SetTag("job.handler_name", handlerName);
+        activity?.SetTag("job.name", jobName);
+
+        return activity;
+    }
+
+    private static void RecordException(Activity? activity, Exception ex)
+    {
+        if (activity == null) return;
+
+        activity.SetStatus(ActivityStatusCode.Error, ex.Message);
+        activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
+        {
+            { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
+            { "exception.message", ex.Message },
+        }));
     }
 
     /// <summary>
