@@ -13,4 +13,7 @@
     <Project Path="src/BBT.Aether.Mapperly/BBT.Aether.Mapperly.csproj" />
     <Project Path="src/BBT.Aether.TestBase/BBT.Aether.TestBase.csproj" />
   </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/BBT.Aether.Infrastructure.Tests/BBT.Aether.Infrastructure.Tests.csproj" />
+  </Folder>
 </Solution>

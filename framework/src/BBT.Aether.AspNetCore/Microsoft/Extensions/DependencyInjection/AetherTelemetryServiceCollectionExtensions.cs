@@ -163,11 +163,7 @@ public static class AetherTelemetryServiceCollectionExtensions
 
                 if (opts.Tracing.EnableEntityFrameworkCore)
                 {
-                    tracing.AddEntityFrameworkCoreInstrumentation(efOptions =>
-                    {
-                        efOptions.SetDbStatementForText = true;
-                        efOptions.SetDbStatementForStoredProcedure = true;
-                    });
+                    tracing.AddEntityFrameworkCoreInstrumentation();
                 }
                 
                 tracing.AddSource("BBT.Aether.Aspects");

@@ -10,20 +10,23 @@ namespace BBT.Aether.DistributedLock;
 public interface IDistributedLockService
 {
     /// <summary>
-    /// Tries to acquire a lock with the specified resource ID
+    /// Tries to acquire a lock with the specified resource ID.
+    /// Returns a handle that can extend or release the lock, and automatically releases on dispose.
     /// </summary>
     /// <param name="resourceId">The resource ID to lock</param>
     /// <param name="expiryInSeconds">Lock expiry time in seconds</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>True if lock was acquired, false otherwise</returns>
-    Task<IAsyncDisposable?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60, CancellationToken cancellationToken = default);
+    /// <returns>An <see cref="IDistributedLockHandle"/> if the lock was acquired; <c>null</c> otherwise.</returns>
+    Task<IDistributedLockHandle?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Releases a lock with the specified resource ID
+    /// Releases a lock with the specified resource ID.
+    /// Prefer using <see cref="IDistributedLockHandle.ReleaseAsync"/> or disposing the handle instead.
     /// </summary>
     /// <param name="resourceId">The resource ID to unlock</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>True if lock was released, false otherwise</returns>
+    [Obsolete("Use IDistributedLockHandle.ReleaseAsync() or dispose the handle returned by TryAcquireLockAsync. This method uses a static owner and cannot reliably release locks acquired concurrently.")]
     Task<bool> ReleaseLockAsync(string resourceId, CancellationToken cancellationToken = default);
 
     /// <summary>

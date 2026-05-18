@@ -27,4 +27,8 @@
         <ProjectReference Include="..\BBT.Aether.Domain\BBT.Aether.Domain.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+        <InternalsVisibleTo Include="BBT.Aether.Infrastructure.Tests" />
+    </ItemGroup>
+
 </Project>
