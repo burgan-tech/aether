@@ -25,10 +25,10 @@
     <PackageVersion Include="Confluent.Kafka" Version="2.8.0" />
     <PackageVersion Include="Dapper" Version="2.1.35" />
     <!-- Dapr dependencies -->
-    <PackageVersion Include="Dapr.Jobs" Version="1.16.1" />
-    <PackageVersion Include="Dapr.AspNetCore" Version="1.16.1" />
-    <PackageVersion Include="Dapr.Client" Version="1.16.1" />
-    <PackageVersion Include="Dapr.Extensions.Configuration" Version="1.16.1" />
+    <PackageVersion Include="Dapr.Jobs" Version="1.17.9" />
+    <PackageVersion Include="Dapr.AspNetCore" Version="1.17.9" />
+    <PackageVersion Include="Dapr.Client" Version="1.17.9" />
+    <PackageVersion Include="Dapr.Extensions.Configuration" Version="1.17.9" />
     <PackageVersion Include="Devart.Data.Oracle.EFCore" Version="10.4.191.9" />
     <PackageVersion Include="DistributedLock.Core" Version="1.0.8" />
     <PackageVersion Include="DistributedLock.Redis" Version="1.0.3" />
@@ -181,18 +181,18 @@
     <PackageVersion Include="ConfigureAwait.Fody" Version="3.3.2" />
     <PackageVersion Include="Fody" Version="6.9.1" />
     <!-- OpenTelemetry dependencies-->
-    <PackageVersion Include="OpenTelemetry" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Api" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Exporter.Console" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Exporter.Zipkin" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.Http" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.Runtime" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.EntityFrameworkCore" Version="1.11.0-beta.1" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.Process" Version="1.11.0-beta.1" />
-    <PackageVersion Include="Npgsql.OpenTelemetry" Version="8.0.6" />
+    <PackageVersion Include="OpenTelemetry" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Api" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Exporter.Console" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Exporter.Zipkin" Version="1.15.1" />
+    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.15.2" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.Http" Version="1.15.1" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.Runtime" Version="1.15.1" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.EntityFrameworkCore" Version="1.15.1-beta.1" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.Process" Version="1.15.1-beta.1" />
+    <PackageVersion Include="Npgsql.OpenTelemetry" Version="10.0.2" />
     <PackageVersion Include="Elastic.Serilog.Sinks" Version="8.12.3" />
     <!-- OpenApi dependencies -->
     <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.2" />
