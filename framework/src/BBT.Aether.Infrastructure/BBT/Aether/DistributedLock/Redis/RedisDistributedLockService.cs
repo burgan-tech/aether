@@ -17,7 +17,7 @@ public class RedisDistributedLockService(
     IApplicationInfoAccessor applicationInfoAccessor)
     : IDistributedLockService
 {
-    public async Task<IAsyncDisposable?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
+    public async Task<IDistributedLockHandle?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
         CancellationToken cancellationToken = default)
     {
         using var activity = StartLockActivity("DistributedLock.Acquire", resourceId, expiryInSeconds);
@@ -25,7 +25,7 @@ public class RedisDistributedLockService(
         try
         {
             var database = redisConnection.GetDatabase();
-            var lockOwner = GetClientIdentifier();
+            var lockOwner = GenerateUniqueOwner();
             var expiry = TimeSpan.FromSeconds(expiryInSeconds);
 
             var acquired = await database.StringSetAsync(
@@ -41,7 +41,7 @@ public class RedisDistributedLockService(
                     resourceId, lockOwner);
                 activity?.SetTag("lock.acquired", true);
                 activity?.SetStatus(ActivityStatusCode.Ok);
-                return new RedisLockHandle(database, resourceId, lockOwner, logger);
+                return new RedisDistributedLockHandle(database, resourceId, lockOwner, logger);
             }
 
             logger.LogWarning("Failed to acquire Redis lock for resource {ResourceId}", resourceId);
@@ -57,6 +57,7 @@ public class RedisDistributedLockService(
         }
     }
 
+    [Obsolete("Use IDistributedLockHandle.ReleaseAsync() or dispose the handle returned by TryAcquireLockAsync. This method uses a static owner and cannot reliably release locks acquired concurrently.")]
     public async Task<bool> ReleaseLockAsync(string resourceId, CancellationToken cancellationToken = default)
     {
         using var activity = InfrastructureActivitySource.Source.StartActivity(
@@ -70,7 +71,7 @@ public class RedisDistributedLockService(
         try
         {
             var database = redisConnection.GetDatabase();
-            var lockOwner = GetClientIdentifier();
+            var lockOwner = GenerateUniqueOwner();
 
             var script = @"
                 if redis.call('get', KEYS[1]) == ARGV[1] then
@@ -80,8 +81,8 @@ public class RedisDistributedLockService(
                 end";
 
             var result = await database.ScriptEvaluateAsync(script,
-                [resourceId],
-                [lockOwner]
+                [(RedisKey)resourceId],
+                [(RedisValue)lockOwner]
             );
 
             var released = (int)result == 1;
@@ -182,6 +183,11 @@ public class RedisDistributedLockService(
         }
     }
 
+    private static string GenerateUniqueOwner()
+    {
+        return $"{Environment.MachineName}:{Guid.NewGuid():N}";
+    }
+
     private static Activity? StartLockActivity(string operationName, string resourceId, int expiryInSeconds)
     {
         var activity = InfrastructureActivitySource.Source.StartActivity(
@@ -206,12 +212,5 @@ public class RedisDistributedLockService(
             { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
             { "exception.message", ex.Message },
         }));
-    }
-
-    private string GetClientIdentifier()
-    {
-        return
-            ($"{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")}.{applicationInfoAccessor.ApplicationName}.{applicationInfoAccessor.InstanceId}")
-            .ToLowerInvariant();
     }
 }

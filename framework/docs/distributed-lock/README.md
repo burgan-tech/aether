@@ -2,7 +2,7 @@
 
 ## Overview
 
-Coordinates work across multiple application instances to prevent race conditions and duplicate processing. Supports Redis and Dapr implementations with automatic lock expiry.
+Coordinates work across multiple application instances to prevent race conditions and duplicate processing. Supports Redis and Dapr implementations with automatic lock expiry and scope-based lock lifecycle management.
 
 ## Quick Start
 
@@ -23,7 +23,7 @@ services.AddDaprDistributedLock("lockstore");
 
 ## Usage
 
-### ExecuteWithLock Pattern (Recommended)
+### ExecuteWithLock Pattern (Recommended for Short Operations)
 
 ```csharp
 public async Task ProcessOrderAsync(Guid orderId)
@@ -49,7 +49,7 @@ public async Task ProcessOrderAsync(Guid orderId)
 ```csharp
 public async Task<ProcessResult?> ProcessOrderAsync(Guid orderId)
 {
-    return await _lockService.ExecuteWithLockAsync(
+    var (acquired, result) = await _lockService.ExecuteWithLockAsync(
         resourceId: $"order:{orderId}",
         function: async () =>
         {
@@ -59,30 +59,54 @@ public async Task<ProcessResult?> ProcessOrderAsync(Guid orderId)
             return new ProcessResult { Success = true };
         },
         expiryInSeconds: 60);
+
+    return acquired ? result : null;
 }
 ```
 
-### Manual Lock Management
+### Scope-Based Lock Management (Handle API)
+
+Use when you need to hold a lock across multiple operations, extend TTL, or control the lock lifecycle explicitly:
 
 ```csharp
-public async Task ProcessPaymentAsync(Guid paymentId)
+public async Task ProcessPipelineAsync(Guid pipelineId, CancellationToken ct)
 {
-    var resourceId = $"payment:{paymentId}";
-    
-    if (!await _lockService.TryAcquireLockAsync(resourceId, expiryInSeconds: 30))
+    await using var lockHandle = await _lockService.TryAcquireLockAsync(
+        $"pipeline:{pipelineId}", expiryInSeconds: 60, ct);
+
+    if (lockHandle is null)
     {
-        _logger.LogWarning("Could not acquire lock");
+        _logger.LogWarning("Pipeline {Id} is already running", pipelineId);
         return;
     }
-    
-    try
-    {
-        await ProcessPaymentLogicAsync(paymentId);
-    }
-    finally
-    {
-        await _lockService.ReleaseLockAsync(resourceId);
-    }
+
+    // Step 1
+    await ExecuteStepOneAsync(ct);
+
+    // Extend TTL before a long step
+    await lockHandle.ExtendAsync(120, ct);
+
+    // Step 2 (long-running)
+    await ExecuteStepTwoAsync(ct);
+
+    // Lock is automatically released when lockHandle is disposed
+}
+```
+
+### Explicit Release
+
+```csharp
+await using var lockHandle = await _lockService.TryAcquireLockAsync("resource:123", 30);
+if (lockHandle is null) return;
+
+try
+{
+    await DoWorkAsync();
+}
+finally
+{
+    // Explicit release (DisposeAsync also releases if not already done)
+    await lockHandle.ReleaseAsync();
 }
 ```
 
@@ -91,10 +115,17 @@ public async Task ProcessPaymentAsync(Guid paymentId)
 ```csharp
 public interface IDistributedLockService
 {
-    Task<bool> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60, CancellationToken ct = default);
-    Task<bool> ReleaseLockAsync(string resourceId, CancellationToken ct = default);
-    Task<T?> ExecuteWithLockAsync<T>(string resourceId, Func<Task<T>> function, int expiryInSeconds = 60, CancellationToken ct = default);
+    Task<IDistributedLockHandle?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60, CancellationToken ct = default);
+    Task<(bool Acquired, T? Result)> ExecuteWithLockAsync<T>(string resourceId, Func<Task<T>> function, int expiryInSeconds = 60, CancellationToken ct = default);
     Task<bool> ExecuteWithLockAsync(string resourceId, Func<Task> action, int expiryInSeconds = 60, CancellationToken ct = default);
+}
+
+public interface IDistributedLockHandle : IAsyncDisposable
+{
+    string LockKey { get; }
+    string Owner { get; }
+    Task<bool> ExtendAsync(int leaseSeconds, CancellationToken ct = default);
+    Task ReleaseAsync(CancellationToken ct = default);
 }
 ```
 
@@ -128,19 +159,42 @@ public async Task<Product> GetProductAsync(Guid id)
     var cached = await _cache.GetAsync<Product>($"product:{id}");
     if (cached != null) return cached;
     
-    return await _lockService.ExecuteWithLockAsync(
+    var (acquired, product) = await _lockService.ExecuteWithLockAsync(
         $"cache:product:{id}",
         async () =>
         {
-            // Check again after acquiring lock
             cached = await _cache.GetAsync<Product>($"product:{id}");
             if (cached != null) return cached;
             
-            var product = await _repository.GetAsync(id);
-            await _cache.SetAsync($"product:{id}", product);
-            return product;
+            var p = await _repository.GetAsync(id);
+            await _cache.SetAsync($"product:{id}", p);
+            return p;
         },
-        expiryInSeconds: 10) ?? throw new EntityNotFoundException(typeof(Product), id);
+        expiryInSeconds: 10);
+
+    return product ?? throw new EntityNotFoundException(typeof(Product), id);
+}
+```
+
+### Long-Running Pipeline with TTL Extension
+
+```csharp
+public async Task RunMigrationAsync(CancellationToken ct)
+{
+    await using var lockHandle = await _lockService.TryAcquireLockAsync(
+        "schema-migration", expiryInSeconds: 120, ct);
+
+    if (lockHandle is null)
+    {
+        _logger.LogInformation("Migration is already running on another instance");
+        return;
+    }
+
+    foreach (var step in migrationSteps)
+    {
+        await lockHandle.ExtendAsync(120, ct);
+        await step.ExecuteAsync(ct);
+    }
 }
 ```
 
@@ -166,6 +220,7 @@ All lock operations automatically emit OpenTelemetry spans via the `BBT.Aether.I
 Span names:
 - `DistributedLock.Acquire` - lock acquisition attempts
 - `DistributedLock.Release` - explicit or dispose-based lock release
+- `DistributedLock.Extend` - TTL extension via handle
 - `DistributedLock.Execute` - `ExecuteWithLockAsync` (covers acquire + execute + release)
 
 Tags added to each span:
@@ -178,14 +233,16 @@ Tags added to each span:
 | `lock.expiry_seconds` | Lock TTL |
 | `lock.acquired` | Whether the lock was successfully obtained |
 | `lock.released` | Whether the lock was successfully released |
+| `lock.extended` | Whether the TTL was successfully extended |
 
 Example trace hierarchy:
 
 ```
 [ASP.NET Core] POST /api/orders
   [BBT.Aether.Aspects] OrderService.ProcessOrder
-    [BBT.Aether.Infrastructure] DistributedLock.Execute
-      [HTTP Client] POST http://localhost:3500/v1.0-alpha1/lock/lockstore
+    [BBT.Aether.Infrastructure] DistributedLock.Acquire
+    [BBT.Aether.Infrastructure] DistributedLock.Extend
+    [BBT.Aether.Infrastructure] DistributedLock.Release
 ```
 
 ## Best Practices
@@ -194,7 +251,9 @@ Example trace hierarchy:
 2. **Use descriptive resource IDs** - `order:payment:{orderId}`, `report:daily:{date}`
 3. **Handle lock failures** - Log, queue for retry, or skip gracefully
 4. **Keep critical sections short** - Do non-critical work outside the lock
-5. **Prefer ExecuteWithLock** - Automatic release on completion/exception
+5. **Prefer ExecuteWithLock for short operations** - Automatic release on completion/exception
+6. **Use Handle API for long-running scopes** - Call `ExtendAsync` to prevent TTL expiry
+7. **Always use `await using`** - Guarantees lock release even on exceptions
 
 ## Related Features
 

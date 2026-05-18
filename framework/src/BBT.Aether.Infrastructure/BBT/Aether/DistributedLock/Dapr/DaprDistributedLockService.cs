@@ -20,22 +20,23 @@ public class DaprDistributedLockService(
     string storeName)
     : IDistributedLockService
 {
-    public async Task<IAsyncDisposable?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
+    public async Task<IDistributedLockHandle?> TryAcquireLockAsync(string resourceId, int expiryInSeconds = 60,
         CancellationToken cancellationToken = default)
     {
         using var activity = StartLockActivity("DistributedLock.Acquire", resourceId, expiryInSeconds);
 
         try
         {
-            var lockOwner = $"{GetClientIdentifier()}";
+            var lockOwner = GenerateUniqueOwner();
             var resourceLock =
                 await daprClient.Lock(storeName, resourceId, lockOwner, expiryInSeconds, cancellationToken);
-            if (resourceLock != null && resourceLock.Success)
+            if (resourceLock is { Success: true })
             {
-                logger.LogDebug("Successfully acquired lock for resource {ResourceId}", resourceId);
+                logger.LogDebug("Successfully acquired lock for resource {ResourceId} with owner {Owner}",
+                    resourceId, lockOwner);
                 activity?.SetTag("lock.acquired", true);
                 activity?.SetStatus(ActivityStatusCode.Ok);
-                return resourceLock;
+                return new DaprDistributedLockHandle(daprClient, storeName, resourceId, lockOwner, logger);
             }
 
             logger.LogWarning("Failed to acquire lock for resource {ResourceId}", resourceId);
@@ -51,6 +52,7 @@ public class DaprDistributedLockService(
         }
     }
 
+    [Obsolete("Use IDistributedLockHandle.ReleaseAsync() or dispose the handle returned by TryAcquireLockAsync. This method uses a static owner and cannot reliably release locks acquired concurrently.")]
     public async Task<bool> ReleaseLockAsync(string resourceId, CancellationToken cancellationToken = default)
     {
         using var activity = InfrastructureActivitySource.Source.StartActivity(
@@ -64,7 +66,7 @@ public class DaprDistributedLockService(
 
         try
         {
-            var lockOwner = $"{GetClientIdentifier()}";
+            var lockOwner = GenerateUniqueOwner();
             await daprClient.Unlock(storeName, resourceId, lockOwner, cancellationToken);
             activity?.SetTag("lock.released", true);
             activity?.SetStatus(ActivityStatusCode.Ok);
@@ -85,7 +87,7 @@ public class DaprDistributedLockService(
 
         try
         {
-            var lockOwner = $"{GetClientIdentifier()}";
+            var lockOwner = GenerateUniqueOwner();
             await using var resourceLock =
                 await daprClient.Lock(storeName, resourceId, lockOwner, expiryInSeconds, cancellationToken);
             if (resourceLock == null || !resourceLock.Success)
@@ -117,7 +119,7 @@ public class DaprDistributedLockService(
 
         try
         {
-            var lockOwner = $"{GetClientIdentifier()}";
+            var lockOwner = GenerateUniqueOwner();
             await using var resourceLock =
                 await daprClient.Lock(storeName, resourceId, lockOwner, expiryInSeconds, cancellationToken);
             if (resourceLock == null || !resourceLock.Success)
@@ -140,6 +142,11 @@ public class DaprDistributedLockService(
             RecordException(activity, ex);
             throw;
         }
+    }
+
+    private static string GenerateUniqueOwner()
+    {
+        return $"{Environment.MachineName}:{Guid.NewGuid():N}";
     }
 
     private Activity? StartLockActivity(string operationName, string resourceId, int expiryInSeconds)
@@ -167,12 +174,5 @@ public class DaprDistributedLockService(
             { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
             { "exception.message", ex.Message },
         }));
-    }
-
-    private string GetClientIdentifier()
-    {
-        return
-            ($"{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")}.{applicationInfoAccessor.ApplicationName}")
-            .ToLowerInvariant();
     }
 }
