@@ -26,6 +26,7 @@ public interface IJobScheduler
         string jobName,
         string schedule,
         ReadOnlyMemory<byte> payload,
+        JobScheduleFailurePolicy? failurePolicyOptions = null,
         CancellationToken cancellationToken = default);
     
     /// <summary>
