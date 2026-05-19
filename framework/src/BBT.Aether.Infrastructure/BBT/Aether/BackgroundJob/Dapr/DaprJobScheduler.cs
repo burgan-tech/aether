@@ -28,6 +28,7 @@ public class DaprJobScheduler(
         string jobName,
         string schedule,
         ReadOnlyMemory<byte> payload,
+        JobScheduleFailurePolicy? failurePolicyOptions = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(handlerName))
@@ -57,6 +58,7 @@ public class DaprJobScheduler(
                 schedule: daprSchedule,
                 payload: new ReadOnlyMemory<byte>(payloadBytes),
                 overwrite: true,
+                failurePolicyOptions: MapFailurePolicy(failurePolicyOptions),
                 cancellationToken: cancellationToken);
 
             activity?.SetStatus(ActivityStatusCode.Ok);
@@ -92,7 +94,7 @@ public class DaprJobScheduler(
         {
             var jobInfo = await daprJobsClient.GetJobAsync(jobName, cancellationToken);
             await daprJobsClient.DeleteJobAsync(jobName, cancellationToken);
-            await ScheduleAsync(handlerName, jobName, newSchedule, jobInfo.Payload, cancellationToken);
+            await ScheduleAsync(handlerName, jobName, newSchedule, jobInfo.Payload, cancellationToken: cancellationToken);
 
             activity?.SetStatus(ActivityStatusCode.Ok);
         }
@@ -156,6 +158,16 @@ public class DaprJobScheduler(
             { "exception.message", ex.Message },
         }));
     }
+
+    private static IJobFailurePolicyOptions? MapFailurePolicy(JobScheduleFailurePolicy? policy) =>
+        policy switch
+        {
+            null => null,
+            { PolicyType: FailurePolicyType.Drop } => new JobFailurePolicyDropOptions(),
+            { PolicyType: FailurePolicyType.Constant, Interval: { } interval } =>
+                new JobFailurePolicyConstantOptions(interval) { MaxRetries = policy.MaxRetries },
+            _ => null
+        };
 
     /// <summary>
     /// Parses a schedule string into a DaprJobSchedule.
