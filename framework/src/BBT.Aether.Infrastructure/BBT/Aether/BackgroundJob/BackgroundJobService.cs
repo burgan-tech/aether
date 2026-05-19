@@ -43,6 +43,7 @@ public sealed class BackgroundJobService(
         TPayload payload,
         string schedule,
         Dictionary<string, object>? metadata = null,
+        JobScheduleFailurePolicy? failurePolicyOptions = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(handlerName))
@@ -116,7 +117,7 @@ public sealed class BackgroundJobService(
             // This prevents race condition where scheduler triggers before DB write completes
             uow.OnCompleted(async _ =>
             {
-                await jobScheduler.ScheduleAsync(handlerName, jobName, schedule, payloadBytes, cancellationToken);
+                await jobScheduler.ScheduleAsync(handlerName, jobName, schedule, payloadBytes, failurePolicyOptions, cancellationToken);
                 
                 logger.LogInformation(
                     "Successfully scheduled job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
@@ -125,10 +126,6 @@ public sealed class BackgroundJobService(
         
             // Commit transaction - OnCompleted handlers run after this completes
             await uow.CommitAsync(cancellationToken);
-
-            logger.LogInformation(
-                "Successfully enqueued job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
-                handlerName, jobName, jobId);
 
             activity?.SetStatus(ActivityStatusCode.Ok);
             return jobId;
@@ -195,7 +192,7 @@ public sealed class BackgroundJobService(
             // Reschedule with new schedule
             var payloadBytes = eventSerializer.Serialize(envelope);
             await jobScheduler.ScheduleAsync(jobInfo.HandlerName, jobInfo.JobName, newSchedule, payloadBytes,
-                cancellationToken);
+                cancellationToken: cancellationToken);
 
             // Save updated entity
             await jobStore.SaveAsync(jobInfo, cancellationToken);

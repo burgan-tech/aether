@@ -34,6 +34,7 @@ public interface IBackgroundJobService
         TPayload payload,
         string schedule,
         Dictionary<string, object>? metadata = null,
+        JobScheduleFailurePolicy? failurePolicyOptions = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
