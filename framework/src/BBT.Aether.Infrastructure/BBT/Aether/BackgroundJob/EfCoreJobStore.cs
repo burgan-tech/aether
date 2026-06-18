@@ -40,11 +40,17 @@ public class EfCoreJobStore<TDbContext> : IJobStore
 
         if (existingJob != null)
         {
-            // Update existing job
-            jobInfo.ModifiedAt = DateTime.UtcNow;
-            _dbContext.Entry(existingJob).CurrentValues.SetValues(jobInfo);
-            existingJob.ExtraProperties = jobInfo.ExtraProperties;
+            // Update mutable fields only — never touch the key (Id) or creation audit.
+            // Copying Id via SetValues onto a tracked entity throws:
+            // "The property 'BackgroundJobInfo.Id' is part of a key and so cannot be modified".
+            existingJob.ExpressionValue = jobInfo.ExpressionValue;
             existingJob.Payload = jobInfo.Payload;
+            existingJob.Status = jobInfo.Status;
+            existingJob.HandledTime = jobInfo.HandledTime;
+            existingJob.RetryCount = jobInfo.RetryCount;
+            existingJob.LastError = jobInfo.LastError;
+            existingJob.ExtraProperties = jobInfo.ExtraProperties;
+            existingJob.ModifiedAt = DateTime.UtcNow;
         }
         else
         {
