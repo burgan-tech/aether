@@ -22,6 +22,17 @@ jobs:
         with:
           dotnet-version: |
             10.0.2xx
+      # PostSharp weaves BBT.Aether.Aspects against the ASP.NET Core shared
+      # framework and requires the Microsoft.AspNetCore.App *runtime* matching
+      # the principal .NET runtime to be present on disk (it does not roll
+      # forward). Install the latest 10.0 ASP.NET Core runtime into the same
+      # location used by setup-dotnet.
+      - name: Install ASP.NET Core runtime (required by PostSharp weaving)
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile dotnet-install.ps1
+          ./dotnet-install.ps1 -Runtime aspnetcore -Channel 10.0 -InstallDir "$env:DOTNET_ROOT"
+          dotnet --list-runtimes
       - name: Cache SonarQube Cloud packages
         uses: actions/cache@v4
         with:
