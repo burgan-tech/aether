@@ -44,6 +44,8 @@ public sealed class BackgroundJobService(
         string schedule,
         Dictionary<string, object>? metadata = null,
         JobScheduleFailurePolicy? failurePolicyOptions = null,
+        bool useAmbientUnitOfWork = false,
+        Guid? jobId = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(handlerName))
@@ -71,9 +73,10 @@ public sealed class BackgroundJobService(
             "Enqueueing job handler '{HandlerName}' with job name '{JobName}' and schedule '{Schedule}'",
             handlerName, jobName, schedule);
 
-        // Create job entity
-        var jobId = guidGenerator.Create();
-        activity?.SetTag("job.id", jobId.ToString());
+        // Create job entity. A caller-supplied id (when present) lets the caller reuse a single
+        // correlation id for its own tracking row; otherwise generate one.
+        var effectiveJobId = jobId ?? guidGenerator.Create();
+        activity?.SetTag("job.id", effectiveJobId.ToString());
 
         // Convert metadata to nullable dictionary for ExtraPropertyDictionary
         var extraProperties = new ExtraPropertyDictionary();
@@ -94,7 +97,7 @@ public sealed class BackgroundJobService(
             DataContentType = "application/json"
         };
 
-        var jobInfo = new BackgroundJobInfo(jobId, handlerName, jobName)
+        var jobInfo = new BackgroundJobInfo(effectiveJobId, handlerName, jobName)
         {
             ExpressionValue = schedule,
             Payload = eventSerializer.SerializeToElement(envelope),
@@ -104,6 +107,42 @@ public sealed class BackgroundJobService(
 
         // Serialize envelope for scheduler
         var payloadBytes = eventSerializer.Serialize(envelope);
+
+        // Transactional enqueue: when the caller has an ambient unit of work and opts in, persist the
+        // job record INTO that ambient UoW (no own RequiresNew transaction, no self-commit) and defer
+        // the scheduler call to its OnCompleted. The job row then commits atomically with the caller's
+        // business transaction and the scheduler only fires after a successful commit — avoiding
+        // nested-UoW / shared-DbContext collisions ("A second operation was started on this context
+        // instance") and orphaned scheduled jobs on rollback.
+        if (useAmbientUnitOfWork && uowManager.Current is { } ambientUow)
+        {
+            await jobStore.SaveAsync(jobInfo, cancellationToken);
+
+            ambientUow.OnCompleted(async _ =>
+            {
+                try
+                {
+                    await jobScheduler.ScheduleAsync(
+                        handlerName, jobName, schedule, payloadBytes, failurePolicyOptions, cancellationToken);
+
+                    logger.LogInformation(
+                        "Successfully scheduled job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
+                        handlerName, jobName, effectiveJobId);
+                }
+                catch (Exception ex)
+                {
+                    // The business transaction is already committed but the scheduler call failed.
+                    // OnCompleted handler exceptions are swallowed by the UoW, so log loudly here —
+                    // recovery (re-enqueue of the pending job intent) is the caller's responsibility.
+                    logger.LogError(ex,
+                        "Failed to schedule job handler '{HandlerName}' with job name '{JobName}' after commit. Entity ID: {EntityId}",
+                        handlerName, jobName, effectiveJobId);
+                }
+            });
+
+            activity?.SetStatus(ActivityStatusCode.Ok);
+            return effectiveJobId;
+        }
 
         await using var uow = await uowManager.BeginAsync(
             options: new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew },
@@ -121,14 +160,14 @@ public sealed class BackgroundJobService(
                 
                 logger.LogInformation(
                     "Successfully scheduled job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
-                    handlerName, jobName, jobId);
+                    handlerName, jobName, effectiveJobId);
             });
         
             // Commit transaction - OnCompleted handlers run after this completes
             await uow.CommitAsync(cancellationToken);
 
             activity?.SetStatus(ActivityStatusCode.Ok);
-            return jobId;
+            return effectiveJobId;
         }
         catch (Exception ex)
         {
