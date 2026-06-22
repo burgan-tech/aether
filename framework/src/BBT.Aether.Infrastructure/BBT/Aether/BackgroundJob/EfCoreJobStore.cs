@@ -143,4 +143,86 @@ public class EfCoreJobStore<TDbContext> : IJobStore
 
         // SaveChanges removed - will be flushed by UoW Commit or calling code
     }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryTransitionStatusAsync(Guid id, BackgroundJobStatus from, BackgroundJobStatus to,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+
+        // Conditional UPDATE: provider-agnostic optimistic-concurrency guard. The WHERE clause pins
+        // the current status, so concurrent claims race on a single atomic row update — exactly one
+        // wins. Flows through the UoW's shared connection (search_path interceptor sets schema first).
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.Status == from)
+            .ExecuteUpdateAsync(s => s.SetProperty(j => j.Status, to), cancellationToken);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<IReadOnlyList<BackgroundJobInfo>> GetDueForArmingAsync(DateTime nowUtc, int batchSize,
+        CancellationToken cancellationToken = default)
+    {
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
+            .Where(j => j.Status == BackgroundJobStatus.Pending
+                        || (j.Status == BackgroundJobStatus.Retrying && j.NextRetryAt != null && j.NextRetryAt <= nowUtc))
+            .OrderBy(j => j.NextRetryAt)
+            .Take(batchSize)
+            .ToListAsync(cancellationToken);
+    }
+
+    /// <inheritdoc/>
+    public async Task MarkRetryingAsync(Guid id, DateTime nextRetryAtUtc, string? error,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var job = await dbContext.BackgroundJobs
+            .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
+
+        if (job == null)
+            throw new InvalidOperationException($"Job with id '{id}' not found.");
+
+        job.Status = BackgroundJobStatus.Retrying;
+        job.RetryCount++;
+        job.NextRetryAt = nextRetryAtUtc;
+        job.LastError = error;
+        job.HandledTime = DateTime.UtcNow;
+        job.ModifiedAt = DateTime.UtcNow;
+
+        // SaveChanges removed - will be flushed by UoW Commit or calling code
+    }
+
+    /// <inheritdoc/>
+    public async Task MarkRecurringRanAsync(Guid id, DateTime ranAtUtc, string? error,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var job = await dbContext.BackgroundJobs
+            .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
+
+        if (job == null)
+            throw new InvalidOperationException($"Job with id '{id}' not found.");
+
+        job.Status = BackgroundJobStatus.Scheduled;
+        job.LastRunAt = ranAtUtc;
+        if (error != null)
+        {
+            job.LastError = error;
+            job.RetryCount++;
+        }
+        job.ModifiedAt = DateTime.UtcNow;
+
+        // SaveChanges removed - will be flushed by UoW Commit or calling code
+    }
 }

@@ -86,10 +86,58 @@ public interface IJobStore
     /// <returns>A task representing the asynchronous update operation.</returns>
     /// <exception cref="ArgumentException">Thrown when id is empty.</exception>
     Task UpdateStatusAsync(
-        Guid id, 
-        BackgroundJobStatus status, 
-        DateTime? handledTime = null, 
-        string? error = null, 
+        Guid id,
+        BackgroundJobStatus status,
+        DateTime? handledTime = null,
+        string? error = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically transitions a job from one status to another. Returns true iff a row was
+    /// updated (false ⇒ the job was not in <paramref name="from"/> — another worker moved it first,
+    /// the concurrency guard).
+    /// </summary>
+    /// <param name="id">The unique entity identifier of the job to transition.</param>
+    /// <param name="from">The status the job must currently be in for the transition to apply.</param>
+    /// <param name="to">The status to set the job to.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>True if a row was updated; otherwise false.</returns>
+    Task<bool> TryTransitionStatusAsync(Guid id, BackgroundJobStatus from, BackgroundJobStatus to,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Jobs due for arming: status Pending, or Retrying with NextRetryAt &lt;= nowUtc.
+    /// Ordered by NextRetryAt ascending, limited to batchSize.
+    /// </summary>
+    /// <param name="nowUtc">The current UTC time used to evaluate retry due-ness.</param>
+    /// <param name="batchSize">The maximum number of jobs to return.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>The due jobs, ordered by NextRetryAt ascending.</returns>
+    Task<IReadOnlyList<BackgroundJobInfo>> GetDueForArmingAsync(DateTime nowUtc, int batchSize,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Records a failed one-shot attempt: increments RetryCount, sets NextRetryAt + LastError,
+    /// HandledTime, and status = Retrying.
+    /// </summary>
+    /// <param name="id">The unique entity identifier of the job.</param>
+    /// <param name="nextRetryAtUtc">The UTC time at which the job should next be armed.</param>
+    /// <param name="error">The error message from the failed attempt, if any.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    Task MarkRetryingAsync(Guid id, DateTime nextRetryAtUtc, string? error,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Records a recurring job's run: status back to Scheduled, sets LastRunAt, increments
+    /// RetryCount and sets LastError only when <paramref name="error"/> is non-null.
+    /// </summary>
+    /// <param name="id">The unique entity identifier of the job.</param>
+    /// <param name="ranAtUtc">The UTC time at which the job ran.</param>
+    /// <param name="error">The error message from the run, if any.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    Task MarkRecurringRanAsync(Guid id, DateTime ranAtUtc, string? error,
         CancellationToken cancellationToken = default);
 }
 
