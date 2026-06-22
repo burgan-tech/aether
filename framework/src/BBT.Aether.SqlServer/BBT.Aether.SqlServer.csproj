@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <Import Project="..\..\..\common.props" />
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <WarningsAsErrors>Nullable</WarningsAsErrors>
+        <AssemblyName>BBT.Aether.SqlServer</AssemblyName>
+        <PackageId>BBT.Aether.SqlServer</PackageId>
+        <IsPackable>true</IsPackable>
+        <OutputType>Library</OutputType>
+        <RootNamespace />
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\BBT.Aether.Infrastructure\BBT.Aether.Infrastructure.csproj" />
+    </ItemGroup>
+
+</Project>
