@@ -7,6 +7,7 @@ using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Telemetry;
+using BBT.Aether.Uow;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -54,23 +55,38 @@ public sealed class DaprJobExecutionBridge(
 
             using (schemaScope)
             {
+                var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
                 var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
-                var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
 
-                if (jobInfo == null)
+                Guid jobId;
+                string handlerName;
+
+                // The provider-backed jobStore read needs an ambient UoW; wrap just the lookup. The
+                // dispatcher (called below) opens its own UoWs (claim, run, outcome), so it stays outside this one.
+                await using (var uow = uowManager.Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
                 {
-                    logger.LogWarning(
-                        "Job '{JobName}' not found in Scheduled state — it may have already been completed, failed, or cancelled",
-                        jobName);
-                    activity?.SetStatus(ActivityStatusCode.Ok);
-                    return;
+                    var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
+
+                    if (jobInfo == null)
+                    {
+                        logger.LogWarning(
+                            "Job '{JobName}' not found in Scheduled state — it may have already been completed, failed, or cancelled",
+                            jobName);
+                        activity?.SetStatus(ActivityStatusCode.Ok);
+                        await uow.CommitAsync(cancellationToken);
+                        return;
+                    }
+
+                    activity?.SetTag("job.handler_name", jobInfo.HandlerName);
+                    activity?.SetTag("job.id", jobInfo.Id.ToString());
+                    jobId = jobInfo.Id;
+                    handlerName = jobInfo.HandlerName;
+                    await uow.CommitAsync(cancellationToken);
                 }
 
-                activity?.SetTag("job.handler_name", jobInfo.HandlerName);
-                activity?.SetTag("job.id", jobInfo.Id.ToString());
-
-                // Dispatch to handler with extracted data payload
-                await jobDispatcher.DispatchAsync(jobInfo.Id, jobInfo.HandlerName, dataPayload, cancellationToken);
+                // Dispatch to handler with extracted data payload. The dispatcher opens its own UoWs.
+                await jobDispatcher.DispatchAsync(jobId, handlerName, dataPayload, cancellationToken);
 
                 activity?.SetStatus(ActivityStatusCode.Ok);
             }
