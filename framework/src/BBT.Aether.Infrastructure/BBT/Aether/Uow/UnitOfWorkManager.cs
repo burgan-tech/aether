@@ -42,19 +42,22 @@ public sealed class UnitOfWorkManager(
 
         var existing = ambient.GetActiveUnitOfWork() as UnitOfWorkScope;
 
-        // Handle Required scope - participate in existing UoW if available
+        // Handle Required scope - participate in existing UoW if available.
+        // This scope does NOT own the shared root; the scope that created it disposes it.
         if (options.Scope == UnitOfWorkScopeOption.Required && existing != null)
         {
             return new UnitOfWorkScope(
-                existing.Root, 
-                ambient);
+                existing.Root,
+                ambient,
+                ownsRoot: false);
         }
 
-        // Create new root UoW (for RequiresNew or when no existing UoW for Required)
+        // Create new root UoW (for RequiresNew or when no existing UoW for Required).
+        // This scope owns the new root and is responsible for disposing it.
         var eventDispatcher = serviceProvider.GetService<IDomainEventDispatcher>();
         var root = new CompositeUnitOfWork(serviceProvider, eventDispatcher, domainEventOptions);
         await root.InitializeAsync(options, cancellationToken);
-        return new UnitOfWorkScope(root, ambient);
+        return new UnitOfWorkScope(root, ambient, ownsRoot: true);
     }
 
     /// <inheritdoc />
@@ -70,21 +73,24 @@ public sealed class UnitOfWorkManager(
 
         var existing = ambient.GetActiveUnitOfWork() as UnitOfWorkScope;
 
-        // Handle Required scope - participate in existing UoW if available
+        // Handle Required scope - participate in existing UoW if available.
+        // This scope does NOT own the shared root; the scope that created it disposes it.
         if (options.Scope == UnitOfWorkScopeOption.Required && existing != null)
         {
             return new UnitOfWorkScope(
                 existing.Root,
-                ambient);
+                ambient,
+                ownsRoot: false);
         }
 
         // Create new root UoW (for RequiresNew or when no existing UoW for Required).
         // Everything here is synchronous, so the `new UnitOfWorkScope(root, ambient)` ambient write
         // runs in the caller's frame and propagates into the caller's continuations.
+        // This scope owns the new root and is responsible for disposing it.
         var eventDispatcher = serviceProvider.GetService<IDomainEventDispatcher>();
         var root = new CompositeUnitOfWork(serviceProvider, eventDispatcher, domainEventOptions);
         root.InitializeCore(options);
-        return new UnitOfWorkScope(root, ambient);
+        return new UnitOfWorkScope(root, ambient, ownsRoot: true);
     }
 
     /// <inheritdoc />
@@ -95,20 +101,23 @@ public sealed class UnitOfWorkManager(
         // Check if we can reuse existing prepared UoW with same name
         if (!requiresNew && current != null && current.IsPreparedFor(preparationName))
         {
-            // Return a new scope on the same prepared UoW
+            // Return a new scope on the same prepared UoW. It shares the existing root and
+            // therefore does NOT own it; the original preparing scope disposes the root.
             if (current is UnitOfWorkScope existingScope)
             {
                 return new UnitOfWorkScope(
-                    existingScope.Root, 
-                    ambient);
+                    existingScope.Root,
+                    ambient,
+                    ownsRoot: false);
             }
         }
 
-        // Create new prepared UoW
+        // Create new prepared UoW. This scope owns the new root and disposes it (e.g. the
+        // request-path middleware's `await using` scope tears the root down at request end).
         var eventDispatcher = serviceProvider.GetService<IDomainEventDispatcher>();
         var root = new CompositeUnitOfWork(serviceProvider, eventDispatcher, domainEventOptions);
 
-        var scope = new UnitOfWorkScope(root, ambient);
+        var scope = new UnitOfWorkScope(root, ambient, ownsRoot: true);
         scope.SetOuter(current);
         scope.Prepare(preparationName);
 

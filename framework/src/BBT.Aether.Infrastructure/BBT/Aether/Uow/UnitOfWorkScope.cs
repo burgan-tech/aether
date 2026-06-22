@@ -16,18 +16,29 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     private readonly CompositeUnitOfWork _root;
     private readonly IAmbientUnitOfWorkAccessor _accessor;
     private readonly IUnitOfWork? _previousAmbient;
+    private readonly bool _ownsRoot;
     private UnitOfWorkOptions? _options;
     private IUnitOfWork? _outer;
     private bool _isPrepared;
     private string? _preparationName;
     private bool _isDisposed;
 
+    /// <param name="root">The composite unit of work this scope delegates to.</param>
+    /// <param name="accessor">The ambient unit of work accessor.</param>
+    /// <param name="ownsRoot">
+    /// When <c>true</c>, this scope created the root and is responsible for disposing it on
+    /// <see cref="DisposeAsync"/>. When <c>false</c> (a participating <c>Required</c> scope that
+    /// shares an existing root, or a scope on an existing prepared root), disposing this scope only
+    /// restores ambient and must NOT tear down the shared root.
+    /// </param>
     public UnitOfWorkScope(
         CompositeUnitOfWork root,
-        IAmbientUnitOfWorkAccessor accessor)
+        IAmbientUnitOfWorkAccessor accessor,
+        bool ownsRoot = false)
     {
         _root = root;
         _accessor = accessor;
+        _ownsRoot = ownsRoot;
         _previousAmbient = accessor.Current;
 
         // Set this scope as the ambient unit of work
@@ -160,20 +171,26 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     }
 
     /// <inheritdoc />
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_isDisposed)
         {
-            return ValueTask.CompletedTask;
+            return;
         }
 
         _isDisposed = true;
-        
-        // Only restore ambient context - never dispose root
-        // CompositeUnitOfWork manages its own lifecycle
+
+        // Restore ambient context first so the outer scope becomes current again before the
+        // (owned) root is torn down. A participating Required scope (ownsRoot == false) does
+        // ONLY this and must never dispose the shared root.
         _accessor.Current = _previousAmbient;
-        
-        return ValueTask.CompletedTask;
+
+        // The owning scope is responsible for disposing the root exactly once. The root's
+        // DisposeAsync is itself idempotent, but we only invoke it from the owner.
+        if (_ownsRoot)
+        {
+            await _root.DisposeAsync();
+        }
     }
 
     /// <inheritdoc />

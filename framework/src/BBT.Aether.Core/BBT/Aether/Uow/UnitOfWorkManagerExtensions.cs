@@ -24,7 +24,9 @@ public static class UnitOfWorkManagerExtensions
         UnitOfWorkOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        await using var scope = await uowManager.BeginAsync(options, cancellationToken);
+        // Synchronous begin so the unit of work is ambient in this frame for the user action,
+        // which resolves repositories/providers that depend on the ambient UoW.
+        await using var scope = uowManager.Begin(options);
         await action(cancellationToken);
         await scope.CommitAsync(cancellationToken);
     }
@@ -46,7 +48,9 @@ public static class UnitOfWorkManagerExtensions
         UnitOfWorkOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        await using var scope = await uowManager.BeginAsync(options, cancellationToken);
+        // Synchronous begin so the unit of work is ambient in this frame for the user action,
+        // which resolves repositories/providers that depend on the ambient UoW.
+        await using var scope = uowManager.Begin(options);
         var result = await action(cancellationToken);
         await scope.CommitAsync(cancellationToken);
         return result;

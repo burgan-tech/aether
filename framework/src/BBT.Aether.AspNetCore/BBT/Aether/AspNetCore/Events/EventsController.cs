@@ -67,8 +67,10 @@ public abstract class EventsController(
 
             using (schemaScope)
             {
-                // Step 4: Open UoW for storing the event (with schema context set)
-                await using var uow = await UnitOfWorkManager.BeginRequiresNew(cancellationToken);
+                // Step 4: Open UoW for storing the event (with schema context set).
+                // Use the SYNCHRONOUS begin so the unit of work becomes ambient in this caller's
+                // frame; the provider-backed inbox store resolves its DbContext via the ambient UoW.
+                await using var uow = UnitOfWorkManager.BeginRequiresNew();
 
                 // Step 5: Check inbox for duplicate (idempotency)
                 if (await InboxStore.HasProcessedAsync(eventId, cancellationToken))
