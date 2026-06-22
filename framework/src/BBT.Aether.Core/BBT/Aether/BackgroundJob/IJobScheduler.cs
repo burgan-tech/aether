@@ -30,21 +30,27 @@ public interface IJobScheduler
         CancellationToken cancellationToken = default);
     
     /// <summary>
-    /// Updates the schedule of an existing background job.
+    /// Arms a one-time trigger that fires once at <paramref name="dueAtUtc"/>. Used for retry re-arming
+    /// (exponential backoff) and one-shot delayed jobs. Idempotent (overwrites any existing job with the
+    /// same name).
     /// </summary>
-    /// <param name="handlerName">The name of the handler type.</param>
-    /// <param name="jobName">The unique job name for the external scheduler.</param>
-    /// <param name="newSchedule">The new schedule expression.</param>
+    /// <param name="handlerName">The name of the handler type (e.g., "SendEmail", "GenerateReport").</param>
+    /// <param name="jobName">The unique job name for the external scheduler (e.g., "send-email-order-123").</param>
+    /// <param name="dueAtUtc">The UTC instant at which the job should fire exactly once.</param>
+    /// <param name="payload">The serialized job payload data.</param>
+    /// <param name="failurePolicy">Optional failure policy applied to the armed trigger.</param>
     /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
-    /// <returns>A task representing the asynchronous update operation.</returns>
+    /// <returns>A task representing the asynchronous scheduling operation.</returns>
     /// <exception cref="ArgumentNullException">Thrown when any required parameter is null.</exception>
-    /// <exception cref="InvalidOperationException">Thrown when the job doesn't exist or update fails.</exception>
-    Task UpdateScheduleAsync(
+    /// <exception cref="InvalidOperationException">Thrown when the scheduler is unavailable or scheduling fails.</exception>
+    Task ScheduleOneShotAsync(
         string handlerName,
         string jobName,
-        string newSchedule,
+        DateTime dueAtUtc,
+        ReadOnlyMemory<byte> payload,
+        JobScheduleFailurePolicy? failurePolicy = null,
         CancellationToken cancellationToken = default);
-    
+
     /// <summary>
     /// Deletes a scheduled background job from the scheduler.
     /// </summary>
