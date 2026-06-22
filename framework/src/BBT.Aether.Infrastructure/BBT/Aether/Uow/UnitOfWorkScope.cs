@@ -49,7 +49,9 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     public Guid Id => _root.Id;
 
     /// <inheritdoc />
-    public UnitOfWorkOptions? Options => _options;
+    // On the Begin path the root carries the options (scope._options is only set on the prepared path).
+    // Fall back to the root so Current.Options is never spuriously null for an active UoW.
+    public UnitOfWorkOptions? Options => _options ?? _root.Options;
 
     /// <inheritdoc />
     public IUnitOfWork? Outer => _outer;

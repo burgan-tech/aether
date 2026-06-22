@@ -116,6 +116,20 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
     }
 
     [Fact]
+    public async Task Begin_exposes_options_through_Current()
+    {
+        var sp = BuildProvider();
+        var mgr = sp.GetRequiredService<IUnitOfWorkManager>();
+
+        var opts = new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true };
+        await using var uow = mgr.Begin(opts);
+
+        mgr.Current.ShouldNotBeNull();
+        mgr.Current!.Options.ShouldNotBeNull();
+        mgr.Current.Options!.IsTransactional.ShouldBeTrue();
+    }
+
+    [Fact]
     public async Task Required_nested_scope_dispose_does_not_close_shared_connection()
     {
         await ArrangeSchemaAsync();
