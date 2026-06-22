@@ -8,6 +8,17 @@ active schema is an **immutable working context** selected via a nested, auto-re
 scope, and a Unit of Work isolates each schema-bound `DbContext` on a single shared
 connection/transaction by issuing `SET LOCAL search_path` before every command.
 
+## Provider support
+
+Multi-schema (per-request schema switching via `ICurrentSchema.Change`) is supported **only on the
+PostgreSQL provider** (`BBT.Aether.Npgsql`), which applies `SET LOCAL search_path` per command on the
+shared transaction.
+
+**SQL Server (`BBT.Aether.SqlServer`) is single-schema.** It always uses the schema fixed in the EF
+model (`HasDefaultSchema` / schema-qualified `ToTable`). On SQL Server, `ICurrentSchema.Change(...)`
+does not change the schema used for queries — the call is effectively a no-op for schema resolution.
+Applications requiring true multi-schema isolation must use PostgreSQL.
+
 ## Database providers
 
 `BBT.Aether.Infrastructure` is **provider-agnostic** — it has no `Npgsql` dependency. The Unit

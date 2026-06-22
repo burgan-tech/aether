@@ -22,6 +22,8 @@ per-schema strategy. Pick a provider package and register it (see [Registration]
 A custom provider can be registered through the core overload
 `AddAetherDbContext<T>(provider, connectionString)`. Full runtime cross-schema transactions and
 Outbox/Inbox processing are **PostgreSQL-only** today — see the multi-schema doc's
+[Provider support](../multi-schema/README.md#provider-support) (SQL Server is single-schema;
+`ICurrentSchema.Change(...)` is a no-op for schema resolution there) and
 [SQL Server limitations](../multi-schema/README.md#sql-server-limitations).
 
 ## Getting a DbContext
