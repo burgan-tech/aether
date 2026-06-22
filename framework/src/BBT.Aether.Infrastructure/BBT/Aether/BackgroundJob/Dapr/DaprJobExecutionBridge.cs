@@ -2,12 +2,9 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
-using BBT.Aether.Domain.Entities;
-using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Telemetry;
-using BBT.Aether.Uow;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -16,12 +13,12 @@ namespace BBT.Aether.BackgroundJob.Dapr;
 /// <summary>
 /// Dapr-specific implementation of IJobExecutionBridge.
 /// Bridges Dapr's job execution callback to Aether's JobDispatcher.
-/// Looks up job entity by job name (Dapr's job identifier) and delegates to dispatcher.
-/// Extracts schema context from CloudEventEnvelope before jobStore access for multi-tenant support.
+/// Extracts the CloudEventEnvelope, sets the schema scope for multi-tenant support,
+/// and dispatches by job name. The dispatcher resolves and atomically claims the job itself,
+/// so the bridge performs no database work.
 /// </summary>
 public sealed class DaprJobExecutionBridge(
     IServiceScopeFactory scopeFactory,
-    IJobDispatcher jobDispatcher,
     IEventSerializer eventSerializer,
     ILogger<DaprJobExecutionBridge> logger)
     : IJobExecutionBridge
@@ -43,7 +40,7 @@ public sealed class DaprJobExecutionBridge(
         {
             await using var scope = scopeFactory.CreateAsyncScope();
 
-            // Parse envelope and set schema context before jobStore access (multi-tenant support)
+            // Parse envelope and set schema context (multi-tenant support) before dispatch.
             var dataPayload = CloudEventEnvelopeHelper.ExtractDataPayload(eventSerializer, payload, out var envelope);
 
             IDisposable? schemaScope = null;
@@ -55,37 +52,10 @@ public sealed class DaprJobExecutionBridge(
 
             using (schemaScope)
             {
-                var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
-                var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
-
-                string resolvedJobName;
-
-                // The provider-backed jobStore read needs an ambient UoW; wrap just the lookup. The
-                // dispatcher (called below) opens its own UoWs (claim, run, outcome), so it stays outside this one.
-                await using (var uow = uowManager.Begin(
-                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
-                {
-                    var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
-
-                    if (jobInfo == null)
-                    {
-                        logger.LogWarning(
-                            "Job '{JobName}' not found in Scheduled state — it may have already been completed, failed, or cancelled",
-                            jobName);
-                        activity?.SetStatus(ActivityStatusCode.Ok);
-                        await uow.CommitAsync(cancellationToken);
-                        return;
-                    }
-
-                    activity?.SetTag("job.handler_name", jobInfo.HandlerName);
-                    activity?.SetTag("job.id", jobInfo.Id.ToString());
-                    resolvedJobName = jobInfo.JobName;
-                    await uow.CommitAsync(cancellationToken);
-                }
-
                 // Dispatch by job name with the extracted data payload. The dispatcher re-resolves the job,
                 // atomically claims it, runs the handler with no held transaction, and records the outcome.
-                await jobDispatcher.DispatchAsync(resolvedJobName, dataPayload, cancellationToken);
+                var dispatcher = scope.ServiceProvider.GetRequiredService<IJobDispatcher>();
+                await dispatcher.DispatchAsync(jobName, dataPayload, cancellationToken);
 
                 activity?.SetStatus(ActivityStatusCode.Ok);
             }

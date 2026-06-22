@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.BackgroundJob;
@@ -12,10 +11,8 @@ using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
-using BBT.Aether.Uow;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Shouldly;
 using Xunit;
@@ -23,11 +20,10 @@ using Xunit;
 namespace BBT.Aether.Postgres.Tests.BackgroundJob;
 
 /// <summary>
-/// Real-PostgreSQL validation of <see cref="DaprJobExecutionBridge"/>. The headline assertion is that the
-/// Dapr callback path no longer throws "No active UnitOfWork" when the bridge reads the provider-backed
-/// <see cref="IJobStore.GetByJobNameAsync"/> — the bridge now wraps that lookup in its own UoW. A fake
-/// <see cref="IJobDispatcher"/> records the (jobId, handlerName) it was dispatched with so the test isolates
-/// the bridge from dispatch behavior. DI/schema/table/seed setup mirrors <see cref="JobDispatcherTests"/>.
+/// Real-PostgreSQL validation of <see cref="DaprJobExecutionBridge"/>. The bridge does no database work itself:
+/// it extracts the CloudEventEnvelope, sets the schema scope, and dispatches by job name. A fake
+/// <see cref="IJobDispatcher"/> records the dispatched job name (and the ambient schema at dispatch time) so the
+/// test isolates the bridge from dispatch behavior. DI/schema/table setup mirrors <see cref="JobDispatcherTests"/>.
 /// </summary>
 [Collection("postgres")]
 public sealed class DaprBridgeTests(PostgresFixture fx)
@@ -54,22 +50,26 @@ public sealed class DaprBridgeTests(PostgresFixture fx)
     }
 
     /// <summary>
-    /// Recording dispatcher fake. Captures the (jobId, handlerName) it was dispatched with so the test can
-    /// assert the bridge resolved the seeded job and delegated correctly, without invoking real dispatch logic.
+    /// Recording dispatcher fake. Captures the job name it was dispatched with — and the ambient schema in effect
+    /// at dispatch time — so the test can assert the bridge delegated by name under the correct schema scope,
+    /// without invoking real dispatch logic. <see cref="ICurrentSchema"/> is injected so the fake can read the
+    /// ambient schema the bridge set via <c>Change(...)</c> before calling the dispatcher.
     /// </summary>
-    private sealed class FakeJobDispatcher : IJobDispatcher
+    private sealed class FakeJobDispatcher(ICurrentSchema currentSchema) : IJobDispatcher
     {
         public List<string> Dispatches { get; } = new();
+        public List<string?> SchemasAtDispatch { get; } = new();
 
         public Task DispatchAsync(string jobName, ReadOnlyMemory<byte> jobPayload,
             CancellationToken cancellationToken = default)
         {
             Dispatches.Add(jobName);
+            SchemasAtDispatch.Add(currentSchema.Name);
             return Task.CompletedTask;
         }
     }
 
-    private IServiceProvider BuildProvider(FakeJobDispatcher dispatcher)
+    private IServiceProvider BuildProvider(out FakeJobDispatcher dispatcher)
     {
         var services = new ServiceCollection();
 
@@ -77,10 +77,15 @@ public sealed class DaprBridgeTests(PostgresFixture fx)
         services.AddAetherNpgsql<TestJobDbContext>(fx.ConnectionString);
         services.AddScoped<IJobStore, global::BBT.Aether.BackgroundJob.EfCoreJobStore<TestJobDbContext>>();
         services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
-        services.AddSingleton<IJobDispatcher>(dispatcher);
+        // The fake reads the ambient schema via ICurrentSchema (AsyncLocal-backed, so any instance observes the
+        // same stack the bridge pushed). Registered as a singleton instance the test holds for assertions.
+        var fake = new FakeJobDispatcher(new CurrentSchema(new DefaultSchemaNameFormatter()));
+        services.AddSingleton<IJobDispatcher>(fake);
         services.AddScoped<IJobExecutionBridge, DaprJobExecutionBridge>();
 
-        return services.BuildServiceProvider();
+        var sp = services.BuildServiceProvider();
+        dispatcher = fake;
+        return sp;
     }
 
     private static IJobExecutionBridge BuildBridge(IServiceProvider sp)
@@ -122,41 +127,6 @@ public sealed class DaprBridgeTests(PostgresFixture fx)
         }
     }
 
-    private static BackgroundJobInfo NewJob(Guid id, string jobName, BackgroundJobStatus status)
-    {
-        return new BackgroundJobInfo(id, HandlerName, jobName)
-        {
-            ExpressionValue = "@every 1m",
-            Payload = JsonDocument.Parse("{\"Value\":\"x\"}").RootElement.Clone(),
-            Status = status,
-            Kind = JobKind.OneShot,
-            RetryCount = 0,
-            MaxRetryCount = 3,
-        };
-    }
-
-    private async Task SeedAsync(IServiceProvider sp, params BackgroundJobInfo[] jobs)
-    {
-        await using var scope = sp.CreateAsyncScope();
-        var ssp = scope.ServiceProvider;
-        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
-        var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
-        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestJobDbContext>>();
-
-        using (currentSchema.Change(_schema))
-        {
-            await using var uow = uowManager.Begin(
-                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-            var ctx = await provider.GetDbContextAsync();
-            foreach (var job in jobs)
-            {
-                await ctx.BackgroundJobs.AddAsync(job);
-            }
-
-            await uow.CommitAsync();
-        }
-    }
-
     /// <summary>
     /// Builds the Dapr callback payload exactly the way BackgroundJobService does: wrap the args in a
     /// CloudEventEnvelope carrying the test schema, serialized to bytes. The bridge extracts the schema to
@@ -177,20 +147,16 @@ public sealed class DaprBridgeTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task ExecuteAsync_dispatches_job_without_throwing_no_active_uow()
+    public async Task ExecuteAsync_dispatches_by_job_name()
     {
-        var dispatcher = new FakeJobDispatcher();
-        var sp = BuildProvider(dispatcher);
+        var sp = BuildProvider(out var dispatcher);
         await ArrangeSchemaAsync(sp);
 
-        var id = Guid.NewGuid();
-        var jobName = "job-" + id.ToString("N");
-        // GetByJobNameAsync filters to active statuses (Scheduled || Running); seed Scheduled so it returns.
-        await SeedAsync(sp, NewJob(id, jobName, BackgroundJobStatus.Scheduled));
+        var jobName = "job-" + Guid.NewGuid().ToString("N");
 
         var bridge = BuildBridge(sp);
 
-        // The whole point: this used to throw "No active UnitOfWork" from the provider-backed jobStore read.
+        // The bridge does no DB work; it extracts the envelope, sets the schema scope, and dispatches by name.
         await Should.NotThrowAsync(() =>
             bridge.ExecuteAsync(jobName, BuildPayload(sp), CancellationToken.None));
 
@@ -199,18 +165,37 @@ public sealed class DaprBridgeTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task ExecuteAsync_missing_job_is_noop()
+    public async Task ExecuteAsync_sets_schema_scope()
     {
-        var dispatcher = new FakeJobDispatcher();
-        var sp = BuildProvider(dispatcher);
+        var sp = BuildProvider(out var dispatcher);
+        await ArrangeSchemaAsync(sp);
+
+        var jobName = "job-" + Guid.NewGuid().ToString("N");
+
+        var bridge = BuildBridge(sp);
+
+        await Should.NotThrowAsync(() =>
+            bridge.ExecuteAsync(jobName, BuildPayload(sp), CancellationToken.None));
+
+        // The fake captured the ambient schema (AsyncLocal) at dispatch time; it must equal the envelope schema.
+        dispatcher.SchemasAtDispatch.Count.ShouldBe(1);
+        dispatcher.SchemasAtDispatch[0].ShouldBe(_schema);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_dispatches_unknown_job_name_to_dispatcher()
+    {
+        var sp = BuildProvider(out var dispatcher);
         await ArrangeSchemaAsync(sp);
 
         var bridge = BuildBridge(sp);
 
-        // No row seeded for this job name → GetByJobNameAsync returns null; bridge logs and returns.
+        // No row exists for this job name. The bridge no longer reads the DB — it simply hands the name to the
+        // dispatcher (which is responsible for the load/claim and the no-op-on-missing behavior).
         await Should.NotThrowAsync(() =>
             bridge.ExecuteAsync("job-does-not-exist", BuildPayload(sp), CancellationToken.None));
 
-        dispatcher.Dispatches.ShouldBeEmpty();
+        dispatcher.Dispatches.Count.ShouldBe(1);
+        dispatcher.Dispatches[0].ShouldBe("job-does-not-exist");
     }
 }
