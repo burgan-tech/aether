@@ -10,8 +10,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Core services
 builder.Services.AddAetherCore(options => options.ApplicationName = "MyApp");
-builder.Services.AddAetherDbContext<MyDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+builder.Services.AddAetherNpgsql<MyDbContext>(builder.Configuration.GetConnectionString("Default"));
 
 // Event bus
 builder.Services.AddAetherEventBus(options =>

@@ -50,8 +50,12 @@
    compiles one model per context type that serves every schema; `search_path` selects the
    schema at runtime.
 
-5. **PostgreSQL only.** `Npgsql` is a direct dependency of `BBT.Aether.Infrastructure`; the UoW
-   owns raw Npgsql types. There is no SQL Server schema path in this model.
+5. **Provider-agnostic Infrastructure.** `BBT.Aether.Infrastructure` has no `Npgsql` dependency;
+   provider specifics are abstracted behind `IAetherDatabaseProvider`. PostgreSQL support lives in
+   `BBT.Aether.Npgsql`, which owns the raw Npgsql types and implements the full multi-schema model
+   described above (per-command `SET LOCAL search_path`). SQL Server support lives in
+   `BBT.Aether.SqlServer` and is single-schema. The mechanism described in this document applies to
+   the Npgsql provider.
 
 6. **PgBouncer-safe.** Because schema is applied with `SET LOCAL`, it never leaks to session or
    pooled state. Verified by `PgBouncerSearchPathTests`.
@@ -59,12 +63,17 @@
 ## Wiring
 
 ```csharp
-services.AddAetherDbContext<MyDbContext>(
-    connectionString,
-    (sp, options) => options.UseNpgsql(connectionString));
+// PostgreSQL (full multi-schema), from BBT.Aether.Npgsql
+services.AddAetherNpgsql<MyDbContext>(connectionString);
+
+// SQL Server (single-schema), from BBT.Aether.SqlServer
+// services.AddAetherSqlServer<MyDbContext>(connectionString);
+
+// Custom provider / advanced
+// services.AddAetherDbContext<MyDbContext>(provider, connectionString, configure?);
 ```
 
-`AddAetherDbContext` registers:
+`AddAetherNpgsql` (built on `AddAetherDbContext`) registers:
 
 - `IAetherDbContextConfigurator<TDbContext>` (`AetherDbContextConfigurator<>`) — captures the
   connection string and the configure delegate; `BuildOptions(sharedConnection)` re-applies the
