@@ -18,42 +18,45 @@ public static class AetherEfCoreServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddAetherDbContext<TDbContext>(
         this IServiceCollection services,
-        Action<DbContextOptionsBuilder> options)
+        string connectionString,
+        Action<DbContextOptionsBuilder> configure)
         where TDbContext : AetherDbContext<TDbContext>
-    {
-        // Delegate to the overload that accepts IServiceProvider
-        return services.AddAetherDbContext<TDbContext>((_, builder) => options(builder));
-    }
+        => services.AddAetherDbContext<TDbContext>(connectionString, (_, b) => configure(b));
 
     /// <summary>
     /// Adds Aether DbContext with EF Core configuration.
-    /// Use this overload when you need access to IServiceProvider (e.g., to add interceptors from DI).
+    /// The supplied connection string is the one the UnitOfWork opens its single shared
+    /// connection from; the configure delegate is captured to build schema-bound contexts that
+    /// all enlist on that shared connection. Schema is resolved at runtime via
+    /// <c>SET LOCAL search_path</c> by the UnitOfWork, so do not bake a schema into the model.
     /// </summary>
     /// <example>
     /// <code>
-    /// services.AddAetherDbContext&lt;MyDbContext&gt;((sp, options) =>
-    /// {
-    ///     options.UseNpgsql(connectionString);
-    ///     options.AddInterceptors(sp.GetRequiredService&lt;NpgsqlSchemaConnectionInterceptor&gt;());
-    /// });
+    /// services.AddAetherDbContext&lt;MyDbContext&gt;(connectionString, (sp, options) => options.UseNpgsql(connectionString));
     /// </code>
     /// </example>
     public static IServiceCollection AddAetherDbContext<TDbContext>(
         this IServiceCollection services,
-        Action<IServiceProvider, DbContextOptionsBuilder> options)
+        string connectionString,
+        Action<IServiceProvider, DbContextOptionsBuilder> configure)
         where TDbContext : AetherDbContext<TDbContext>
     {
         services.AddSingleton<AuditInterceptor>();
 
-        services.AddDbContext<TDbContext>((sp, dbContextOptions) =>
+        // Always include AuditInterceptor regardless of what the consumer configures.
+        Action<IServiceProvider, DbContextOptionsBuilder> wrapped = (sp, b) =>
         {
-            options.Invoke(sp, dbContextOptions);
-            dbContextOptions.AddInterceptors(
-                sp.GetRequiredService<AuditInterceptor>()
-            );
-        });
+            configure(sp, b);
+            b.AddInterceptors(sp.GetRequiredService<AuditInterceptor>());
+        };
 
-        // Register Unit of Work services
+        // The configurator builds options bound to the UoW's shared connection.
+        services.AddScoped<IAetherDbContextConfigurator<TDbContext>>(sp =>
+            new AetherDbContextConfigurator<TDbContext>(connectionString, wrapped, sp));
+
+        // Keep a design-time/migrations registration of the scoped DbContext.
+        services.AddDbContext<TDbContext>((sp, b) => wrapped(sp, b));
+
         services.AddAetherUnitOfWork<TDbContext>();
 
         return services;
@@ -61,7 +64,8 @@ public static class AetherEfCoreServiceCollectionExtensions
 
     /// <summary>
     /// Registers Unit of Work services for the specified DbContext.
-    /// Includes ambient accessor, UoW manager, EF Core transaction source, and domain event sink.
+    /// Includes ambient accessor, UoW manager, domain event sink, and the shared-connection
+    /// DbContext provider.
     /// </summary>
     public static IServiceCollection AddAetherUnitOfWork<TDbContext>(this IServiceCollection services)
         where TDbContext : AetherDbContext<TDbContext>
@@ -74,11 +78,6 @@ public static class AetherEfCoreServiceCollectionExtensions
 
         // Register domain event sink to bridge DbContext and UoW
         services.TryAddScoped<IDomainEventSink, UnitOfWorkDomainEventSink>();
-
-        // Register EF Core transaction source for this DbContext
-        services.AddScoped<ILocalTransactionSource, EfCoreTransactionSource<TDbContext>>();
-        
-        services.AddScoped(typeof(IDbContextProvider<>), typeof(DbContextProvider<>));
 
         services.AddScoped(typeof(IAetherDbContextProvider<>), typeof(AetherDbContextProvider<>));
 

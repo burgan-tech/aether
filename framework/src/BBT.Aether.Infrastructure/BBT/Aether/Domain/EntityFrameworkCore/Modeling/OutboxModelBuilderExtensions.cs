@@ -14,13 +14,16 @@ public static class OutboxModelBuilderExtensions
     /// Configures the OutboxMessage entity with appropriate table name, indexes, and constraints.
     /// </summary>
     /// <param name="builder">The ModelBuilder instance</param>
-    /// <param name="schema">Schema name</param>
     /// <returns>The ModelBuilder for method chaining</returns>
-    public static ModelBuilder ConfigureOutbox(this ModelBuilder builder, string? schema = null)
+    /// <remarks>
+    /// The table is mapped without an explicit schema. Schema is resolved at runtime via
+    /// <c>SET LOCAL search_path</c> by the UnitOfWork, so baking it into the EF model is avoided.
+    /// </remarks>
+    public static ModelBuilder ConfigureOutbox(this ModelBuilder builder)
     {
         builder.Entity<OutboxMessage>(entity =>
         {
-            entity.ToTable("OutboxMessages", schema);
+            entity.ToTable("OutboxMessages");
 
             entity.HasKey(e => e.Id);
 
