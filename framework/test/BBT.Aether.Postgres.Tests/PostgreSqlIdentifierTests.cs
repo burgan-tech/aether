@@ -2,7 +2,7 @@ using BBT.Aether.MultiSchema;
 using Shouldly;
 using Xunit;
 
-namespace BBT.Aether.Infrastructure.Tests.BBT.Aether.MultiSchema;
+namespace BBT.Aether.Postgres.Tests;
 
 public sealed class PostgreSqlIdentifierTests
 {

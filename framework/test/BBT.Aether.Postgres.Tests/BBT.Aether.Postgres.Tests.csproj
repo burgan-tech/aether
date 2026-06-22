@@ -23,6 +23,7 @@
     </ItemGroup>
 
     <ItemGroup>
+        <ProjectReference Include="..\..\src\BBT.Aether.Npgsql\BBT.Aether.Npgsql.csproj" />
         <ProjectReference Include="..\..\src\BBT.Aether.Infrastructure\BBT.Aether.Infrastructure.csproj" />
         <ProjectReference Include="..\..\src\BBT.Aether.Application\BBT.Aether.Application.csproj" />
     </ItemGroup>

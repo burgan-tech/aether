@@ -21,7 +21,7 @@ public static class AetherEfCoreServiceCollectionExtensions
     /// </summary>
     /// <example>
     /// <code>
-    /// services.AddAetherNpgsql&lt;MyDbContext&gt;(connectionString);
+    /// services.AddAetherDbContext&lt;MyDbContext&gt;(provider, connectionString);
     /// </code>
     /// </example>
     public static IServiceCollection AddAetherDbContext<TDbContext>(
@@ -51,16 +51,6 @@ public static class AetherEfCoreServiceCollectionExtensions
 
         return services;
     }
-
-    /// <summary>
-    /// TEMPORARY shim that registers an Aether DbContext backed by PostgreSQL (Npgsql).
-    /// Will move to BBT.Aether.Npgsql in a later task.
-    /// </summary>
-    public static IServiceCollection AddAetherNpgsql<TDbContext>(
-        this IServiceCollection services, string connectionString,
-        Action<IServiceProvider, DbContextOptionsBuilder>? configure = null)
-        where TDbContext : AetherDbContext<TDbContext>
-        => services.AddAetherDbContext<TDbContext>(new NpgsqlAetherProvider(), connectionString, configure);
 
     /// <summary>
     /// Registers Unit of Work services for the specified DbContext.
