@@ -70,8 +70,8 @@ Outcome rules recorded by the dispatcher:
   jobs do **not** use framework retry/backoff — they simply wait for the next cron occurrence.
 - **Cancellation** → `Cancelled`, scheduler entry deleted.
 
-Every recorded outcome (and every reaper reset) clears `RunningSince`; the dispatcher stamps it on the
-`Scheduled→Running` claim and the row is no longer "running" once an outcome lands. See
+Every recorded outcome (and every reaper reset) clears `RunningSince` and `RunningToken`; the dispatcher
+stamps both on the `Scheduled→Running` claim and the row is no longer "running" once an outcome lands. See
 [Reaper / visibility timeout](#reaper--visibility-timeout) for what happens when an outcome never lands.
 
 Statuses: `Pending`, `Scheduled`, `Running`, `Retrying`, `Completed`, `Failed`, `Cancelled`.
@@ -292,6 +292,38 @@ services.AddAetherBackgroundJob<MyDbContext>(o =>
 **Set `VisibilityTimeout` above your longest expected handler duration.** A handler that legitimately runs
 longer than the timeout will be reaped while it is still working, causing a duplicate run — which idempotent
 handlers tolerate, but it wastes work. The default of 5 minutes suits short handlers; raise it for long ones.
+
+### Visibility timeout & claim tokens
+
+The reaper detects a stale execution purely by elapsed time, so a handler that runs longer than
+`VisibilityTimeout` **will** be reaped and re-run while the original is still working. Without a guard, that
+slow original could later record its outcome (e.g. `Completed`) by id and silently stomp the reaper's reset
+state — double-counting retries or resurrecting a job the reaper already retired.
+
+To prevent this, the atomic claim stamps a fresh **`RunningToken`** (a `Guid`) alongside `RunningSince`. Every
+transition **out of** `Running` — by the dispatcher recording an outcome, *and* by the reaper resetting a stuck
+job — is a conditional update guarded on `Status == Running && RunningToken == token`:
+
+- The dispatcher carries the token it stamped at claim time.
+- The reaper carries the token it observed on the stale row.
+
+Whichever actor commits first wins the row update; the other affects **0 rows** and skips (the dispatcher logs
+`claim-lost` and does not delete from the scheduler or touch state). As a result a retry's `RetryCount`
+increments **exactly once per claim**, and a slow original execution can never overwrite the reaper's/retry's
+state.
+
+`VisibilityTimeout` is therefore a **hard ceiling** on handler runtime, not a soft hint: size it comfortably
+above your slowest handler so legitimate long runs are not reaped mid-flight.
+
+> **Migration.** This adds a nullable `RunningToken` column (`uuid` on PostgreSQL, `uniqueidentifier` on SQL
+> Server) to the `BackgroundJobs` table. Consumers must add an EF Core migration (e.g.
+> `dotnet ef migrations add AddBackgroundJobRunningToken`) and apply it before deploying. The column is nullable
+> with no default, so existing rows are unaffected.
+>
+> **Upgrade ordering.** A job left in `Running` by the previous build has a null `RunningToken`, and the
+> token-guarded reaper will not reset it (its guard matches no row). Let in-flight `Running` jobs drain (or
+> manually reset any stuck `Running` rows to `Scheduled`/`Pending`) when upgrading, so none are left
+> permanently un-reapable.
 
 ## Concepts
 

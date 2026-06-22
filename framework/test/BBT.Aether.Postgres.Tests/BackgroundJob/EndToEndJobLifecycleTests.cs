@@ -253,7 +253,7 @@ public sealed class EndToEndJobLifecycleTests(PostgresFixture fx)
         {
             await using var uow = uowManager.Begin(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-            var claimed = await store.TryClaimAsync(id, clock.UtcNow);
+            var claimed = await store.TryClaimAsync(id, clock.UtcNow, Guid.NewGuid());
             await uow.CommitAsync();
             return claimed;
         }

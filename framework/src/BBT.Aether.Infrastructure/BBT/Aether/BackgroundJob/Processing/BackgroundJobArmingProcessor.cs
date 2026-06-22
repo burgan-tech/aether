@@ -126,24 +126,39 @@ public class BackgroundJobArmingProcessor(
                     await using var uow = uowManager.Begin(
                         new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
                     const string reason = "Reaped: execution exceeded the visibility timeout";
+                    // Guard every reaper transition on the token we observed: if the original (slow) execution
+                    // records its outcome first, our guarded update affects 0 rows and we leave its state intact.
+                    var token = job.RunningToken ?? Guid.Empty;
+                    bool reaped;
                     if (job.Kind == JobKind.Recurring)
                     {
-                        await jobStore.MarkRecurringRanAsync(job.Id, clock.UtcNow, reason, ct);                 // → Scheduled (next cron tick)
+                        reaped = await jobStore.TryReturnToScheduledAsync(job.Id, token, clock.UtcNow, reason, ct);  // → Scheduled (next cron tick)
                     }
                     else if (job.RetryCount + 1 <= job.MaxRetryCount)
                     {
-                        await jobStore.MarkRetryingAsync(job.Id, clock.UtcNow, reason, ct);                     // → Retrying, NextRetryAt=now ⇒ arming poller re-arms
+                        reaped = await jobStore.TryMarkRetryingAsync(job.Id, token, clock.UtcNow, reason, ct);       // → Retrying, NextRetryAt=now ⇒ arming poller re-arms
                     }
                     else
                     {
-                        await jobStore.UpdateStatusAsync(job.Id, BackgroundJobStatus.Failed, clock.UtcNow,
+                        reaped = await jobStore.TryRecordTerminalAsync(job.Id, token, BackgroundJobStatus.Failed, clock.UtcNow,
                             "Reaped: retries exhausted after a stuck execution", ct);
                     }
 
                     await uow.CommitAsync(ct);
-                    logger.LogWarning(
-                        "Reaped stuck background job '{JobName}' (id {JobId}) after visibility timeout",
-                        job.JobName, job.Id);
+                    if (reaped)
+                    {
+                        logger.LogWarning(
+                            "Reaped stuck background job '{JobName}' (id {JobId}) after visibility timeout",
+                            job.JobName, job.Id);
+                    }
+                    else
+                    {
+                        // The original (slow) execution recorded its outcome first and still holds the claim —
+                        // our guarded update matched no row. Nothing was reaped; leave its state untouched.
+                        logger.LogDebug(
+                            "Skipped reaping background job '{JobName}' (id {JobId}); the original execution recorded its outcome first",
+                            job.JobName, job.Id);
+                    }
                 }
                 catch (Exception ex)
                 {

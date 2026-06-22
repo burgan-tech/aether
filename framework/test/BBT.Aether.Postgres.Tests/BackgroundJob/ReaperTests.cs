@@ -140,7 +140,7 @@ public sealed class ReaperTests(PostgresFixture fx)
     }
 
     private static BackgroundJobInfo NewRunningJob(Guid id, JobKind kind, DateTime runningSince,
-        int retryCount = 0, int maxRetryCount = 3)
+        int retryCount = 0, int maxRetryCount = 3, Guid? runningToken = null)
     {
         return new BackgroundJobInfo(id, "TestHandler", "job-" + id.ToString("N"))
         {
@@ -151,6 +151,9 @@ public sealed class ReaperTests(PostgresFixture fx)
             RetryCount = retryCount,
             MaxRetryCount = maxRetryCount,
             RunningSince = runningSince,
+            // A Running job always carries the token stamped by its claim; the reaper transitions it out of
+            // Running guarded on that token.
+            RunningToken = runningToken ?? Guid.NewGuid(),
         };
     }
 
@@ -278,5 +281,57 @@ public sealed class ReaperTests(PostgresFixture fx)
         reloaded.ShouldNotBeNull();
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Failed);
         reloaded.RunningSince.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Original_completion_after_reap_does_not_stomp_retry_state()
+    {
+        // Regression: a slow original execution must NOT overwrite the reaper's/retry's state.
+        // The reaper resets Running→Retrying (clearing the token), so the original's outcome record —
+        // guarded on its now-stale token — must be a no-op (0 rows), leaving the Retrying state intact.
+        var scheduler = new FakeJobScheduler();
+        var sp = BuildProvider(scheduler);
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        var tokenA = Guid.NewGuid();
+        await SeedAsync(sp, NewRunningJob(id, JobKind.OneShot,
+            runningSince: DateTime.UtcNow.AddMinutes(-10), retryCount: 0, maxRetryCount: 3, runningToken: tokenA));
+
+        // The reaper observes the stale Running job and resets it to Retrying (clears RunningToken).
+        var processor = BuildProcessor(sp, out _, _schema);
+        await processor.RunAsync();
+
+        var afterReap = await ReloadAsync(sp, id);
+        afterReap.ShouldNotBeNull();
+        afterReap!.Status.ShouldBe(BackgroundJobStatus.Retrying);
+        afterReap.RetryCount.ShouldBe(1);
+        afterReap.RunningToken.ShouldBeNull();
+
+        // The slow original execution finally finishes and tries to record Completed under tokenA.
+        bool recorded;
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var ssp = scope.ServiceProvider;
+            var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+            var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
+            var store = ssp.GetRequiredService<IJobStore>();
+
+            using (currentSchema.Change(_schema))
+            {
+                await using var uow = uowManager.Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                recorded = await store.TryRecordTerminalAsync(id, tokenA, BackgroundJobStatus.Completed,
+                    DateTime.UtcNow, null, default);
+                await uow.CommitAsync();
+            }
+        }
+
+        recorded.ShouldBeFalse("the original's stale token must not record the outcome");
+
+        var final = await ReloadAsync(sp, id);
+        final.ShouldNotBeNull();
+        final!.Status.ShouldBe(BackgroundJobStatus.Retrying, "the reaper's retry state must survive");
+        final.RetryCount.ShouldBe(1, "retry must increment exactly once per claim");
     }
 }

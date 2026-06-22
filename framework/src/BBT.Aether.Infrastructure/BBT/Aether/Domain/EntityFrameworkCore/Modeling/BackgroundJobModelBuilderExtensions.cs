@@ -64,6 +64,8 @@ public static class BackgroundJobModelBuilderExtensions
 
             entity.Property(e => e.RunningSince);
 
+            entity.Property(e => e.RunningToken);
+
             // Index for the arming poller (query by status + next due time)
             entity.HasIndex(e => new { e.Status, e.NextRetryAt })
                 .HasDatabaseName("IX_BackgroundJobs_Arming");

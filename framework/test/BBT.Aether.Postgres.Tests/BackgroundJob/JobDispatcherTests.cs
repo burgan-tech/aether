@@ -413,7 +413,9 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         var reloaded = await ReloadAsync(sp, id);
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
         reloaded.LastError.ShouldNotBeNull();
-        reloaded.RetryCount.ShouldBe(1);
+        // Recurring jobs rely on the next cron occurrence and no longer increment RetryCount on failure
+        // (the per-claim guarded TryReturnToScheduledAsync leaves RetryCount untouched).
+        reloaded.RetryCount.ShouldBe(0);
         reloaded.RunningSince.ShouldBeNull();
         scheduler.DeleteCalls.ShouldBeEmpty();
     }

@@ -64,7 +64,8 @@ public class JobDispatcher(
         string HandlerName,
         JobKind Kind,
         int RetryCount,
-        int MaxRetryCount);
+        int MaxRetryCount,
+        Guid Token);
 
     private async Task DispatchCoreAsync(
         AsyncServiceScope scope,
@@ -96,8 +97,13 @@ public class JobDispatcher(
             logger.LogWarning("Handler '{HandlerName}' for job id '{JobId}' was cancelled", c.HandlerName, c.JobId);
             activity?.SetTag("job.status", "cancelled");
             activity?.SetStatus(ActivityStatusCode.Ok);
-            await MarkJobStatusAsync(uowManager, jobStore, c.JobId, BackgroundJobStatus.Cancelled,
-                "Job was cancelled", cancellationToken);
+            await using (var cancelUow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+            {
+                await jobStore.TryRecordTerminalAsync(c.JobId, c.Token, BackgroundJobStatus.Cancelled,
+                    clock.UtcNow, "Job was cancelled", cancellationToken);
+                await cancelUow.CommitAsync(cancellationToken);
+            }
             await TryDeleteFromSchedulerAsync(jobScheduler, c.HandlerName, jobName, cancellationToken);
         }
         catch (Exception ex)
@@ -161,8 +167,9 @@ public class JobDispatcher(
             return null;
         }
 
-        // Atomic claim: only one worker wins Scheduled→Running (and stamps RunningSince).
-        var claimed = await jobStore.TryClaimAsync(jobInfo.Id, clock.UtcNow, cancellationToken);
+        // Atomic claim: only one worker wins Scheduled→Running (and stamps RunningSince + a fresh token).
+        var runningToken = Guid.NewGuid();
+        var claimed = await jobStore.TryClaimAsync(jobInfo.Id, clock.UtcNow, runningToken, cancellationToken);
         await claimUow.CommitAsync(cancellationToken);
         if (!claimed)
         {
@@ -173,7 +180,8 @@ public class JobDispatcher(
             return null;
         }
 
-        return new JobClaim(jobInfo.Id, jobInfo.HandlerName, jobInfo.Kind, jobInfo.RetryCount, jobInfo.MaxRetryCount);
+        return new JobClaim(jobInfo.Id, jobInfo.HandlerName, jobInfo.Kind, jobInfo.RetryCount, jobInfo.MaxRetryCount,
+            runningToken);
     }
 
     /// <summary>
@@ -190,15 +198,22 @@ public class JobDispatcher(
         var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
         var jobScheduler = scope.ServiceProvider.GetRequiredService<IJobScheduler>();
 
+        bool recorded;
         await using (var doneUow = uowManager.Begin(
             new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
         {
-            if (claim.Kind == JobKind.Recurring)
-                await jobStore.MarkRecurringRanAsync(claim.JobId, clock.UtcNow, null, cancellationToken); // → Scheduled, LastRunAt
-            else
-                await jobStore.UpdateStatusAsync(claim.JobId, BackgroundJobStatus.Completed, clock.UtcNow,
-                    cancellationToken: cancellationToken);
+            recorded = claim.Kind == JobKind.Recurring
+                ? await jobStore.TryReturnToScheduledAsync(claim.JobId, claim.Token, clock.UtcNow, null, cancellationToken)
+                : await jobStore.TryRecordTerminalAsync(claim.JobId, claim.Token, BackgroundJobStatus.Completed,
+                    clock.UtcNow, null, cancellationToken);
             await doneUow.CommitAsync(cancellationToken);
+        }
+
+        if (!recorded)
+        {
+            logger.LogWarning("Claim for job id '{JobId}' was lost before success could be recorded; skipping", claim.JobId);
+            activity?.SetTag("job.status", "claim-lost");
+            return;
         }
 
         activity?.SetTag("job.status", claim.Kind == JobKind.Recurring ? "scheduled" : "completed");
@@ -223,31 +238,40 @@ public class JobDispatcher(
         var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
         var jobScheduler = scope.ServiceProvider.GetRequiredService<IJobScheduler>();
 
+        var willRetry = claim.Kind == JobKind.OneShot && claim.RetryCount + 1 <= claim.MaxRetryCount;
+
+        bool recorded;
         await using (var failUow = uowManager.Begin(
             new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
         {
             if (claim.Kind == JobKind.Recurring)
             {
                 // Recurring jobs rely on the next cron occurrence; record the error, return to Scheduled.
-                await jobStore.MarkRecurringRanAsync(claim.JobId, clock.UtcNow, error, cancellationToken);
+                recorded = await jobStore.TryReturnToScheduledAsync(claim.JobId, claim.Token, clock.UtcNow, error, cancellationToken);
             }
-            else if (claim.RetryCount + 1 <= claim.MaxRetryCount)
+            else if (willRetry)
             {
                 var nextRetryAt = clock.UtcNow + ComputeBackoff(claim.RetryCount, options);
-                await jobStore.MarkRetryingAsync(claim.JobId, nextRetryAt, error, cancellationToken); // → Retrying; poller re-arms
+                recorded = await jobStore.TryMarkRetryingAsync(claim.JobId, claim.Token, nextRetryAt, error, cancellationToken); // → Retrying; poller re-arms
             }
             else
             {
-                await jobStore.UpdateStatusAsync(claim.JobId, BackgroundJobStatus.Failed, clock.UtcNow, error,
-                    cancellationToken);
+                recorded = await jobStore.TryRecordTerminalAsync(claim.JobId, claim.Token, BackgroundJobStatus.Failed,
+                    clock.UtcNow, error, cancellationToken);
             }
 
             await failUow.CommitAsync(cancellationToken);
         }
 
+        if (!recorded)
+        {
+            logger.LogWarning("Claim for job id '{JobId}' was lost before failure could be recorded; skipping", claim.JobId);
+            return;
+        }
+
         // One-shot terminal (Failed) and recurring stay armed in Dapr; a Retrying one-shot is re-armed by the
         // poller, so only delete from the scheduler when the one-shot is terminally Failed.
-        if (claim.Kind == JobKind.OneShot && claim.RetryCount + 1 > claim.MaxRetryCount)
+        if (claim.Kind == JobKind.OneShot && !willRetry)
             await TryDeleteFromSchedulerAsync(jobScheduler, claim.HandlerName, jobName, cancellationToken);
     }
 
@@ -283,30 +307,6 @@ public class JobDispatcher(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to delete job '{JobName}' from scheduler; job may continue to trigger until manually removed", jobName);
-        }
-    }
-
-    /// <summary>
-    /// Marks job status within a separate UoW to ensure status update is persisted
-    /// even if the main transaction failed.
-    /// </summary>
-    private async Task MarkJobStatusAsync(
-        IUnitOfWorkManager uowManager,
-        IJobStore jobStore,
-        Guid jobId,
-        BackgroundJobStatus status,
-        string? errorMessage,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            await using var uow = uowManager.BeginRequiresNew();
-            await jobStore.UpdateStatusAsync(jobId, status, clock.UtcNow, errorMessage, cancellationToken);
-            await uow.CommitAsync(cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to mark job {JobId} as {Status}", jobId, status);
         }
     }
 

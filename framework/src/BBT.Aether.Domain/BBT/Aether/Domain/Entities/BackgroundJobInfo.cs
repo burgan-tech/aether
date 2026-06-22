@@ -95,6 +95,12 @@ public class BackgroundJobInfo : FullAuditedEntity<Guid>, IHasExtraProperties
     /// the job is not Running.</summary>
     public DateTime? RunningSince { get; set; }
 
+    /// <summary>Opaque token stamped by the atomic claim alongside <see cref="RunningSince"/>. Identifies
+    /// a specific Running lease so that outcome recording (by the dispatcher) and reaping (by the poller)
+    /// can be made conditional: only the holder of the current token may transition the job out of Running.
+    /// Null when the job is not Running.</summary>
+    public Guid? RunningToken { get; set; }
+
     /// <summary>
     /// Gets or sets additional metadata associated with the job.
     /// Common metadata includes domain, flow name, and instance ID information.

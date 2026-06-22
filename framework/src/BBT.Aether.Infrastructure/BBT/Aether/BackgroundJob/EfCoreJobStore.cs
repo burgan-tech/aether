@@ -140,6 +140,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         job.ModifiedAt = DateTime.UtcNow;
         // Leaving Running: clear the claim stamp so the visibility-timeout reaper won't re-pick it.
         job.RunningSince = null;
+        job.RunningToken = null;
         if (handledTime.HasValue)
         {
             job.HandledTime = handledTime.Value;
@@ -205,6 +206,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         job.LastError = error;
         // Leaving Running: clear the claim stamp so the visibility-timeout reaper won't re-pick it.
         job.RunningSince = null;
+        job.RunningToken = null;
         // HandledTime intentionally left untouched: a retrying job has not been "handled". It is set
         // only on a terminal Completed/Failed transition via UpdateStatusAsync.
         job.ModifiedAt = DateTime.UtcNow;
@@ -230,6 +232,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         job.LastRunAt = ranAtUtc;
         // Leaving Running: clear the claim stamp so the visibility-timeout reaper won't re-pick it.
         job.RunningSince = null;
+        job.RunningToken = null;
         if (error != null)
         {
             job.LastError = error;
@@ -241,7 +244,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     }
 
     /// <inheritdoc/>
-    public async Task<bool> TryClaimAsync(Guid id, DateTime nowUtc, CancellationToken cancellationToken = default)
+    public async Task<bool> TryClaimAsync(Guid id, DateTime nowUtc, Guid runningToken,
+        CancellationToken cancellationToken = default)
     {
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
@@ -250,12 +254,85 @@ public class EfCoreJobStore<TDbContext> : IJobStore
 
         // Conditional UPDATE: provider-agnostic optimistic-concurrency claim. The WHERE clause pins
         // Status=Scheduled, so concurrent claims race on a single atomic row update — exactly one wins,
-        // and that winner also stamps RunningSince for the visibility-timeout reaper.
+        // and that winner also stamps RunningSince + RunningToken for the visibility-timeout reaper and
+        // for token-guarded outcome recording.
         var affected = await dbContext.BackgroundJobs
             .Where(j => j.Id == id && j.Status == BackgroundJobStatus.Scheduled)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(j => j.Status, BackgroundJobStatus.Running)
-                .SetProperty(j => j.RunningSince, nowUtc), cancellationToken);
+                .SetProperty(j => j.RunningSince, nowUtc)
+                .SetProperty(j => j.RunningToken, runningToken), cancellationToken);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryRecordTerminalAsync(Guid id, Guid runningToken,
+        BackgroundJobStatus terminalStatus, DateTime handledTimeUtc, string? error,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.Status == BackgroundJobStatus.Running && j.RunningToken == runningToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, terminalStatus)
+                .SetProperty(j => j.HandledTime, handledTimeUtc)
+                .SetProperty(j => j.LastError, j => error ?? j.LastError)
+                .SetProperty(j => j.RunningSince, (DateTime?)null)
+                .SetProperty(j => j.RunningToken, (Guid?)null)
+                .SetProperty(j => j.ModifiedAt, now), cancellationToken);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryReturnToScheduledAsync(Guid id, Guid runningToken, DateTime ranAtUtc,
+        string? error, CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.Status == BackgroundJobStatus.Running && j.RunningToken == runningToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, BackgroundJobStatus.Scheduled)
+                .SetProperty(j => j.LastRunAt, ranAtUtc)
+                .SetProperty(j => j.LastError, j => error ?? j.LastError)
+                .SetProperty(j => j.RunningSince, (DateTime?)null)
+                .SetProperty(j => j.RunningToken, (Guid?)null)
+                .SetProperty(j => j.ModifiedAt, now), cancellationToken);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryMarkRetryingAsync(Guid id, Guid runningToken, DateTime nextRetryAtUtc,
+        string? error, CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.Status == BackgroundJobStatus.Running && j.RunningToken == runningToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, BackgroundJobStatus.Retrying)
+                .SetProperty(j => j.RetryCount, j => j.RetryCount + 1)
+                .SetProperty(j => j.NextRetryAt, nextRetryAtUtc)
+                .SetProperty(j => j.LastError, error)
+                .SetProperty(j => j.RunningSince, (DateTime?)null)
+                .SetProperty(j => j.RunningToken, (Guid?)null)
+                .SetProperty(j => j.ModifiedAt, now), cancellationToken);
 
         return affected > 0;
     }

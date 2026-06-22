@@ -159,7 +159,7 @@ public sealed class JobStoreClaimReaperTests(PostgresFixture fx)
             {
                 await using var uow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                var won = await store.TryClaimAsync(id, now);
+                var won = await store.TryClaimAsync(id, now, Guid.NewGuid());
                 await uow.CommitAsync();
                 return won;
             }
@@ -197,7 +197,7 @@ public sealed class JobStoreClaimReaperTests(PostgresFixture fx)
         {
             await using var uow = uowManager.Begin(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-            won = await store.TryClaimAsync(id, DateTime.UtcNow);
+            won = await store.TryClaimAsync(id, DateTime.UtcNow, Guid.NewGuid());
             await uow.CommitAsync();
         }
 
@@ -236,5 +236,69 @@ public sealed class JobStoreClaimReaperTests(PostgresFixture fx)
         var ids = stale.Select(j => j.Id).ToList();
         ids.ShouldContain(staleId);
         ids.ShouldNotContain(freshId);
+    }
+
+    [Fact]
+    public async Task TryRecordTerminal_only_the_current_token_wins_exactly_once()
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Scheduled));
+
+        var realToken = Guid.NewGuid();
+        var staleToken = Guid.NewGuid();
+
+        // Claim the job, stamping the real token.
+        await RunInUowAsync(sp, async store =>
+        {
+            var claimed = await store.TryClaimAsync(id, DateTime.UtcNow, realToken);
+            claimed.ShouldBeTrue();
+        });
+
+        // A holder of a stale token (e.g. a reaper that observed a different lease) must lose.
+        await RunInUowAsync(sp, async store =>
+        {
+            var lost = await store.TryRecordTerminalAsync(id, staleToken, BackgroundJobStatus.Completed,
+                DateTime.UtcNow, null, default);
+            lost.ShouldBeFalse("a stale token cannot record the outcome");
+        });
+
+        // The job is still Running under the real token.
+        var midway = await ReloadAsync(sp, id);
+        midway.ShouldNotBeNull();
+        midway!.Status.ShouldBe(BackgroundJobStatus.Running);
+
+        // The holder of the current token wins.
+        await RunInUowAsync(sp, async store =>
+        {
+            var won = await store.TryRecordTerminalAsync(id, realToken, BackgroundJobStatus.Completed,
+                DateTime.UtcNow, null, default);
+            won.ShouldBeTrue("the current token must record the outcome");
+        });
+
+        var final = await ReloadAsync(sp, id);
+        final.ShouldNotBeNull();
+        final!.Status.ShouldBe(BackgroundJobStatus.Completed);
+        final.RunningSince.ShouldBeNull();
+        final.RunningToken.ShouldBeNull();
+    }
+
+    private async Task RunInUowAsync(IServiceProvider sp, Func<IJobStore, Task> action)
+    {
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var store = ssp.GetRequiredService<IJobStore>();
+
+        using (currentSchema.Change(_schema))
+        {
+            await using var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+            await action(store);
+            await uow.CommitAsync();
+        }
     }
 }

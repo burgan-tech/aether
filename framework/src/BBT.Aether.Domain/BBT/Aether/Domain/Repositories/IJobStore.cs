@@ -147,9 +147,57 @@ public interface IJobStore
     /// </summary>
     /// <param name="id">The unique entity identifier of the job to claim.</param>
     /// <param name="nowUtc">The current UTC time stamped into RunningSince when the claim succeeds.</param>
+    /// <param name="runningToken">A fresh per-claim token stamped into RunningToken; later identifies this lease.</param>
     /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
     /// <returns>True if this caller won the claim; otherwise false.</returns>
-    Task<bool> TryClaimAsync(Guid id, DateTime nowUtc, CancellationToken cancellationToken = default);
+    Task<bool> TryClaimAsync(Guid id, DateTime nowUtc, Guid runningToken, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically records a terminal outcome (Completed/Failed/Cancelled) for a Running job, guarded on the
+    /// claim token: updates only when <c>Status==Running &amp;&amp; RunningToken==runningToken</c>. Clears
+    /// RunningSince/RunningToken. Returns true iff a row was updated (false ⇒ the claim was lost — the job is
+    /// no longer Running under this token, e.g. the reaper already reset it).
+    /// </summary>
+    /// <param name="id">The unique entity identifier of the job.</param>
+    /// <param name="runningToken">The claim token observed when the job was claimed.</param>
+    /// <param name="terminalStatus">The terminal status to set (Completed, Failed, or Cancelled).</param>
+    /// <param name="handledTimeUtc">The UTC time the job was handled.</param>
+    /// <param name="error">The error message, if any (preserves the existing value when null).</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>True if a row was updated; otherwise false.</returns>
+    Task<bool> TryRecordTerminalAsync(Guid id, Guid runningToken, BackgroundJobStatus terminalStatus,
+        DateTime handledTimeUtc, string? error, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically returns a Running job to Scheduled (for recurring jobs), guarded on the claim token:
+    /// updates only when <c>Status==Running &amp;&amp; RunningToken==runningToken</c>. Sets LastRunAt, clears
+    /// RunningSince/RunningToken, and does NOT increment RetryCount. Returns true iff a row was updated
+    /// (false ⇒ the claim was lost).
+    /// </summary>
+    /// <param name="id">The unique entity identifier of the job.</param>
+    /// <param name="runningToken">The claim token observed when the job was claimed.</param>
+    /// <param name="ranAtUtc">The UTC time the job ran.</param>
+    /// <param name="error">The error message, if any (preserves the existing value when null).</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>True if a row was updated; otherwise false.</returns>
+    Task<bool> TryReturnToScheduledAsync(Guid id, Guid runningToken, DateTime ranAtUtc, string? error,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically transitions a Running job to Retrying (for one-shot jobs), guarded on the claim token:
+    /// updates only when <c>Status==Running &amp;&amp; RunningToken==runningToken</c>. Increments RetryCount
+    /// exactly once, sets NextRetryAt + LastError, and clears RunningSince/RunningToken. Returns true iff a
+    /// row was updated (false ⇒ the claim was lost).
+    /// </summary>
+    /// <param name="id">The unique entity identifier of the job.</param>
+    /// <param name="runningToken">The claim token observed when the job was claimed.</param>
+    /// <param name="nextRetryAtUtc">The UTC time at which the job should next be armed.</param>
+    /// <param name="error">The error message from the failed attempt. Unlike the terminal/return-to-scheduled
+    /// methods this OVERWRITES LastError (a retry's error is always the current attempt's failure).</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>True if a row was updated; otherwise false.</returns>
+    Task<bool> TryMarkRetryingAsync(Guid id, Guid runningToken, DateTime nextRetryAtUtc, string? error,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Jobs stuck in Running since before cutoffUtc (crashed/timed-out executions), oldest first,
