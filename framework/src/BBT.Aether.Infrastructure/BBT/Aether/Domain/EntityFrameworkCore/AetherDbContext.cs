@@ -19,16 +19,15 @@ namespace BBT.Aether.Domain.EntityFrameworkCore;
 
 public abstract class AetherDbContext<TDbContext>(
     DbContextOptions<TDbContext> options,
-    IDomainEventSink? eventSink = null,
     IClock? clock = null)
     : DbContext(options)
     where TDbContext : DbContext
 {
     /// <summary>
     /// Gets or sets the local transaction event enqueuer.
-    /// When set by the owning UnitOfWork, events will be routed directly to it
-    /// instead of relying on ambient Unit of Work context.
-    /// This ensures events reach the correct UoW even when SaveChanges is called directly on DbContext.
+    /// Set by the owning UnitOfWork when the context is materialized; domain events collected during
+    /// SaveChanges are routed exclusively to it. A context with no enqueuer (i.e. one created outside a
+    /// UnitOfWork) cannot raise domain events.
     /// </summary>
     public ILocalTransactionEventEnqueuer? LocalEventEnqueuer { get; set; }
 
@@ -282,11 +281,9 @@ public abstract class AetherDbContext<TDbContext>(
     }
 
     /// <summary>
-    /// Publishes collected domain events to the appropriate destination.
-    /// Priority order:
-    /// 1. LocalEventEnqueuer (direct link to owning local transaction - most reliable)
-    /// 2. eventSink (ambient UoW fallback - for backward compatibility)
-    /// This ensures events reach the correct UoW regardless of how SaveChanges is called.
+    /// Publishes collected domain events to the owning local transaction's enqueuer.
+    /// The enqueuer is wired when the context is materialized by the UnitOfWork, so events
+    /// reach the correct UoW regardless of how SaveChanges is called.
     /// </summary>
     private void PublishDomainEventsToSink()
     {
@@ -296,20 +293,12 @@ public abstract class AetherDbContext<TDbContext>(
             return;
         }
 
-        // Priority 1: Direct link to owning local transaction
-        // This is the most reliable path - events go directly to the transaction that owns this DbContext
+        // Domain events flow ONLY through the owning local transaction's enqueuer, which is wired
+        // when the context is materialized by the UnitOfWork. A context created outside a UnitOfWork
+        // has no enqueuer and therefore cannot raise domain events (unsupported in the shared-connection model).
         if (LocalEventEnqueuer is not null)
         {
             LocalEventEnqueuer.EnqueueEvents(domainEvents);
-            ClearDomainEvents();
-            return;
-        }
-
-        // Priority 2: Ambient UoW fallback (backward compatibility)
-        // Uses unitOfWorkManager.Current which may not always point to the correct UoW
-        if (eventSink is not null)
-        {
-            eventSink.EnqueueDomainEvents(domainEvents);
             ClearDomainEvents();
         }
     }

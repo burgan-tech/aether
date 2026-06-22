@@ -54,8 +54,7 @@ public static class AetherEfCoreServiceCollectionExtensions
 
     /// <summary>
     /// Registers Unit of Work services for the specified DbContext.
-    /// Includes ambient accessor, UoW manager, domain event sink, and the shared-connection
-    /// DbContext provider.
+    /// Includes ambient accessor, UoW manager, and the shared-connection DbContext provider.
     /// </summary>
     public static IServiceCollection AddAetherUnitOfWork<TDbContext>(this IServiceCollection services)
         where TDbContext : AetherDbContext<TDbContext>
@@ -65,9 +64,6 @@ public static class AetherEfCoreServiceCollectionExtensions
 
         // Register UoW manager as scoped
         services.TryAddScoped<IUnitOfWorkManager, UnitOfWorkManager>();
-
-        // Register domain event sink to bridge DbContext and UoW
-        services.TryAddScoped<IDomainEventSink, UnitOfWorkDomainEventSink>();
 
         services.AddScoped(typeof(IAetherDbContextProvider<>), typeof(AetherDbContextProvider<>));
 

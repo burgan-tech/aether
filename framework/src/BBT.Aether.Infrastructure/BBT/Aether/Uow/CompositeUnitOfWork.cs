@@ -26,7 +26,7 @@ public sealed class CompositeUnitOfWork(
     IServiceProvider serviceProvider,
     IDomainEventDispatcher? eventDispatcher = null,
     AetherDomainEventOptions? domainEventOptions = null)
-    : IEfCoreUnitOfWork, ITransactionalRoot, IUnitOfWorkEventEnqueuer
+    : IEfCoreUnitOfWork, ITransactionalRoot
 {
     private readonly Dictionary<DbContextKey, DbContext> _contexts = new();
     private readonly List<DomainEventEnvelope> _events = new();
@@ -182,15 +182,6 @@ public sealed class CompositeUnitOfWork(
 
         _contexts[key] = context;
         return context;
-    }
-
-    /// <inheritdoc />
-    public void EnqueueEvent(DomainEventEnvelope eventEnvelope)
-    {
-        if (!_events.Contains(eventEnvelope))
-        {
-            _events.Add(eventEnvelope);
-        }
     }
 
     /// <summary>
