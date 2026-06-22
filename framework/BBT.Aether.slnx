@@ -18,5 +18,6 @@
   <Folder Name="/test/">
     <Project Path="test/BBT.Aether.Infrastructure.Tests/BBT.Aether.Infrastructure.Tests.csproj" />
     <Project Path="test/BBT.Aether.Postgres.Tests/BBT.Aether.Postgres.Tests.csproj" />
+    <Project Path="test/BBT.Aether.SqlServer.Tests/BBT.Aether.SqlServer.Tests.csproj" />
   </Folder>
 </Solution>
