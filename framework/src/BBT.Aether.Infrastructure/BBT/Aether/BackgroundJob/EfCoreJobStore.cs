@@ -233,4 +233,36 @@ public class EfCoreJobStore<TDbContext> : IJobStore
 
         // SaveChanges removed - will be flushed by UoW Commit or calling code
     }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryClaimAsync(Guid id, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+
+        // Conditional UPDATE: provider-agnostic optimistic-concurrency claim. The WHERE clause pins
+        // Status=Scheduled, so concurrent claims race on a single atomic row update — exactly one wins,
+        // and that winner also stamps RunningSince for the visibility-timeout reaper.
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.Status == BackgroundJobStatus.Scheduled)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, BackgroundJobStatus.Running)
+                .SetProperty(j => j.RunningSince, nowUtc), cancellationToken);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<IReadOnlyList<BackgroundJobInfo>> GetStaleRunningAsync(DateTime cutoffUtc, int batchSize,
+        CancellationToken cancellationToken = default)
+    {
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
+            .Where(j => j.Status == BackgroundJobStatus.Running && j.RunningSince != null && j.RunningSince < cutoffUtc)
+            .OrderBy(j => j.RunningSince)
+            .Take(batchSize)
+            .ToListAsync(cancellationToken);
+    }
 }

@@ -139,5 +139,27 @@ public interface IJobStore
     /// <returns>A task representing the asynchronous operation.</returns>
     Task MarkRecurringRanAsync(Guid id, DateTime ranAtUtc, string? error,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically claims a Scheduled job for execution: sets Status=Running and stamps
+    /// RunningSince=nowUtc in a single conditional UPDATE. Returns true iff this caller won the claim
+    /// (false ⇒ the job was not Scheduled — already claimed or a late delivery).
+    /// </summary>
+    /// <param name="id">The unique entity identifier of the job to claim.</param>
+    /// <param name="nowUtc">The current UTC time stamped into RunningSince when the claim succeeds.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>True if this caller won the claim; otherwise false.</returns>
+    Task<bool> TryClaimAsync(Guid id, DateTime nowUtc, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Jobs stuck in Running since before cutoffUtc (crashed/timed-out executions), oldest first,
+    /// limited to batchSize. Used by the visibility-timeout reaper.
+    /// </summary>
+    /// <param name="cutoffUtc">The UTC cutoff; jobs with RunningSince before this are considered stale.</param>
+    /// <param name="batchSize">The maximum number of jobs to return.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>The stale running jobs, ordered by RunningSince ascending.</returns>
+    Task<IReadOnlyList<BackgroundJobInfo>> GetStaleRunningAsync(DateTime cutoffUtc, int batchSize,
+        CancellationToken cancellationToken = default);
 }
 
