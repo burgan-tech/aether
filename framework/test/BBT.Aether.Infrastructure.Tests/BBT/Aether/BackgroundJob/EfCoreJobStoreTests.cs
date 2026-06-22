@@ -132,8 +132,10 @@ public class EfCoreJobStoreTests
         job.MaxRetryCount = 5;
         var nextRetryAt = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
         var lastRunAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var runningSince = new DateTime(2026, 1, 2, 3, 0, 0, DateTimeKind.Utc);
         job.NextRetryAt = nextRetryAt;
         job.LastRunAt = lastRunAt;
+        job.RunningSince = runningSince;
 
         await store.SaveAsync(job);
         await db.SaveChangesAsync();
@@ -146,5 +148,6 @@ public class EfCoreJobStoreTests
         row.MaxRetryCount.ShouldBe(5);
         row.NextRetryAt.ShouldBe(nextRetryAt);
         row.LastRunAt.ShouldBe(lastRunAt);
+        row.RunningSince.ShouldBe(runningSince);
     }
 }

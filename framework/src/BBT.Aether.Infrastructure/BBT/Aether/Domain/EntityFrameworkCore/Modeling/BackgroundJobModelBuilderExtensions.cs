@@ -62,9 +62,15 @@ public static class BackgroundJobModelBuilderExtensions
 
             entity.Property(e => e.LastRunAt);
 
+            entity.Property(e => e.RunningSince);
+
             // Index for the arming poller (query by status + next due time)
             entity.HasIndex(e => new { e.Status, e.NextRetryAt })
                 .HasDatabaseName("IX_BackgroundJobs_Arming");
+
+            // Index for the visibility-timeout reaper (query Running jobs by claim time)
+            entity.HasIndex(e => new { e.Status, e.RunningSince })
+                .HasDatabaseName("IX_BackgroundJobs_Running");
 
             // Index for processing jobs (query by status)
             entity.HasIndex(e => new { e.Status, e.HandledTime })

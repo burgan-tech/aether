@@ -90,6 +90,11 @@ public class BackgroundJobInfo : FullAuditedEntity<Guid>, IHasExtraProperties
     /// <summary>UTC time of the most recent successful run (primarily for recurring jobs). Informational.</summary>
     public DateTime? LastRunAt { get; set; }
 
+    /// <summary>UTC time the job was last claimed into the Running state (stamped by the atomic claim).
+    /// Used by the visibility-timeout reaper to detect and recover crashed/stuck executions. Null when
+    /// the job is not Running.</summary>
+    public DateTime? RunningSince { get; set; }
+
     /// <summary>
     /// Gets or sets additional metadata associated with the job.
     /// Common metadata includes domain, flow name, and instance ID information.
