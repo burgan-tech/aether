@@ -1,6 +1,8 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Uow.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 
 namespace BBT.Aether.Uow;
 
@@ -9,7 +11,7 @@ namespace BBT.Aether.Uow;
 /// Manages ambient context and ensures proper cleanup.
 /// Supports prepare/initialize pattern for deferred UoW activation.
 /// </summary>
-public sealed class UnitOfWorkScope : IUnitOfWork
+public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
 {
     private readonly CompositeUnitOfWork _root;
     private readonly IAmbientUnitOfWorkAccessor _accessor;
@@ -105,6 +107,18 @@ public sealed class UnitOfWorkScope : IUnitOfWork
     public void Abort()
     {
         _root.Abort();
+    }
+
+    /// <inheritdoc />
+    public Task<TDbContext> GetDbContextAsync<TDbContext>(string schema, CancellationToken cancellationToken = default)
+        where TDbContext : DbContext
+    {
+        if (_isPrepared)
+        {
+            throw new InvalidOperationException("Unit of work is prepared but not initialized.");
+        }
+
+        return _root.GetDbContextAsync<TDbContext>(schema, cancellationToken);
     }
 
     /// <inheritdoc />

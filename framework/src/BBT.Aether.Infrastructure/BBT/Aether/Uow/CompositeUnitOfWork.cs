@@ -4,29 +4,41 @@ using System.Data;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.Services;
 using BBT.Aether.Events;
 using BBT.Aether.Uow.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 
 namespace BBT.Aether.Uow;
 
 /// <summary>
-/// Coordinates transactions across multiple data sources.
-/// Implements two-phase commit pattern: all sources commit or all rollback.
-/// Supports deferred initialization: can be created without immediate initialization.
-/// Dispatches domain events after successful commit of all sources.
+/// Root unit of work backed by a single shared <see cref="NpgsqlConnection"/> and a single
+/// <see cref="NpgsqlTransaction"/>. Hands out lazily-created schema-bound <see cref="DbContext"/>
+/// instances keyed by (DbContextType, Schema). Each created context enlists on the shared
+/// transaction via <c>UseTransactionAsync</c> and runs <c>SET LOCAL search_path</c> so schema
+/// isolation is correct under PgBouncer transaction pooling.
+/// Dispatches domain events after successful commit, preserving the outbox / direct-publish pipeline.
 /// </summary>
 public sealed class CompositeUnitOfWork(
-    IEnumerable<ILocalTransactionSource> sources,
+    IServiceProvider serviceProvider,
     IDomainEventDispatcher? eventDispatcher = null,
     AetherDomainEventOptions? domainEventOptions = null)
-    : IUnitOfWork, ITransactionalRoot, IUnitOfWorkEventEnqueuer
+    : IEfCoreUnitOfWork, ITransactionalRoot, IUnitOfWorkEventEnqueuer
 {
-    private readonly List<(ILocalTransaction tx, ITransactionalLocal? tLocal)> _opened = new();
+    private readonly Dictionary<DbContextKey, DbContext> _contexts = new();
+    private readonly List<DomainEventEnvelope> _events = new();
     private readonly List<Func<IUnitOfWork, Task>> _completedHandlers = new();
     private readonly List<Func<IUnitOfWork, Exception?, Task>> _failedHandlers = new();
     private readonly List<Action<IUnitOfWork>> _disposedHandlers = new();
+
+    private NpgsqlConnection? _connection;
+    private NpgsqlTransaction? _transaction;
+    private UnitOfWorkOptions _options = new();
     private bool _isInitialized;
+    private bool _isDisposed;
     private Exception? _exception;
 
     /// <summary>
@@ -35,7 +47,7 @@ public sealed class CompositeUnitOfWork(
     public Guid Id { get; } = Guid.NewGuid();
 
     /// <summary>
-    /// Gets whether this unit of work has been initialized with transaction sources.
+    /// Gets whether this unit of work has been initialized.
     /// </summary>
     public bool IsInitialized => _isInitialized;
 
@@ -50,7 +62,7 @@ public sealed class CompositeUnitOfWork(
     public bool IsCompleted { get; private set; }
 
     /// <inheritdoc />
-    public bool IsDisposed { get; private set; }
+    public bool IsDisposed => _isDisposed;
 
     /// <inheritdoc />
     public UnitOfWorkOptions? Options { get; private set; }
@@ -65,26 +77,22 @@ public sealed class CompositeUnitOfWork(
     public string? PreparationName => null;
 
     /// <summary>
-    /// Initializes transactions for all registered sources.
-    /// Can be called after construction to support deferred initialization.
-    /// If options.IsTransactional is false, transactions can be escalated later.
+    /// Initializes the unit of work. Does NOT open the connection here — the connection and
+    /// transaction are opened lazily on the first <see cref="GetDbContextAsync{TDbContext}"/>
+    /// call, so an empty unit of work costs nothing.
     /// </summary>
-    public async Task InitializeAsync(UnitOfWorkOptions options, CancellationToken cancellationToken = default)
+    public Task InitializeAsync(UnitOfWorkOptions options, CancellationToken cancellationToken = default)
     {
         if (_isInitialized)
         {
             throw new InvalidOperationException("CompositeUnitOfWork has already been initialized.");
         }
 
+        _options = options;
         Options = options;
-
-        foreach (var source in sources)
-        {
-            var transaction = await source.CreateTransactionAsync(options, cancellationToken);
-            _opened.Add((transaction, transaction as ITransactionalLocal));
-        }
-
         _isInitialized = true;
+
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
@@ -117,71 +125,109 @@ public sealed class CompositeUnitOfWork(
     }
 
     /// <inheritdoc />
+    public async Task<TDbContext> GetDbContextAsync<TDbContext>(string schema, CancellationToken cancellationToken = default)
+        where TDbContext : DbContext
+    {
+        if (_isDisposed || IsCompleted)
+        {
+            throw new InvalidOperationException("Cannot get a DbContext from a completed or disposed unit of work.");
+        }
+
+        var key = new DbContextKey(typeof(TDbContext), schema);
+        if (_contexts.TryGetValue(key, out var existing))
+        {
+            return (TDbContext)existing;
+        }
+
+        if (_contexts.Count >= _options.MaxDbContextCount)
+        {
+            throw new InvalidOperationException(
+                $"UnitOfWork DbContext limit exceeded. Limit: {_options.MaxDbContextCount}");
+        }
+
+        var configurator = serviceProvider.GetRequiredService<IAetherDbContextConfigurator<TDbContext>>();
+
+        if (_connection is null)
+        {
+            _connection = new NpgsqlConnection(configurator.ConnectionString);
+            await _connection.OpenAsync(cancellationToken);
+            _transaction = await _connection.BeginTransactionAsync(
+                _options.IsolationLevel ?? IsolationLevel.ReadCommitted, cancellationToken);
+        }
+
+        // Extend the configurator-built options with a per-command search_path interceptor.
+        // SET LOCAL search_path is transaction-scoped, so a single statement at creation time
+        // would be clobbered by other schema-bound contexts sharing this transaction. The
+        // interceptor issues the search_path before every command, guaranteeing correct schema
+        // resolution per statement (also required under PgBouncer transaction pooling).
+        var options = new DbContextOptionsBuilder<TDbContext>(configurator.BuildOptions(_connection))
+            .AddInterceptors(new SearchPathCommandInterceptor(schema))
+            .Options;
+
+        var context = ActivatorUtilities.CreateInstance<TDbContext>(serviceProvider, options);
+
+        await context.Database.UseTransactionAsync(_transaction!, cancellationToken);
+
+        if (context is AetherDbContext<TDbContext> aether)
+        {
+            aether.LocalEventEnqueuer = new BufferEnqueuer(_events);
+        }
+
+        _contexts[key] = context;
+        return context;
+    }
+
+    /// <inheritdoc />
     public void EnqueueEvent(DomainEventEnvelope eventEnvelope)
     {
-        // Push events to all transactions that support enqueueing
-        // Typically there's one EF Core transaction, but we support multiple
-        foreach (var (tx, _) in _opened)
+        if (!_events.Contains(eventEnvelope))
         {
-            if (tx is ILocalTransactionEventEnqueuer enqueuer)
-            {
-                enqueuer.EnqueueEvents(new[] { eventEnvelope });
-            }
+            _events.Add(eventEnvelope);
         }
     }
 
     /// <summary>
-    /// Ensures that all local transactions are escalated to transactional mode.
-    /// This is used for lazy escalation when needed.
+    /// Ensures that the shared transaction is started. In the new model the transaction is
+    /// always opened together with the connection on first DbContext creation, so this is a
+    /// no-op once a context has been created. No-op if not initialized.
     /// </summary>
-    public async Task EnsureTransactionAsync(IsolationLevel? isolationLevel = null,
+    public Task EnsureTransactionAsync(IsolationLevel? isolationLevel = null,
         CancellationToken cancellationToken = default)
     {
-        if (!_isInitialized)
-        {
-            return; // No-op if not initialized
-        }
-
-        foreach (var (_, tLocal) in _opened)
-        {
-            if (tLocal is not null)
-            {
-                await tLocal.EnsureTransactionAsync(isolationLevel, cancellationToken);
-            }
-        }
+        // The connection and transaction are opened lazily and together on the first
+        // GetDbContextAsync call. There is nothing to escalate here.
+        return Task.CompletedTask;
     }
 
     /// <summary>
-    /// Saves changes to all transaction sources that support explicit SaveChanges.
+    /// Saves changes on every materialized context that has pending changes.
     /// No-op if not initialized.
     /// </summary>
     public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
     {
         if (!_isInitialized)
         {
-            return; // No-op if not initialized
+            return;
         }
 
-        // Call SaveChanges on all sources that support it
-        foreach (var (tx, _) in _opened)
+        foreach (var context in _contexts.Values)
         {
-            if (tx is ISupportsSaveChanges saveable)
+            if (context.ChangeTracker.HasChanges())
             {
-                await saveable.SaveChangesAsync(cancellationToken);
+                await context.SaveChangesAsync(cancellationToken);
             }
         }
     }
 
     /// <summary>
-    /// Commits all transactions in order, then dispatches domain events.
-    /// Throws if the unit of work has been aborted.
-    /// No-op if not initialized.
+    /// Commits the shared transaction, then dispatches domain events.
+    /// Throws if the unit of work has been aborted. No-op if not initialized.
     /// </summary>
     public async Task CommitAsync(CancellationToken cancellationToken = default)
     {
-        if (!_isInitialized)
+        if (!_isInitialized || IsCompleted)
         {
-            return; // No-op if not initialized
+            return;
         }
 
         if (IsAborted)
@@ -193,17 +239,22 @@ public sealed class CompositeUnitOfWork(
         try
         {
             await SaveChangesAsync(cancellationToken);
-            var strategy = domainEventOptions?.DispatchStrategy ?? DomainEventDispatchStrategy.AlwaysUseOutbox;
-            
-            if (strategy == DomainEventDispatchStrategy.AlwaysUseOutbox)
+
+            // There may be no connection/transaction if nothing was read or written.
+            if (_transaction is not null)
             {
-                await CommitWithOutboxAsync(cancellationToken);
+                var strategy = domainEventOptions?.DispatchStrategy ?? DomainEventDispatchStrategy.AlwaysUseOutbox;
+
+                if (strategy == DomainEventDispatchStrategy.AlwaysUseOutbox)
+                {
+                    await CommitWithOutboxAsync(cancellationToken);
+                }
+                else
+                {
+                    await CommitWithDirectPublishAsync(cancellationToken);
+                }
             }
-            else
-            {
-                await CommitWithDirectPublishAsync(cancellationToken);
-            }
-            
+
             IsCompleted = true;
             await InvokeCompletedHandlersAsync();
         }
@@ -216,97 +267,59 @@ public sealed class CompositeUnitOfWork(
 
     /// <summary>
     /// Commits using the AlwaysUseOutbox strategy.
-    /// Writes events to outbox within the transaction before commit.
+    /// Writes events to the outbox within the shared transaction before commit.
     /// </summary>
     private async Task CommitWithOutboxAsync(CancellationToken cancellationToken)
     {
-        // Step 1: Collect all domain events from all transactions
-        // Events are automatically pushed to transactions via IDomainEventSink during SaveChanges
-        // Use HashSet to deduplicate events that may have been pushed to multiple transactions
-        var allEvents = new HashSet<DomainEventEnvelope>();
-        foreach (var (tx, _) in _opened)
+        if (_events.Any() && eventDispatcher != null)
         {
-            foreach (var evt in tx.CollectedEvents)
-            {
-                allEvents.Add(evt);
-            }
+            await eventDispatcher.DispatchEventsAsync(_events, cancellationToken);
+
+            // Persist outbox rows written by the dispatcher into the shared transaction.
+            await SaveChangesAsync(cancellationToken);
+
+            _events.Clear();
         }
 
-        if (allEvents.Any() && eventDispatcher != null)
-        {
-            await eventDispatcher.DispatchEventsAsync(allEvents, cancellationToken);
-            await SaveChangesAsync(cancellationToken);
-            
-            // Clear events from all transactions after successful dispatch
-            foreach (var (tx, _) in _opened)
-            {
-                tx.ClearCollectedEvents();
-            }
-        }
-        
-        // Step 3: Commit all transactions
-        foreach (var (tx, _) in _opened)
-        {
-            await tx.CommitAsync(cancellationToken);
-        }
+        await _transaction!.CommitAsync(cancellationToken);
     }
 
     /// <summary>
     /// Commits using the PublishWithFallback strategy.
-    /// Commits first, then publishes directly. On failure, writes to outbox in new scope.
+    /// Commits first, then publishes directly. On failure, writes to outbox in a new scope.
     /// </summary>
     private async Task CommitWithDirectPublishAsync(CancellationToken cancellationToken)
     {
-        // Step 1: Collect all domain events from all transactions
-        // Events are automatically pushed to transactions via IDomainEventSink during SaveChanges
-        // Use HashSet to deduplicate events that may have been pushed to multiple transactions
-        var allEvents = new HashSet<DomainEventEnvelope>();
-        foreach (var (tx, _) in _opened)
-        {
-            foreach (var evt in tx.CollectedEvents)
-            {
-                allEvents.Add(evt);
-            }
-        }
-        
-        // Step 2: Commit all transactions (business data is now persisted)
-        foreach (var (tx, _) in _opened)
-        {
-            await tx.CommitAsync(cancellationToken);
-        }
-        
-        // Step 3: Publish events directly after commit
+        // Snapshot events before commit; the contexts will be committed and cleared.
+        var allEvents = _events.ToList();
+
+        // Step 1: Commit the shared transaction (business data is now persisted).
+        await _transaction!.CommitAsync(cancellationToken);
+
+        // Step 2: Publish events directly after commit.
         if (allEvents.Any() && eventDispatcher != null)
         {
             try
             {
                 await eventDispatcher.PublishDirectlyAsync(allEvents, cancellationToken);
-                
-                // Clear events from all transactions after successful publish
-                foreach (var (tx, _) in _opened)
-                {
-                    tx.ClearCollectedEvents();
-                }
+
+                _events.Clear();
             }
             catch (Exception ex)
             {
-                // Business data is already committed, so we log and attempt fallback to outbox
-                // This ensures business data is not lost even if publish fails
+                // Business data is already committed, so we attempt fallback to outbox
+                // in a new scope. This ensures business data is not lost even if publish fails.
                 try
                 {
                     await eventDispatcher.WriteToOutboxInNewScopeAsync(allEvents, cancellationToken);
-                    
-                    // Clear events after successful outbox write
-                    foreach (var (tx, _) in _opened)
-                    {
-                        tx.ClearCollectedEvents();
-                    }
+
+                    _events.Clear();
                 }
                 catch (Exception outboxEx)
                 {
-                    // Both publish and outbox fallback failed
-                    // Business data is already committed, but events are lost
-                    // This is a critical scenario that should be monitored
+                    // Both publish and outbox fallback failed.
+                    // Business data is already committed, but events are lost.
+                    // This is a critical scenario that should be monitored.
                     throw new AggregateException(
                         "Failed to publish events directly and failed to write to outbox as fallback. Business data was committed successfully, but events may be lost.",
                         ex, outboxEx);
@@ -316,72 +329,75 @@ public sealed class CompositeUnitOfWork(
     }
 
     /// <summary>
-    /// Rolls back all transactions in reverse order.
-    /// Exceptions during rollback are caught and ignored to allow all sources to attempt rollback.
+    /// Rolls back the shared transaction. Exceptions during rollback are swallowed.
     /// No-op if not initialized.
     /// </summary>
     public async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
         if (!_isInitialized)
         {
-            return; // No-op if not initialized
+            return;
         }
 
-        // Rollback in reverse order
-        for (var i = _opened.Count - 1; i >= 0; i--)
+        if (_transaction is not null)
         {
             try
             {
-                await _opened[i].tx.RollbackAsync(cancellationToken);
+                await _transaction.RollbackAsync(cancellationToken);
             }
             catch
             {
-                // Ignore rollback errors to allow all sources to rollback
+                // Ignore rollback errors.
             }
         }
 
         IsCompleted = true;
 
-        // Invoke OnFailed handlers after rollback
         await InvokeFailedHandlersAsync();
     }
 
     /// <summary>
-    /// Disposes the unit of work, rolling back if not completed.
+    /// Disposes the unit of work, rolling back if not completed, then disposing all
+    /// materialized contexts, the transaction, and the connection.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
-        // If not completed or exception occurred, handle failure
-        if (!IsCompleted || _exception != null)
+        if (_isDisposed)
         {
-            if (!IsCompleted)
-            {
-                // Rollback will call InvokeFailedHandlersAsync
-                await RollbackAsync();
-            }
-            else if (_exception != null)
-            {
-                // Exception during commit but some cleanup succeeded
-                await InvokeFailedHandlersAsync();
-            }
+            return;
         }
 
-        // Always invoke disposed handlers if initialized
+        if (!IsCompleted)
+        {
+            // Rollback will call InvokeFailedHandlersAsync.
+            await RollbackAsync();
+        }
+        else if (_exception != null)
+        {
+            await InvokeFailedHandlersAsync();
+        }
+
         if (_isInitialized)
         {
             InvokeDisposedHandlers();
         }
 
-        // Dispose all transaction sources
-        foreach (var (tx, _) in _opened)
+        foreach (var context in _contexts.Values)
         {
-            if (tx is IAsyncDisposable disposable)
-            {
-                await disposable.DisposeAsync();
-            }
+            await context.DisposeAsync();
         }
 
-        IsDisposed = true;
+        if (_transaction is not null)
+        {
+            await _transaction.DisposeAsync();
+        }
+
+        if (_connection is not null)
+        {
+            await _connection.DisposeAsync();
+        }
+
+        _isDisposed = true;
     }
 
     /// <summary>
@@ -455,6 +471,24 @@ public sealed class CompositeUnitOfWork(
             catch
             {
                 // Log error but don't throw - allow other handlers to run
+            }
+        }
+    }
+
+    /// <summary>
+    /// Routes events collected by a DbContext during SaveChanges into the unit of work's
+    /// shared event buffer, deduplicating by reference.
+    /// </summary>
+    private sealed class BufferEnqueuer(List<DomainEventEnvelope> buffer) : ILocalTransactionEventEnqueuer
+    {
+        public void EnqueueEvents(IEnumerable<DomainEventEnvelope> events)
+        {
+            foreach (var evt in events)
+            {
+                if (!buffer.Contains(evt))
+                {
+                    buffer.Add(evt);
+                }
             }
         }
     }

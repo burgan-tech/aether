@@ -25,5 +25,8 @@ public class UnitOfWorkOptions
     /// Default is Required.
     /// </summary>
     public UnitOfWorkScopeOption Scope { get; set; } = UnitOfWorkScopeOption.Required;
+
+    /// <summary>Upper bound on distinct (DbContextType, Schema) contexts in one UnitOfWork. Guardrail.</summary>
+    public int MaxDbContextCount { get; set; } = 16;
 }
 

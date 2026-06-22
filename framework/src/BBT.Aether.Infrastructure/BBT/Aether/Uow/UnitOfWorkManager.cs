@@ -45,9 +45,8 @@ public sealed class UnitOfWorkManager(
         }
 
         // Create new root UoW (for RequiresNew or when no existing UoW for Required)
-        var sources = serviceProvider.GetServices<ILocalTransactionSource>();
         var eventDispatcher = serviceProvider.GetService<IDomainEventDispatcher>();
-        var root = new CompositeUnitOfWork(sources, eventDispatcher, domainEventOptions);
+        var root = new CompositeUnitOfWork(serviceProvider, eventDispatcher, domainEventOptions);
         await root.InitializeAsync(options, cancellationToken);
         return new UnitOfWorkScope(root, ambient);
     }
@@ -70,10 +69,9 @@ public sealed class UnitOfWorkManager(
         }
 
         // Create new prepared UoW
-        var sources = serviceProvider.GetServices<ILocalTransactionSource>();
         var eventDispatcher = serviceProvider.GetService<IDomainEventDispatcher>();
-        var root = new CompositeUnitOfWork(sources, eventDispatcher, domainEventOptions);
-        
+        var root = new CompositeUnitOfWork(serviceProvider, eventDispatcher, domainEventOptions);
+
         var scope = new UnitOfWorkScope(root, ambient);
         scope.SetOuter(current);
         scope.Prepare(preparationName);
