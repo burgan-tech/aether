@@ -1,42 +1,47 @@
 using System;
+using System.Collections.Generic;
+using System.Threading;
 
 namespace BBT.Aether.MultiSchema;
 
 /// <summary>
-/// Default implementation of <see cref="ICurrentSchema"/>.
+/// Default <see cref="ICurrentSchema"/> backed by an AsyncLocal stack so nested
+/// schema scopes flow across async calls and restore the previous schema on dispose.
 /// </summary>
-public class CurrentSchema : ICurrentSchema
+public sealed class CurrentSchema(ISchemaNameFormatter formatter) : ICurrentSchema
 {
-    private readonly ISchemaAccessor _accessor;
-    private readonly ISchemaNameFormatter _formatter;
+    private static readonly AsyncLocal<Stack<string>?> Current = new();
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="CurrentSchema"/> class.
-    /// </summary>
-    /// <param name="accessor">The schema accessor.</param>
-    /// <param name="formatter">The schema name formatter.</param>
-    public CurrentSchema(ISchemaAccessor accessor, ISchemaNameFormatter formatter)
-    {
-        _accessor = accessor;
-        _formatter = formatter;
-    }
+    public string? Name => Current.Value is { Count: > 0 } s ? s.Peek() : null;
 
-    /// <inheritdoc />
-    public string? Name => _accessor.Schema;
-
-    /// <inheritdoc />
-    public bool IsResolved => !string.IsNullOrWhiteSpace(_accessor.Schema);
-
-    /// <inheritdoc />
-    public void Set(string schema)
+    public IDisposable Change(string schema)
     {
         if (string.IsNullOrWhiteSpace(schema))
-            throw new ArgumentException("Schema cannot be null or whitespace.", nameof(schema));
+        {
+            throw new ArgumentException("Schema cannot be empty.", nameof(schema));
+        }
 
-        // Format the schema name according to database naming conventions
-        var formattedSchema = _formatter.Format(schema);
-        
-        _accessor.Schema = formattedSchema;
+        var formatted = formatter.Format(schema);
+        Current.Value ??= new Stack<string>();
+        Current.Value.Push(formatted);
+
+        return new PopOnDispose(formatted);
+    }
+
+    private sealed class PopOnDispose(string expected) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+
+            var popped = Current.Value?.Count > 0 ? Current.Value.Pop() : null;
+            if (!string.Equals(popped, expected, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Schema scope corrupted: out-of-order disposal detected.");
+            }
+        }
     }
 }
-

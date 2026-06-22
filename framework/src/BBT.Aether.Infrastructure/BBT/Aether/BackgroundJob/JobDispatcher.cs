@@ -48,12 +48,27 @@ public class JobDispatcher(
         
         var argsPayload = CloudEventEnvelopeHelper.ExtractDataPayload(eventSerializer, jobPayload, out var envelope);
 
+        IDisposable? schemaScope = null;
         if (envelope != null && !string.IsNullOrWhiteSpace(envelope.Schema))
         {
             var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
-            currentSchema.Set(envelope.Schema);
+            schemaScope = currentSchema.Change(envelope.Schema);
         }
 
+        using (schemaScope)
+        {
+            await DispatchCoreAsync(scope, jobId, handlerName, argsPayload, activity, cancellationToken);
+        }
+    }
+
+    private async Task DispatchCoreAsync(
+        AsyncServiceScope scope,
+        Guid jobId,
+        string handlerName,
+        ReadOnlyMemory<byte> argsPayload,
+        Activity? activity,
+        CancellationToken cancellationToken)
+    {
         var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
         var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
         var jobScheduler = scope.ServiceProvider.GetRequiredService<IJobScheduler>();

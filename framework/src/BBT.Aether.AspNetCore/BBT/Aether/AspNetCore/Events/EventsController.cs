@@ -61,29 +61,31 @@ public abstract class EventsController(
             
             // Step 3: Extract and set schema context from CloudEvent envelope
             var schemaFromEnvelope = TryExtractSchema(payload);
-            if (!string.IsNullOrWhiteSpace(schemaFromEnvelope))
-            {
-                CurrentSchema.Set(schemaFromEnvelope);
-            }
-            
-            // Step 4: Open UoW for storing the event (with schema context set)
-            await using var uow = await UnitOfWorkManager.BeginRequiresNew(cancellationToken);
+            IDisposable? schemaScope = !string.IsNullOrWhiteSpace(schemaFromEnvelope)
+                ? CurrentSchema.Change(schemaFromEnvelope)
+                : null;
 
-            // Step 5: Check inbox for duplicate (idempotency)
-            if (await InboxStore.HasProcessedAsync(eventId, cancellationToken))
+            using (schemaScope)
             {
-                Logger.LogInformation("Event {EventId} ({Name} v{Version}) has already been processed, skipping", 
-                    eventId, name, version);
+                // Step 4: Open UoW for storing the event (with schema context set)
+                await using var uow = await UnitOfWorkManager.BeginRequiresNew(cancellationToken);
+
+                // Step 5: Check inbox for duplicate (idempotency)
+                if (await InboxStore.HasProcessedAsync(eventId, cancellationToken))
+                {
+                    Logger.LogInformation("Event {EventId} ({Name} v{Version}) has already been processed, skipping",
+                        eventId, name, version);
+                    return Ok();
+                }
+
+                // Step 6: Store event as pending for background processing
+                await TryStorePendingEventAsync(payload, eventId, cancellationToken);
+
+                // Step 7: Commit UoW (flushes inbox)
+                await uow.CommitAsync(cancellationToken);
+
                 return Ok();
             }
-
-            // Step 6: Store event as pending for background processing
-            await TryStorePendingEventAsync(payload, eventId, cancellationToken);
-
-            // Step 7: Commit UoW (flushes inbox)
-            await uow.CommitAsync(cancellationToken);
-            
-            return Ok();
         }
         catch (Exception ex)
         {

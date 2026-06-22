@@ -3,25 +3,16 @@ using System;
 namespace BBT.Aether.MultiSchema;
 
 /// <summary>
-/// Represents the current schema context for multi-tenant or multi-schema scenarios.
+/// Represents the current schema context. The schema is an immutable working context
+/// pushed/popped via nested disposable scopes (AsyncLocal). It is NOT mutated in place.
 /// </summary>
 public interface ICurrentSchema
 {
-    /// <summary>
-    /// Gets the current schema name (e.g., runtime_loan, app_audit, etc.).
-    /// </summary>
+    /// <summary>The current (top-of-stack) schema name, or null if no scope is active.</summary>
     string? Name { get; }
 
     /// <summary>
-    /// Gets a value indicating whether the schema has been resolved.
+    /// Pushes a schema onto the current async-flow stack and returns a disposable that pops it.
     /// </summary>
-    bool IsResolved { get; }
-
-    /// <summary>
-    /// Sets the current schema manually.
-    /// </summary>
-    /// <param name="schema">The schema name to set.</param>
-    /// <exception cref="ArgumentException">Thrown when schema is null or whitespace.</exception>
-    void Set(string schema);
+    IDisposable Change(string schema);
 }
-
