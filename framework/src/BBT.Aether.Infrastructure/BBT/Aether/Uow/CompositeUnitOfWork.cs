@@ -332,7 +332,8 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     public async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
-        if (!_isInitialized)
+        // No-op if never initialized or already completed (committed or rolled back). Mirrors CommitAsync.
+        if (!_isInitialized || IsCompleted)
         {
             return;
         }
@@ -365,6 +366,10 @@ public sealed class CompositeUnitOfWork(
             return;
         }
 
+        // Set early: disposal must be a one-shot even if a step below throws, so a retry never
+        // re-invokes failed/disposed handlers or double-releases resources.
+        _isDisposed = true;
+
         if (!IsCompleted)
         {
             // Rollback will call InvokeFailedHandlersAsync.
@@ -380,22 +385,51 @@ public sealed class CompositeUnitOfWork(
             InvokeDisposedHandlers();
         }
 
+        // Dispose every resource, but never let one failure prevent releasing the connection —
+        // the connection is the pooled resource whose leak we must avoid. Collect and surface
+        // the first failure after everything has been attempted.
+        Exception? firstFailure = null;
+
         foreach (var context in _contexts.Values)
         {
-            await context.DisposeAsync();
+            try
+            {
+                await context.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                firstFailure ??= ex;
+            }
         }
 
         if (_transaction is not null)
         {
-            await _transaction.DisposeAsync();
+            try
+            {
+                await _transaction.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                firstFailure ??= ex;
+            }
         }
 
         if (_connection is not null)
         {
-            await _connection.DisposeAsync();
+            try
+            {
+                await _connection.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                firstFailure ??= ex;
+            }
         }
 
-        _isDisposed = true;
+        if (firstFailure is not null)
+        {
+            throw firstFailure;
+        }
     }
 
     /// <summary>

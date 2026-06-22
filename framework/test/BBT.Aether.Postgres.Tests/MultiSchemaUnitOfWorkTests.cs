@@ -183,6 +183,49 @@ public sealed class MultiSchemaUnitOfWorkTests(PostgresFixture fx)
         await uow.DisposeAsync();
     }
 
+    [Fact]
+    public async Task RollbackAsync_is_noop_after_completion()
+    {
+        await ArrangeSchemasAsync();
+        var sp = BuildProvider();
+
+        var failedHandlerCalls = 0;
+        var uow = new CompositeUnitOfWork(sp);
+        await uow.InitializeAsync(new UnitOfWorkOptions { IsTransactional = true });
+        uow.OnFailed((_, _) => { failedHandlerCalls++; return Task.CompletedTask; });
+
+        // Materialize a context so a connection/transaction exist.
+        _ = await uow.GetDbContextAsync<ProbeDbContext>(_schemaA);
+
+        await uow.CommitAsync();
+
+        await uow.RollbackAsync(); // must be a no-op
+
+        failedHandlerCalls.ShouldBe(0);
+        uow.IsCompleted.ShouldBeTrue();
+
+        await uow.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DisposeAsync_sets_disposed_and_is_idempotent()
+    {
+        await ArrangeSchemasAsync();
+        var sp = BuildProvider();
+
+        var uow = new CompositeUnitOfWork(sp);
+        await uow.InitializeAsync(new UnitOfWorkOptions { IsTransactional = true });
+
+        // Materialize a context so a connection/transaction exist.
+        _ = await uow.GetDbContextAsync<ProbeDbContext>(_schemaA);
+
+        await uow.DisposeAsync();
+
+        uow.IsDisposed.ShouldBeTrue();
+
+        await uow.DisposeAsync(); // second dispose must be a no-op (no throw)
+    }
+
     public sealed class Thing
     {
         public Guid Id { get; set; }
