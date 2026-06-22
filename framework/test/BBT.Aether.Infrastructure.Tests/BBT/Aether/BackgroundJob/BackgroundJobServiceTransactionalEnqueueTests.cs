@@ -62,7 +62,7 @@ public class BackgroundJobServiceTransactionalEnqueueTests
         // and the scheduler has NOT been called yet (deferred).
         jobId.ShouldNotBe(Guid.Empty);
         await _jobStore.Received(1).SaveAsync(Arg.Any<BackgroundJobInfo>(), Arg.Any<CancellationToken>());
-        await _uowManager.DidNotReceive().BeginAsync(Arg.Any<UnitOfWorkOptions>(), Arg.Any<CancellationToken>());
+        _uowManager.DidNotReceive().Begin(Arg.Any<UnitOfWorkOptions>());
         await ambientUow.DidNotReceive().CommitAsync(Arg.Any<CancellationToken>());
         await _jobScheduler.DidNotReceiveWithAnyArgs().ScheduleAsync(default!, default!, default!, default);
 
@@ -103,7 +103,7 @@ public class BackgroundJobServiceTransactionalEnqueueTests
         // Arrange — opt-in requested but NO ambient UoW → legacy self-contained path.
         _uowManager.Current.Returns((IUnitOfWork?)null);
         var ownUow = Substitute.For<IUnitOfWork>();
-        _uowManager.BeginAsync(Arg.Any<UnitOfWorkOptions>(), Arg.Any<CancellationToken>()).Returns(ownUow);
+        _uowManager.Begin(Arg.Any<UnitOfWorkOptions>()).Returns(ownUow);
 
         // Act
         await _sut.EnqueueAsync(
@@ -112,7 +112,7 @@ public class BackgroundJobServiceTransactionalEnqueueTests
             cancellationToken: CancellationToken.None);
 
         // Assert — opened and committed its own UoW (legacy behavior preserved).
-        await _uowManager.Received(1).BeginAsync(Arg.Any<UnitOfWorkOptions>(), Arg.Any<CancellationToken>());
+        _uowManager.Received(1).Begin(Arg.Any<UnitOfWorkOptions>());
         await ownUow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
     }
 }

@@ -89,8 +89,10 @@ public class UnitOfWorkAttribute : AetherMethodInterceptionAspect
             return;
         }
 
-        // No prepared UoW, create a new one
-        await using var uow = await uowManager.BeginAsync(options, cancellationToken);
+        // No prepared UoW, create a new one. Use the synchronous Begin so the unit of work is
+        // ambient in this frame and flows into the wrapped method (ProceedAsync) — BeginAsync's
+        // ambient assignment would not propagate to this method's continuation.
+        await using var uow = uowManager.Begin(options);
         try
         {
             await args.ProceedAsync();

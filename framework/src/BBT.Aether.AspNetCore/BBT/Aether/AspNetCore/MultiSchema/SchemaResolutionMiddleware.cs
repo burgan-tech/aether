@@ -44,14 +44,16 @@ public sealed class SchemaResolutionMiddleware : IMiddleware
                 await context.Response.WriteAsync("Schema could not be resolved.");
                 return;
             }
-            // Schema not found but not required, continue without setting
-        }
-        else
-        {
-            _currentSchema.Set(schema);
+
+            // Schema not found but not required, continue without a scope
+            await next(context);
+            return;
         }
 
-        await next(context);
+        using (_currentSchema.Change(schema))
+        {
+            await next(context);
+        }
     }
 }
 

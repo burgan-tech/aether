@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
+using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Guids;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -17,7 +18,7 @@ namespace BBT.Aether.Events;
 /// Entity Framework Core implementation of the outbox store.
 /// </summary>
 public class EfCoreOutboxStore<TDbContext>(
-    TDbContext dbContext,
+    IAetherDbContextProvider<TDbContext> dbContextProvider,
     IEventSerializer eventSerializer,
     IGuidGenerator guidGenerator,
     IClock clock) : IOutboxStore
@@ -25,6 +26,8 @@ public class EfCoreOutboxStore<TDbContext>(
 {
     public async Task StoreAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default)
     {
+        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
+
         // Serialize CloudEventEnvelope to bytes
         var serializedBytes = eventSerializer.Serialize(envelope);
 
@@ -63,6 +66,7 @@ public class EfCoreOutboxStore<TDbContext>(
         TimeSpan leaseDuration,
         CancellationToken cancellationToken = default)
     {
+        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var entityType = dbContext.Model.FindEntityType(typeof(BBT.Aether.Domain.Events.OutboxMessage))!;
         var tableName = entityType.GetTableName();
         var schema = entityType.GetSchema();

@@ -47,7 +47,6 @@ public static class AetherCoreModuleServiceCollectionExtensions
         services.AddSingleton<IGuidGenerator>(SimpleGuidGenerator.Instance);
         services.AddSingleton<ICurrentUserAccessor>(AsyncLocalCurrentUserAccessor.Instance);
         services.AddTransient<ICurrentUser, CurrentUser>();
-        services.AddSingleton<ISchemaAccessor>(AsyncLocalSchemaAccessor.Instance);
         services.TryAddSingleton<ISchemaNameFormatter, DefaultSchemaNameFormatter>();
         services.AddScoped<ICurrentSchema, CurrentSchema>();
         services.AddTransient<ILazyServiceProvider, LazyServiceProvider>();

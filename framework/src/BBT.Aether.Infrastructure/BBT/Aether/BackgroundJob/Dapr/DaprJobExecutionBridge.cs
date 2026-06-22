@@ -45,31 +45,35 @@ public sealed class DaprJobExecutionBridge(
             // Parse envelope and set schema context before jobStore access (multi-tenant support)
             var dataPayload = CloudEventEnvelopeHelper.ExtractDataPayload(eventSerializer, payload, out var envelope);
 
+            IDisposable? schemaScope = null;
             if (envelope != null && !string.IsNullOrWhiteSpace(envelope.Schema))
             {
                 var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
-                currentSchema.Set(envelope.Schema);
+                schemaScope = currentSchema.Change(envelope.Schema);
             }
 
-            var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
-            var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
-
-            if (jobInfo == null)
+            using (schemaScope)
             {
-                logger.LogWarning(
-                    "Job '{JobName}' not found in Scheduled state — it may have already been completed, failed, or cancelled",
-                    jobName);
+                var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
+                var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
+
+                if (jobInfo == null)
+                {
+                    logger.LogWarning(
+                        "Job '{JobName}' not found in Scheduled state — it may have already been completed, failed, or cancelled",
+                        jobName);
+                    activity?.SetStatus(ActivityStatusCode.Ok);
+                    return;
+                }
+
+                activity?.SetTag("job.handler_name", jobInfo.HandlerName);
+                activity?.SetTag("job.id", jobInfo.Id.ToString());
+
+                // Dispatch to handler with extracted data payload
+                await jobDispatcher.DispatchAsync(jobInfo.Id, jobInfo.HandlerName, dataPayload, cancellationToken);
+
                 activity?.SetStatus(ActivityStatusCode.Ok);
-                return;
             }
-
-            activity?.SetTag("job.handler_name", jobInfo.HandlerName);
-            activity?.SetTag("job.id", jobInfo.Id.ToString());
-
-            // Dispatch to handler with extracted data payload
-            await jobDispatcher.DispatchAsync(jobInfo.Id, jobInfo.HandlerName, dataPayload, cancellationToken);
-
-            activity?.SetStatus(ActivityStatusCode.Ok);
         }
         catch (Exception ex)
         {

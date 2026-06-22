@@ -1,196 +1,118 @@
 # Multi-Schema Implementation Notes
 
-## Developer Implementation Guide
+> These notes describe the **current** shared-connection / `SET LOCAL search_path`
+> implementation. Earlier revisions described a session-level `SET search_path` applied by an
+> `NpgsqlSchemaConnectionInterceptor`, plus an `ICurrentSchema.Set()` / `IsResolved` accessor.
+> Those are gone. See the corrected design below.
 
-### Overview
+## Design at a glance
 
-Multi-schema support in Aether allows applications to dynamically switch between database schemas based on HTTP request context (headers, query strings, or route values). This is particularly useful for multi-tenant applications where each tenant has their own schema.
+```
+                  using (currentSchema.Change("flow_a")) { ... }
+                                   │  (AsyncLocal stack, auto-restoring)
+                                   ▼
+   IAetherDbContextProvider<TDbContext>.GetDbContextAsync()
+                                   │  reads currentSchema.Name
+                                   ▼
+   active UnitOfWork (CompositeUnitOfWork)
+        ├── ONE NpgsqlConnection
+        ├── ONE NpgsqlTransaction
+        └── DbContext cache keyed by (DbContextType, Schema)
+                                   │  each context enlists on the shared tx (UseTransactionAsync)
+                                   ▼
+   SearchPathCommandInterceptor  ──►  SET LOCAL search_path TO "<schema>", public
+        (runs before EVERY command; skips when SearchPathState already == schema)
+                                   ▼
+                              PostgreSQL
+```
 
-### Key Design Decisions
+## Key design decisions
 
-1. **Manual Interceptor Registration**: Developers must manually register the database connection interceptor for their chosen provider. This provides flexibility and avoids unnecessary dependencies.
+1. **Schema is a scope, not a setting.** `ICurrentSchema.Change(schema)` pushes a formatted
+   schema onto an `AsyncLocal<Stack<string>>` and returns an `IDisposable` that pops it. There
+   is no mutable setter and no "is resolved" flag.
+   (`BBT.Aether.Core/BBT/Aether/MultiSchema/CurrentSchema.cs`)
 
-2. **Supported Providers**: PostgreSQL and SQL Server are currently supported through built-in interceptors.
+2. **One connection + one transaction per Unit of Work.** All schema-bound contexts in a UoW
+   share a single `NpgsqlConnection`/`NpgsqlTransaction`, so cross-schema writes commit
+   atomically. Contexts are lazily created and cached by `(Type, Schema)`; the connection is
+   opened on the first `GetDbContextAsync`.
+   (`BBT.Aether.Infrastructure/BBT/Aether/Uow/CompositeUnitOfWork.cs`)
 
-3. **No Automatic Configuration**: Unlike some other Aether features, multi-schema support requires explicit registration of both the resolution middleware and the database interceptor.
+3. **Per-command `SET LOCAL search_path`.** Schema isolation is enforced by
+   `SearchPathCommandInterceptor`, which prefixes `SET LOCAL search_path TO "<schema>", public`
+   before each command. `SET LOCAL` is transaction-scoped, so a one-time set would be clobbered
+   by sibling contexts on the same transaction. A `SearchPathState` skips the redundant `SET`
+   when the connection already has the right schema.
+   (`.../Uow/EntityFrameworkCore/SearchPathCommandInterceptor.cs`, `SearchPathState.cs`)
 
-## Implementation Steps
+4. **Schema-agnostic mappings.** Entities use `ToTable("name")` with no schema, so EF Core
+   compiles one model per context type that serves every schema; `search_path` selects the
+   schema at runtime.
 
-### 1. Service Registration
+5. **PostgreSQL only.** `Npgsql` is a direct dependency of `BBT.Aether.Infrastructure`; the UoW
+   owns raw Npgsql types. There is no SQL Server schema path in this model.
+
+6. **PgBouncer-safe.** Because schema is applied with `SET LOCAL`, it never leaks to session or
+   pooled state. Verified by `PgBouncerSearchPathTests`.
+
+## Wiring
 
 ```csharp
-// Add schema resolution
-builder.Services.AddSchemaResolution(options =>
-{
-    options.HeaderKey = "X-Schema";
-    options.QueryStringKey = "schema";
-    options.RouteValueKey = "schema";
-    options.ThrowIfNotFound = true;
-});
-
-// Add DbContext
-builder.Services.AddAetherDbContext<MyDbContext>(options =>
-    options.UseNpgsql(connectionString));
-
-// Add appropriate interceptor
-// For PostgreSQL:
-builder.Services.AddScoped<NpgsqlSchemaConnectionInterceptor>();
-builder.Services.AddDbContext<MyDbContext>((sp, options) =>
-{
-    options.AddInterceptors(sp.GetRequiredService<NpgsqlSchemaConnectionInterceptor>());
-});
-
-// For SQL Server:
-// builder.Services.AddScoped<SqlServerSchemaConnectionInterceptor>();
-// builder.Services.AddDbContext<MyDbContext>((sp, options) =>
-// {
-//     options.AddInterceptors(sp.GetRequiredService<SqlServerSchemaConnectionInterceptor>());
-// });
+services.AddAetherDbContext<MyDbContext>(
+    connectionString,
+    (sp, options) => options.UseNpgsql(connectionString));
 ```
 
-### 2. Middleware Registration
+`AddAetherDbContext` registers:
 
-```csharp
-var app = builder.Build();
+- `IAetherDbContextConfigurator<TDbContext>` (`AetherDbContextConfigurator<>`) — captures the
+  connection string and the configure delegate; `BuildOptions(sharedConnection)` re-applies the
+  configuration then binds to the shared connection via `UseNpgsql(connection)` (this overrides
+  the connection-string-based provider call but keeps interceptors such as `AuditInterceptor`).
+- The design-time/migrations `DbContext` registration (`AddDbContext`).
+- `AddAetherUnitOfWork<TDbContext>()` — ambient accessor (`IAmbientUnitOfWorkAccessor`,
+  AsyncLocal singleton), `IUnitOfWorkManager` (scoped), the domain-event sink, and
+  `IAetherDbContextProvider<>` (scoped).
 
-app.UseRouting();                    // 1. Must be first for route-based resolution
-app.UseAuthentication();             // 2. If using JWT claims
-app.UseSchemaResolution();           // 3. Schema resolution
-app.UseUnitOfWorkMiddleware();       // 4. After schema is set
-app.MapControllers();                // 5. Endpoints last
+The `CompositeUnitOfWork` builds each schema-bound context's options from the configurator and
+adds a fresh `SearchPathCommandInterceptor(schema, sharedState)` per context.
 
-app.Run();
-```
+## Validation and formatting
 
-### 3. Usage in Code
+- `DefaultSchemaNameFormatter.Format` normalizes the raw name (lowercase, `_` separators,
+  strip invalid chars, leading letter/underscore, max 63). `Change` formats before pushing.
+- `PostgreSqlIdentifier.QuoteSchema` validates against `^[a-zA-Z_][a-zA-Z0-9_]*$` and quotes the
+  name before it is interpolated into `SET LOCAL`. Invalid names throw
+  `Invalid PostgreSQL schema name: <name>`.
 
-Schema is automatically resolved from HTTP context and available via `ICurrentSchema`:
+## Guardrails / common errors
 
-```csharp
-public class MyService
-{
-    private readonly ICurrentSchema _currentSchema;
-    
-    public MyService(ICurrentSchema currentSchema)
-    {
-        _currentSchema = currentSchema;
-    }
-    
-    public void DoWork()
-    {
-        // Schema is automatically set by middleware
-        var schema = _currentSchema.Name;
-        // Database queries will use this schema
-    }
-}
-```
+| Message | Cause |
+|---------|-------|
+| `Current schema is not set.` | `IAetherDbContextProvider.GetDbContextAsync()` called with no active `Change(...)` scope. |
+| `No active UnitOfWork.` | No UoW is ambient when a context is requested. |
+| `UnitOfWork DbContext limit exceeded. Limit: N` | More than `MaxDbContextCount` distinct `(Type, Schema)` contexts in one UoW (default 16). |
+| `Invalid PostgreSQL schema name: X` | Schema name fails the identifier regex. |
+| `Schema scope corrupted: out-of-order disposal detected.` | `Change(...)` scopes disposed out of order. |
 
-## Database Interceptors
+## Background processors
 
-### PostgreSQL (NpgsqlSchemaConnectionInterceptor)
+The outbox/inbox processors are single-schema: they read `AetherOutboxOptions.Schema` /
+`AetherInboxOptions.Schema`, wrap their work in `currentSchema.Change(options.Schema)`, and use
+short `RequiresNew` transactional UoWs (lease → publish-without-transaction → record outcome).
+If `Schema` is null/empty they log a warning and no-op. Run one instance per schema.
+(`BBT.Aether.Infrastructure/BBT/Aether/Events/Processing/OutboxProcessor.cs`)
 
-- **SQL Command**: `SET search_path = "schema_name"`
-- **When**: Executed when database connection opens
-- **Package Required**: `Npgsql.EntityFrameworkCore.PostgreSQL`
+## Reference tests
 
-### SQL Server (SqlServerSchemaConnectionInterceptor)
+These integration tests in `framework/test/BBT.Aether.Postgres.Tests/` are the source of truth
+for behavior:
 
-- **SQL Command**: `SET SCHEMA 'schema_name'`
-- **When**: Executed when database connection opens
-- **Package Required**: `Microsoft.EntityFrameworkCore.SqlServer`
-
-## Important Notes
-
-### Middleware Order
-
-⚠️ **Critical**: `UseSchemaResolution()` must come **after** `UseRouting()` if you're using route-based schema resolution.
-
-### Interceptor Registration
-
-⚠️ **Important**: You must call `AddDbContext<TDbContext>` a second time to add the interceptor. This is because `AddAetherDbContext` already registers the DbContext, and the interceptor needs to be added separately.
-
-### Schema Validation
-
-Consider implementing schema validation to prevent SQL injection:
-
-```csharp
-public class ValidatedSchemaResolutionStrategy : ISchemaResolutionStrategy
-{
-    private readonly ISchemaResolutionStrategy _innerStrategy;
-    private readonly HashSet<string> _allowedSchemas;
-    
-    public string? TryResolve(HttpContext httpContext)
-    {
-        var schema = _innerStrategy.TryResolve(httpContext);
-        
-        if (schema != null && !_allowedSchemas.Contains(schema))
-        {
-            throw new UnauthorizedAccessException($"Schema '{schema}' is not allowed.");
-        }
-        
-        return schema;
-    }
-}
-```
-
-## Common Issues
-
-1. **Schema not resolving**: Ensure middleware is registered after `UseRouting()`
-2. **SQL not executing**: Verify interceptor is registered and added to DbContext
-3. **Schema is null**: Check that request contains schema in header/query/route
-4. **Wrong schema used**: Verify middleware order in pipeline
-
-## Migration Support
-
-Implement `IMultiSchemaMigrator<TContext>` to apply migrations across all schemas:
-
-```csharp
-public class MyMultiSchemaMigrator : IMultiSchemaMigrator<MyDbContext>
-{
-    public async Task MigrateAllAsync(CancellationToken cancellationToken = default)
-    {
-        var schemas = new[] { "tenant1", "tenant2", "tenant3" };
-        
-        foreach (var schema in schemas)
-        {
-            using (_currentSchema.Use(schema))
-            {
-                await _dbContext.Database.MigrateAsync(cancellationToken);
-            }
-        }
-    }
-}
-
-// Run at startup
-await app.UseMultiSchemaMigrationsAsync<MyDbContext>();
-```
-
-## Architecture
-
-```
-HTTP Request
-    ↓
-UseRouting()
-    ↓
-UseSchemaResolution() → ICurrentSchemaResolver → Strategies (Route/Header/Query)
-    ↓                           ↓
-    |                   ICurrentSchema.Set(schema)
-    |                           ↓
-    |                   AsyncLocalSchemaAccessor
-    ↓
-Controller/Service → ICurrentSchema.Name
-    ↓
-Repository/DbContext
-    ↓
-NpgsqlSchemaConnectionInterceptor → SET search_path
-    ↓
-Database (correct schema)
-```
-
-## Extension Points
-
-- **Custom Resolution Strategy**: Implement `ISchemaResolutionStrategy`
-- **Custom Migrator**: Implement `IMultiSchemaMigrator<TContext>`
-- **Schema Provider**: Create custom interceptor inheriting from `DbConnectionInterceptor`
-
-
+- `MultiSchemaUnitOfWorkTests` — atomic cross-schema commit/rollback, isolation via search_path,
+  the SET-skip optimization, and the `MaxDbContextCount` guardrail.
+- `PgBouncerSearchPathTests` — `SET LOCAL` does not leak to a fresh/pooled connection.
+- `OutboxWithinSharedTransactionTests` — a domain event is written to the outbox inside the same
+  shared transaction as the business data (default `AlwaysUseOutbox`).
+- `DbContextConfiguratorTests` — `BuildOptions` binds the shared connection and preserves
+  interceptors.

@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
+using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -17,19 +18,21 @@ namespace BBT.Aether.Events;
 /// Entity Framework Core implementation of the inbox store.
 /// </summary>
 public class EfCoreInboxStore<TDbContext>(
-    TDbContext dbContext,
+    IAetherDbContextProvider<TDbContext> dbContextProvider,
     IEventSerializer eventSerializer,
     IClock clock) : IInboxStore
     where TDbContext : DbContext, IHasEfCoreInbox
 {
     public async Task<bool> HasProcessedAsync(string eventId, CancellationToken cancellationToken = default)
     {
+        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         return await dbContext.InboxMessages
             .AnyAsync(m => m.Id == eventId && m.Status == IncomingEventStatus.Processed, cancellationToken);
     }
 
     public async Task MarkAsProcessedAsync(string eventId, CancellationToken cancellationToken = default)
     {
+        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var message = await dbContext.InboxMessages
             .FirstOrDefaultAsync(m => m.Id == eventId, cancellationToken);
 
@@ -41,6 +44,7 @@ public class EfCoreInboxStore<TDbContext>(
 
     public async Task StorePendingAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default)
     {
+        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var now = clock.UtcNow;
 
         // Serialize CloudEventEnvelope to bytes
@@ -80,6 +84,7 @@ public class EfCoreInboxStore<TDbContext>(
 
     public async Task<List<InboxMessage>> GetPendingEventsAsync(int batchSize, CancellationToken cancellationToken = default)
     {
+        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var domainMessages = await dbContext.InboxMessages
             .Where(m => m.Status == IncomingEventStatus.Pending)
             .OrderBy(m => m.CreatedAt)
@@ -105,6 +110,7 @@ public class EfCoreInboxStore<TDbContext>(
 
     public async Task MarkAsProcessingAsync(string eventId, CancellationToken cancellationToken = default)
     {
+        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var message = await dbContext.InboxMessages
             .FirstOrDefaultAsync(m => m.Id == eventId, cancellationToken);
 
@@ -116,6 +122,7 @@ public class EfCoreInboxStore<TDbContext>(
 
     public async Task MarkAsFailedAsync(string eventId, CancellationToken cancellationToken = default)
     {
+        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var message = await dbContext.InboxMessages
             .FirstOrDefaultAsync(m => m.Id == eventId, cancellationToken);
 
@@ -128,6 +135,7 @@ public class EfCoreInboxStore<TDbContext>(
     public async Task<int> CleanupOldMessagesAsync(int batchSize, TimeSpan retentionPeriod,
         CancellationToken cancellationToken = default)
     {
+        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var cutoffDate = clock.UtcNow - retentionPeriod;
 
         var oldMessages = await dbContext.InboxMessages
@@ -151,6 +159,7 @@ public class EfCoreInboxStore<TDbContext>(
         TimeSpan leaseDuration,
         CancellationToken cancellationToken = default)
     {
+        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var entityType = dbContext.Model.FindEntityType(typeof(BBT.Aether.Domain.Events.InboxMessage))!;
         var tableName = entityType.GetTableName();
         var schema = entityType.GetSchema();

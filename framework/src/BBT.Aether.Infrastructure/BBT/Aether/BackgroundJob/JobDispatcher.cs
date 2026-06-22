@@ -48,12 +48,27 @@ public class JobDispatcher(
         
         var argsPayload = CloudEventEnvelopeHelper.ExtractDataPayload(eventSerializer, jobPayload, out var envelope);
 
+        IDisposable? schemaScope = null;
         if (envelope != null && !string.IsNullOrWhiteSpace(envelope.Schema))
         {
             var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
-            currentSchema.Set(envelope.Schema);
+            schemaScope = currentSchema.Change(envelope.Schema);
         }
 
+        using (schemaScope)
+        {
+            await DispatchCoreAsync(scope, jobId, handlerName, argsPayload, activity, cancellationToken);
+        }
+    }
+
+    private async Task DispatchCoreAsync(
+        AsyncServiceScope scope,
+        Guid jobId,
+        string handlerName,
+        ReadOnlyMemory<byte> argsPayload,
+        Activity? activity,
+        CancellationToken cancellationToken)
+    {
         var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
         var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
         var jobScheduler = scope.ServiceProvider.GetRequiredService<IJobScheduler>();
@@ -61,7 +76,7 @@ public class JobDispatcher(
         string? jobName = null;
 
         // First UoW: Check idempotency and update status to Running
-        await using (var uow = await uowManager.BeginRequiresNew(cancellationToken))
+        await using (var uow = uowManager.BeginRequiresNew())
         {
             var jobInfo = await jobStore.GetAsync(jobId, cancellationToken);
             if (jobInfo == null)
@@ -104,7 +119,7 @@ public class JobDispatcher(
         // Second UoW: Execute handler and mark as completed
         try
         {
-            await using var handlerUow = await uowManager.BeginRequiresNew(cancellationToken);
+            await using var handlerUow = uowManager.BeginRequiresNew();
 
             await InvokeHandlerAsync(scope.ServiceProvider, handlerName, argsPayload, cancellationToken);
 
@@ -222,7 +237,7 @@ public class JobDispatcher(
     {
         try
         {
-            await using var uow = await uowManager.BeginRequiresNew(cancellationToken);
+            await using var uow = uowManager.BeginRequiresNew();
             await jobStore.UpdateStatusAsync(jobId, status, clock.UtcNow, errorMessage, cancellationToken);
             await uow.CommitAsync(cancellationToken);
         }

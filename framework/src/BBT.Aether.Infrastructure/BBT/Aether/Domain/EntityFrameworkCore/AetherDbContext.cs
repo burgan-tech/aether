@@ -26,8 +26,8 @@ public abstract class AetherDbContext<TDbContext>(
 {
     /// <summary>
     /// Gets or sets the local transaction event enqueuer.
-    /// When set by EfCoreTransactionSource, events will be routed directly to the owning 
-    /// local transaction instead of relying on ambient Unit of Work context.
+    /// When set by the owning UnitOfWork, events will be routed directly to it
+    /// instead of relying on ambient Unit of Work context.
     /// This ensures events reach the correct UoW even when SaveChanges is called directly on DbContext.
     /// </summary>
     public ILocalTransactionEventEnqueuer? LocalEventEnqueuer { get; set; }
