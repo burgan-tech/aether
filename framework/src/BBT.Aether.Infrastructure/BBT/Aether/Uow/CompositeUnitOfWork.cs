@@ -41,6 +41,7 @@ public sealed class CompositeUnitOfWork(
     private UnitOfWorkOptions _options = new();
     private bool _isInitialized;
     private bool _isDisposed;
+    private bool _failedHandlersInvoked;
     private Exception? _exception;
 
     /// <summary>
@@ -477,6 +478,15 @@ public sealed class CompositeUnitOfWork(
 
     private async Task InvokeFailedHandlersAsync()
     {
+        // Fire at most once: both RollbackAsync and the DisposeAsync `_exception != null` branch can reach
+        // here (e.g. commit throws → explicit RollbackAsync → DisposeAsync), and handlers must not run twice.
+        if (_failedHandlersInvoked)
+        {
+            return;
+        }
+
+        _failedHandlersInvoked = true;
+
         // Iterate over a copy to allow handlers to unsubscribe
         foreach (var handler in _failedHandlers.ToArray())
         {

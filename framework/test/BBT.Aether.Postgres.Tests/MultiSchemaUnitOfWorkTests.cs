@@ -226,6 +226,35 @@ public sealed class MultiSchemaUnitOfWorkTests(PostgresFixture fx)
         await uow.DisposeAsync(); // second dispose must be a no-op (no throw)
     }
 
+    [Fact]
+    public async Task Failed_handlers_fire_at_most_once_across_rollback_and_dispose()
+    {
+        await ArrangeSchemasAsync();
+        var sp = BuildProvider();
+
+        var failedHandlerCalls = 0;
+        var uow = new CompositeUnitOfWork(sp);
+        await uow.InitializeAsync(new UnitOfWorkOptions { IsTransactional = true });
+        uow.OnFailed((_, _) => { failedHandlerCalls++; return Task.CompletedTask; });
+
+        // Force the commit to throw at SaveChanges: seed a row via raw SQL (same transaction; search_path
+        // resolves the unqualified table to this context's schema), then add an EF row with the same PK so
+        // the commit-time INSERT hits a unique violation. (Adding two tracked entities with the same key
+        // would instead throw at tracking time, before commit.)
+        var a = await uow.GetDbContextAsync<ProbeDbContext>(_schemaA);
+        var dupId = Guid.NewGuid();
+        await a.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO things (\"Id\", \"Name\") VALUES ({dupId}, 'seed')");
+        a.Set<Thing>().Add(new Thing { Id = dupId, Name = "dup" });
+
+        await Should.ThrowAsync<Exception>(async () => await uow.CommitAsync()); // sets _exception, rethrows
+
+        // Explicit rollback (fires failed handlers once), then dispose (must NOT fire them again).
+        await uow.RollbackAsync();
+        await uow.DisposeAsync();
+
+        failedHandlerCalls.ShouldBe(1);
+    }
+
     public sealed class Thing
     {
         public Guid Id { get; set; }
