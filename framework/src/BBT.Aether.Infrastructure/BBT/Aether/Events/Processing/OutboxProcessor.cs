@@ -67,9 +67,8 @@ public class OutboxProcessor<TDbContext>(
             // columns (LockedBy/LockedUntil) persist, so other workers still skip these
             // messages until the lease expires.
             List<OutboxMessage> messages;
-            await using (var leaseUow = await uowManager.BeginAsync(
-                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true },
-                cancellationToken))
+            await using (var leaseUow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
             {
                 messages = (await outboxStore.LeaseBatchAsync(
                     options.BatchSize,
@@ -142,9 +141,8 @@ public class OutboxProcessor<TDbContext>(
             }
 
             // PHASE 3: persist status updates (short transaction). No external calls here.
-            await using (var updateUow = await uowManager.BeginAsync(
-                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true },
-                cancellationToken))
+            await using (var updateUow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
             {
                 var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
 
@@ -200,9 +198,8 @@ public class OutboxProcessor<TDbContext>(
 
         using (currentSchema.Change(options.Schema))
         {
-            await using var uow = await uowManager.BeginAsync(
-                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true },
-                cancellationToken);
+            await using var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
 
             var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
 

@@ -59,8 +59,27 @@ public static class UnitOfWorkManagerExtensions
             {
                 IsTransactional = true,
                 Scope = UnitOfWorkScopeOption.RequiresNew
-            }, 
+            },
             cancellationToken);
+    }
+
+    /// <summary>
+    /// Synchronously begins a new transactional unit of work (RequiresNew) and makes it ambient in
+    /// the CALLER's execution flow. Mirrors <see cref="BeginRequiresNew(IUnitOfWorkManager, CancellationToken)"/>
+    /// but uses the synchronous <see cref="IUnitOfWorkManager.Begin"/> so the ambient assignment
+    /// propagates to the caller (required for programmatic/background callers whose provider-backed
+    /// stores resolve their DbContext via the ambient unit of work).
+    /// </summary>
+    /// <param name="uowManager">The unit of work manager</param>
+    /// <returns>A transactional, ambient unit of work scope</returns>
+    public static IUnitOfWork BeginRequiresNew(this IUnitOfWorkManager uowManager)
+    {
+        return uowManager.Begin(
+            new UnitOfWorkOptions
+            {
+                IsTransactional = true,
+                Scope = UnitOfWorkScopeOption.RequiresNew
+            });
     }
 }
 

@@ -186,17 +186,13 @@ public sealed class OutboxWithinSharedTransactionTests(PostgresFixture fx)
         var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
         var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
 
-        var ambient = ssp.GetRequiredService<IAmbientUnitOfWorkAccessor>();
-
         using (currentSchema.Change(_schema))
         {
-            await using var uow = await uowManager.BeginAsync(
+            // Begin (synchronous) establishes the ambient UoW in this caller's flow, so both the
+            // outbox store's IAetherDbContextProvider (resolved during commit) and our provider see
+            // the active UoW without any manual ambient assignment.
+            await using var uow = uowManager.Begin(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-
-            // BeginAsync sets the ambient UoW inside its own async flow, which does not propagate
-            // the AsyncLocal write back to this caller. Re-assert it here so both the outbox store's
-            // IAetherDbContextProvider (resolved during commit) and our provider see the active UoW.
-            ambient.Current = uow;
 
             var ctx = await provider.GetDbContextAsync();
             ctx.Set<Order>().Add(new Order(Guid.NewGuid(), "Alice"));
@@ -220,14 +216,10 @@ public sealed class OutboxWithinSharedTransactionTests(PostgresFixture fx)
         var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
         var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
 
-        var ambient = ssp.GetRequiredService<IAmbientUnitOfWorkAccessor>();
-
         using (currentSchema.Change(_schema))
         {
-            await using var uow = await uowManager.BeginAsync(
+            await using var uow = uowManager.Begin(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-
-            ambient.Current = uow;
 
             var ctx = await provider.GetDbContextAsync();
             ctx.Set<Order>().Add(new Order(Guid.NewGuid(), "Bob"));

@@ -144,9 +144,8 @@ public sealed class BackgroundJobService(
             return effectiveJobId;
         }
 
-        await using var uow = await uowManager.BeginAsync(
-            options: new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew },
-            cancellationToken: cancellationToken);
+        await using var uow = uowManager.Begin(
+            options: new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew });
         try
         {
             // Save to job store
@@ -198,7 +197,7 @@ public sealed class BackgroundJobService(
 
         logger.LogInformation("Updating job with entity id '{Id}' to new schedule '{NewSchedule}'", id, newSchedule);
 
-        await using var uow = await uowManager.BeginAsync(cancellationToken: cancellationToken);
+        await using var uow = uowManager.Begin();
         try
         {
             // Load job from store
@@ -266,7 +265,7 @@ public sealed class BackgroundJobService(
 
         logger.LogInformation("Deleting job with entity id '{Id}'", id);
 
-        await using var uow = await uowManager.BeginAsync(cancellationToken: cancellationToken);
+        await using var uow = uowManager.Begin();
         try
         {
             // Load job from store

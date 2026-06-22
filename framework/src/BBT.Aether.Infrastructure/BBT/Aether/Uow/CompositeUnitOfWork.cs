@@ -85,6 +85,18 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     public Task InitializeAsync(UnitOfWorkOptions options, CancellationToken cancellationToken = default)
     {
+        InitializeCore(options);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Synchronously initializes the unit of work. Because initialization does no real async work
+    /// (it only sets fields; the connection/transaction open lazily on first DbContext creation),
+    /// this lets a caller begin a unit of work in its own execution frame — which is required for
+    /// ambient (AsyncLocal) propagation to flow into the caller's continuations.
+    /// </summary>
+    public void InitializeCore(UnitOfWorkOptions options)
+    {
         if (_isInitialized)
         {
             throw new InvalidOperationException("CompositeUnitOfWork has already been initialized.");
@@ -93,8 +105,6 @@ public sealed class CompositeUnitOfWork(
         _options = options;
         Options = options;
         _isInitialized = true;
-
-        return Task.CompletedTask;
     }
 
     /// <inheritdoc />

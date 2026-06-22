@@ -76,7 +76,7 @@ public class JobDispatcher(
         string? jobName = null;
 
         // First UoW: Check idempotency and update status to Running
-        await using (var uow = await uowManager.BeginRequiresNew(cancellationToken))
+        await using (var uow = uowManager.BeginRequiresNew())
         {
             var jobInfo = await jobStore.GetAsync(jobId, cancellationToken);
             if (jobInfo == null)
@@ -119,7 +119,7 @@ public class JobDispatcher(
         // Second UoW: Execute handler and mark as completed
         try
         {
-            await using var handlerUow = await uowManager.BeginRequiresNew(cancellationToken);
+            await using var handlerUow = uowManager.BeginRequiresNew();
 
             await InvokeHandlerAsync(scope.ServiceProvider, handlerName, argsPayload, cancellationToken);
 
@@ -237,7 +237,7 @@ public class JobDispatcher(
     {
         try
         {
-            await using var uow = await uowManager.BeginRequiresNew(cancellationToken);
+            await using var uow = uowManager.BeginRequiresNew();
             await jobStore.UpdateStatusAsync(jobId, status, clock.UtcNow, errorMessage, cancellationToken);
             await uow.CommitAsync(cancellationToken);
         }

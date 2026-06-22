@@ -71,7 +71,7 @@ public class InboxProcessor<TDbContext>(
                 // Lease pending events with database-level locking inside a short UoW so the
                 // schema-bound context/transaction is available to the store.
                 IReadOnlyList<InboxMessage> pendingEvents;
-                await using (var leaseUow = await unitOfWorkManager.BeginRequiresNew(cancellationToken))
+                await using (var leaseUow = unitOfWorkManager.BeginRequiresNew())
                 {
                     pendingEvents = await inboxStore.LeaseBatchAsync(
                         options.ProcessingBatchSize,
@@ -120,7 +120,7 @@ public class InboxProcessor<TDbContext>(
         try
         {
             var unitOfWorkManager = scopedServiceProvider.GetRequiredService<IUnitOfWorkManager>();
-            await using var uow = await unitOfWorkManager.BeginRequiresNew(cancellationToken);
+            await using var uow = unitOfWorkManager.BeginRequiresNew();
 
             var inboxStore = scopedServiceProvider.GetRequiredService<IInboxStore>();
             var invokerRegistry = scopedServiceProvider.GetRequiredService<IDistributedEventInvokerRegistry>();
@@ -157,7 +157,7 @@ public class InboxProcessor<TDbContext>(
             }
 
             // Begin a new UoW for handler execution + marking as processed
-            await using var handlerUow = await unitOfWorkManager.BeginRequiresNew(cancellationToken);
+            await using var handlerUow = unitOfWorkManager.BeginRequiresNew();
             
             // Invoke the handler
             await invoker.InvokeAsync(scopedServiceProvider, inboxMessage.EventData, cancellationToken);
@@ -187,7 +187,7 @@ public class InboxProcessor<TDbContext>(
         try
         {
             var unitOfWorkManager = scopedServiceProvider.GetRequiredService<IUnitOfWorkManager>();
-            await using var uow = await unitOfWorkManager.BeginRequiresNew(cancellationToken);
+            await using var uow = unitOfWorkManager.BeginRequiresNew();
 
             var inboxStore = scopedServiceProvider.GetRequiredService<IInboxStore>();
             await inboxStore.MarkAsFailedAsync(eventId, cancellationToken);
@@ -230,7 +230,7 @@ public class InboxProcessor<TDbContext>(
 
             using (currentSchema.Change(options.Schema!))
             {
-                await using var uow = await unitOfWorkManager.BeginRequiresNew(cancellationToken);
+                await using var uow = unitOfWorkManager.BeginRequiresNew();
 
                 var deletedCount = await inboxStore.CleanupOldMessagesAsync(
                     options.CleanupBatchSize,
