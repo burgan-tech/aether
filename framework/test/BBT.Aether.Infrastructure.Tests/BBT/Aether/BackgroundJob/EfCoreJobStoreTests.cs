@@ -82,4 +82,43 @@ public class EfCoreJobStoreTests
         row.Id.ShouldBe(id);
         row.JobName.ShouldBe("job-new");
     }
+
+    [Fact]
+    public async Task SaveAsync_RoundTripsKindRetryAndArmingFields()
+    {
+        await using var db = NewContext();
+        var store = new EfCoreJobStore<TestJobDbContext>(new FixedDbContextProvider<TestJobDbContext>(db));
+
+        var id = Guid.NewGuid();
+        var job = new BackgroundJobInfo(id, "handler", "job-rt")
+        {
+            ExpressionValue = "0 * * * *",
+            Payload = JsonDocument.Parse("{\"v\":1}").RootElement
+        };
+
+        // Defaults set by the public ctor.
+        job.Status.ShouldBe(BackgroundJobStatus.Pending);
+        job.Kind.ShouldBe(JobKind.OneShot);
+        job.NextRetryAt.ShouldNotBeNull();
+
+        // Set the round-trip fields explicitly.
+        job.Kind = JobKind.Recurring;
+        job.MaxRetryCount = 5;
+        var nextRetryAt = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        var lastRunAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        job.NextRetryAt = nextRetryAt;
+        job.LastRunAt = lastRunAt;
+
+        await store.SaveAsync(job);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var row = (await db.BackgroundJobs.ToListAsync()).ShouldHaveSingleItem();
+        row.Id.ShouldBe(id);
+        row.Status.ShouldBe(BackgroundJobStatus.Pending);
+        row.Kind.ShouldBe(JobKind.Recurring);
+        row.MaxRetryCount.ShouldBe(5);
+        row.NextRetryAt.ShouldBe(nextRetryAt);
+        row.LastRunAt.ShouldBe(lastRunAt);
+    }
 }

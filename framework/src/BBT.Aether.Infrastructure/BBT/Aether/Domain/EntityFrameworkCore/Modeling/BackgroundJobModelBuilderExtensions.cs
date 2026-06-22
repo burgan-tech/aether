@@ -53,6 +53,19 @@ public static class BackgroundJobModelBuilderExtensions
             entity.Property(e => e.LastError)
                 .HasMaxLength(4000);
 
+            entity.Property(e => e.Kind)
+                .HasConversion<int>();
+
+            entity.Property(e => e.MaxRetryCount);
+
+            entity.Property(e => e.NextRetryAt);
+
+            entity.Property(e => e.LastRunAt);
+
+            // Index for the arming poller (query by status + next due time)
+            entity.HasIndex(e => new { e.Status, e.NextRetryAt })
+                .HasDatabaseName("IX_BackgroundJobs_Arming");
+
             // Index for processing jobs (query by status)
             entity.HasIndex(e => new { e.Status, e.HandledTime })
                 .HasDatabaseName("IX_BackgroundJobs_Processing");
