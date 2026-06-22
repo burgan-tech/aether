@@ -38,6 +38,12 @@ public interface IBackgroundJobService
     /// cancellation-by-id reliable. When <c>null</c> (default) an id is generated internally. Ignored
     /// when a job with the same name already exists (the existing id is kept).
     /// </param>
+    /// <param name="kind">
+    /// Optional job kind (<see cref="BBT.Aether.Domain.Entities.JobKind.OneShot"/> vs
+    /// <see cref="BBT.Aether.Domain.Entities.JobKind.Recurring"/>). When <c>null</c> (default) the kind is
+    /// inferred from <paramref name="schedule"/>: a cron expression or an <c>@</c>-prefixed period
+    /// (<c>@every</c>, <c>@daily</c>, ...) ⇒ Recurring; anything else (e.g. an ISO-8601 instant) ⇒ OneShot.
+    /// </param>
     /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
     /// <returns>
     /// A task representing the asynchronous enqueue operation.
@@ -54,6 +60,7 @@ public interface IBackgroundJobService
         JobScheduleFailurePolicy? failurePolicyOptions = null,
         bool useAmbientUnitOfWork = false,
         Guid? jobId = null,
+        BBT.Aether.Domain.Entities.JobKind? kind = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>

@@ -16,9 +16,9 @@ using Xunit;
 namespace BBT.Aether.BackgroundJob;
 
 /// <summary>
-/// Tests the transactional (useAmbientUnitOfWork) enqueue path of <see cref="BackgroundJobService"/>:
-/// the job record is persisted into the ambient unit of work and the scheduler call is deferred to
-/// the ambient UoW's OnCompleted — never invoked inline / before commit.
+/// Tests the enqueue paths of <see cref="BackgroundJobService"/> after the arming-poller refactor:
+/// enqueue writes ONLY a <see cref="BackgroundJobStatus.Pending"/> row (atomically, inside the caller's
+/// UoW on the ambient path) and NEVER calls the scheduler — the arming poller arms the row after commit.
 /// </summary>
 public class BackgroundJobServiceTransactionalEnqueueTests
 {
@@ -29,6 +29,7 @@ public class BackgroundJobServiceTransactionalEnqueueTests
     private readonly IClock _clock = Substitute.For<IClock>();
     private readonly ICurrentSchema _currentSchema = Substitute.For<ICurrentSchema>();
     private readonly IEventSerializer _eventSerializer = Substitute.For<IEventSerializer>();
+    private readonly BackgroundJobOptions _options = new() { MaxRetryCount = 7 };
     private readonly BackgroundJobService _sut;
 
     public BackgroundJobServiceTransactionalEnqueueTests()
@@ -39,18 +40,18 @@ public class BackgroundJobServiceTransactionalEnqueueTests
         _eventSerializer.Serialize(Arg.Any<object>()).Returns(new byte[] { 1, 2, 3 });
         _sut = new BackgroundJobService(
             _jobStore, _jobScheduler, _uowManager, _guidGenerator, _clock,
-            _currentSchema, _eventSerializer,
+            _currentSchema, _eventSerializer, _options,
             Substitute.For<ILogger<BackgroundJobService>>());
     }
 
     [Fact]
-    public async Task EnqueueAsync_WithAmbientUoW_PersistsJobAndDefersScheduleToOnCompleted()
+    public async Task EnqueueAsync_WithAmbientUoW_PersistsPendingRowAndDoesNotCallScheduler()
     {
-        // Arrange — an ambient UoW is active; capture its OnCompleted handler.
+        // Arrange — an ambient UoW is active.
         var ambientUow = Substitute.For<IUnitOfWork>();
-        Func<IUnitOfWork, Task>? completed = null;
-        ambientUow.OnCompleted(Arg.Do<Func<IUnitOfWork, Task>>(h => completed = h));
         _uowManager.Current.Returns(ambientUow);
+        BackgroundJobInfo? saved = null;
+        await _jobStore.SaveAsync(Arg.Do<BackgroundJobInfo>(j => saved = j), Arg.Any<CancellationToken>());
 
         // Act
         var jobId = await _sut.EnqueueAsync(
@@ -58,20 +59,19 @@ public class BackgroundJobServiceTransactionalEnqueueTests
             metadata: null, failurePolicyOptions: null, useAmbientUnitOfWork: true,
             cancellationToken: CancellationToken.None);
 
-        // Assert — job saved into the ambient UoW; NO own UoW opened, NO self-commit,
-        // and the scheduler has NOT been called yet (deferred).
+        // Assert — a Pending row is saved into the ambient UoW; NO own UoW opened, NO self-commit, and
+        // the scheduler is NEVER called (the arming poller arms it after the caller's commit).
         jobId.ShouldNotBe(Guid.Empty);
         await _jobStore.Received(1).SaveAsync(Arg.Any<BackgroundJobInfo>(), Arg.Any<CancellationToken>());
+        saved.ShouldNotBeNull();
+        saved!.Status.ShouldBe(BackgroundJobStatus.Pending);
+        saved.Kind.ShouldBe(JobKind.Recurring);          // "@every 5s" → recurring
+        saved.MaxRetryCount.ShouldBe(_options.MaxRetryCount);
+        saved.NextRetryAt.ShouldNotBeNull();
         _uowManager.DidNotReceive().Begin(Arg.Any<UnitOfWorkOptions>());
         await ambientUow.DidNotReceive().CommitAsync(Arg.Any<CancellationToken>());
         await _jobScheduler.DidNotReceiveWithAnyArgs().ScheduleAsync(default!, default!, default!, default);
-
-        // When the ambient UoW completes (post-commit), the scheduler fires.
-        completed.ShouldNotBeNull();
-        await completed!(ambientUow);
-        await _jobScheduler.Received(1).ScheduleAsync(
-            "handler", "job-1", "@every 5s", Arg.Any<ReadOnlyMemory<byte>>(),
-            Arg.Any<JobScheduleFailurePolicy?>(), Arg.Any<CancellationToken>());
+        ambientUow.DidNotReceiveWithAnyArgs().OnCompleted(default!);
     }
 
     [Fact]
@@ -111,8 +111,10 @@ public class BackgroundJobServiceTransactionalEnqueueTests
             metadata: null, failurePolicyOptions: null, useAmbientUnitOfWork: true,
             cancellationToken: CancellationToken.None);
 
-        // Assert — opened and committed its own UoW (legacy behavior preserved).
+        // Assert — opened and committed its own RequiresNew UoW; saved a row; never called the scheduler.
         _uowManager.Received(1).Begin(Arg.Any<UnitOfWorkOptions>());
+        await _jobStore.Received(1).SaveAsync(Arg.Any<BackgroundJobInfo>(), Arg.Any<CancellationToken>());
         await ownUow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
+        await _jobScheduler.DidNotReceiveWithAnyArgs().ScheduleAsync(default!, default!, default!, default);
     }
 }

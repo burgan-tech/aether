@@ -31,10 +31,40 @@ public sealed class BackgroundJobService(
     IClock clock,
     ICurrentSchema currentSchema,
     IEventSerializer eventSerializer,
+    BackgroundJobOptions options,
     ILogger<BackgroundJobService> logger)
     : IBackgroundJobService
 {
     private const string Source = "urn:background-job";
+
+    /// <summary>
+    /// Infers the <see cref="JobKind"/> from a raw schedule string when the caller does not specify one.
+    /// Heuristic: a trimmed value starting with <c>@</c> (e.g. <c>@every 5s</c>, <c>@daily</c>) or one
+    /// composed of 5–6 whitespace-separated fields (a standard cron expression) is treated as
+    /// <see cref="JobKind.Recurring"/>; everything else (e.g. an ISO-8601 instant, a duration) is
+    /// <see cref="JobKind.OneShot"/>.
+    /// </summary>
+    /// <param name="schedule">The raw schedule expression.</param>
+    /// <returns>The inferred job kind.</returns>
+    private static JobKind InferKind(string schedule)
+    {
+        if (string.IsNullOrWhiteSpace(schedule))
+            return JobKind.OneShot;
+
+        var trimmed = schedule.Trim();
+
+        // "@every 1h", "@daily", "@hourly", ... are recurring period expressions.
+        if (trimmed.StartsWith('@'))
+            return JobKind.Recurring;
+
+        // Standard cron expressions have 5 (minute..weekday) or 6 (with seconds) whitespace-separated fields.
+        var fieldCount = trimmed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+        if (fieldCount is 5 or 6)
+            return JobKind.Recurring;
+
+        // Single token / ISO-8601 instant / duration → fires once.
+        return JobKind.OneShot;
+    }
 
     /// <inheritdoc/>
     public async Task<Guid> EnqueueAsync<TPayload>(
@@ -46,6 +76,7 @@ public sealed class BackgroundJobService(
         JobScheduleFailurePolicy? failurePolicyOptions = null,
         bool useAmbientUnitOfWork = false,
         Guid? jobId = null,
+        JobKind? kind = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(handlerName))
@@ -97,73 +128,54 @@ public sealed class BackgroundJobService(
             DataContentType = "application/json"
         };
 
+        // Determine the job kind: explicit caller value wins, otherwise infer from the schedule.
+        var effectiveKind = kind ?? InferKind(schedule);
+        activity?.SetTag("job.kind", effectiveKind.ToString());
+
+        // Build the row in the Pending state. The arming poller (BackgroundJobArmingProcessor) arms it
+        // in the scheduler AFTER the caller's transaction commits and flips it to Scheduled — so enqueue
+        // performs NO scheduler call inside the transaction. This makes enqueue atomic with the caller's
+        // business work: on rollback the row never exists, so there is no orphaned scheduled job.
         var jobInfo = new BackgroundJobInfo(effectiveJobId, handlerName, jobName)
         {
             ExpressionValue = schedule,
             Payload = eventSerializer.SerializeToElement(envelope),
-            Status = BackgroundJobStatus.Scheduled,
+            Status = BackgroundJobStatus.Pending,
+            Kind = effectiveKind,
+            MaxRetryCount = options.MaxRetryCount,
+            NextRetryAt = clock.UtcNow,
             ExtraProperties = extraProperties
         };
 
-        // Serialize envelope for scheduler
-        var payloadBytes = eventSerializer.Serialize(envelope);
+        // TODO(jobs): thread failurePolicyOptions through the arming poller. The poller currently arms
+        // with a default failure policy; the caller-supplied policy is not yet persisted/honored. Kept in
+        // the signature so callers don't break and so a later task can wire it through ExtraProperties.
 
-        // Transactional enqueue: when the caller has an ambient unit of work and opts in, persist the
-        // job record INTO that ambient UoW (no own RequiresNew transaction, no self-commit) and defer
-        // the scheduler call to its OnCompleted. The job row then commits atomically with the caller's
-        // business transaction and the scheduler only fires after a successful commit — avoiding
-        // nested-UoW / shared-DbContext collisions ("A second operation was started on this context
-        // instance") and orphaned scheduled jobs on rollback.
-        if (useAmbientUnitOfWork && uowManager.Current is { } ambientUow)
+        // Ambient path: persist into the caller's ambient UoW so the row commits atomically with their
+        // business transaction. No own UoW, no commit, no scheduler call — the poller arms after commit.
+        if (useAmbientUnitOfWork && uowManager.Current is { })
         {
             await jobStore.SaveAsync(jobInfo, cancellationToken);
 
-            ambientUow.OnCompleted(async _ =>
-            {
-                try
-                {
-                    await jobScheduler.ScheduleAsync(
-                        handlerName, jobName, schedule, payloadBytes, failurePolicyOptions, cancellationToken);
-
-                    logger.LogInformation(
-                        "Successfully scheduled job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
-                        handlerName, jobName, effectiveJobId);
-                }
-                catch (Exception ex)
-                {
-                    // The business transaction is already committed but the scheduler call failed.
-                    // OnCompleted handler exceptions are swallowed by the UoW, so log loudly here —
-                    // recovery (re-enqueue of the pending job intent) is the caller's responsibility.
-                    logger.LogError(ex,
-                        "Failed to schedule job handler '{HandlerName}' with job name '{JobName}' after commit. Entity ID: {EntityId}",
-                        handlerName, jobName, effectiveJobId);
-                }
-            });
+            logger.LogInformation(
+                "Enqueued Pending job handler '{HandlerName}' with job name '{JobName}' into ambient UoW. Entity ID: {EntityId}",
+                handlerName, jobName, effectiveJobId);
 
             activity?.SetStatus(ActivityStatusCode.Ok);
             return effectiveJobId;
         }
 
+        // Standalone path: open our own transactional UoW, write the Pending row, commit. The poller arms it.
         await using var uow = uowManager.Begin(
-            options: new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew });
+            new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
         try
         {
-            // Save to job store
             await jobStore.SaveAsync(jobInfo, cancellationToken);
-            await uow.SaveChangesAsync(cancellationToken);
-            // Register scheduler to run AFTER commit is fully persisted to DB
-            // This prevents race condition where scheduler triggers before DB write completes
-            uow.OnCompleted(async _ =>
-            {
-                await jobScheduler.ScheduleAsync(handlerName, jobName, schedule, payloadBytes, failurePolicyOptions, cancellationToken);
-                
-                logger.LogInformation(
-                    "Successfully scheduled job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
-                    handlerName, jobName, effectiveJobId);
-            });
-        
-            // Commit transaction - OnCompleted handlers run after this completes
             await uow.CommitAsync(cancellationToken);
+
+            logger.LogInformation(
+                "Enqueued Pending job handler '{HandlerName}' with job name '{JobName}'. Entity ID: {EntityId}",
+                handlerName, jobName, effectiveJobId);
 
             activity?.SetStatus(ActivityStatusCode.Ok);
             return effectiveJobId;
@@ -197,7 +209,8 @@ public sealed class BackgroundJobService(
 
         logger.LogInformation("Updating job with entity id '{Id}' to new schedule '{NewSchedule}'", id, newSchedule);
 
-        await using var uow = uowManager.Begin();
+        await using var uow = uowManager.Begin(
+            new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
         try
         {
             // Load job from store
@@ -210,29 +223,17 @@ public sealed class BackgroundJobService(
             activity?.SetTag("job.handler_name", jobInfo.HandlerName);
             activity?.SetTag("job.name", jobInfo.JobName);
 
-            // Update schedule in entity
+            // Reschedule by handing the row back to the arming poller: set the new schedule, recompute the
+            // kind, mark it Pending and due now. The poller re-arms it in the scheduler (overwrite: true,
+            // so the new schedule replaces the old). We do NOT call the scheduler here and we do NOT touch
+            // Payload — it already holds the original envelope with the original schema context, which the
+            // poller reuses. This avoids the previous bugs: wrong-schema re-wrap, double-wrapping the
+            // payload, losing the failure policy, and the delete/reschedule race.
             jobInfo.ExpressionValue = newSchedule;
+            jobInfo.Kind = InferKind(newSchedule);
+            jobInfo.Status = BackgroundJobStatus.Pending;
+            jobInfo.NextRetryAt = clock.UtcNow;
 
-            // Delete from scheduler and reschedule with new schedule
-            await jobScheduler.DeleteAsync(jobInfo.HandlerName, jobInfo.JobName, cancellationToken);
-
-            // Wrap payload in CloudEventEnvelope (maintain schema context from original job)
-            var originalPayload = jobInfo.Payload;
-            var envelope = new CloudEventEnvelope
-            {
-                Type = jobInfo.HandlerName,
-                Source = "background-job",
-                Data = originalPayload,
-                Schema = currentSchema.Name, // Use current schema context
-                DataContentType = "application/json"
-            };
-
-            // Reschedule with new schedule
-            var payloadBytes = eventSerializer.Serialize(envelope);
-            await jobScheduler.ScheduleAsync(jobInfo.HandlerName, jobInfo.JobName, newSchedule, payloadBytes,
-                cancellationToken: cancellationToken);
-
-            // Save updated entity
             await jobStore.SaveAsync(jobInfo, cancellationToken);
 
             // Commit transaction
