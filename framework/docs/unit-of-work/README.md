@@ -89,6 +89,17 @@ Both create (or participate in) a UoW. The difference is **ambient (AsyncLocal) 
 `BeginRequiresNew(...)` is a convenience that begins a transactional `RequiresNew` UoW; it has
 both a synchronous overload (`Begin`) and an async overload (`BeginAsync(ct)`).
 
+### Why disposal is async-only
+
+The unit of work is `IAsyncDisposable` (there is intentionally no synchronous `IDisposable`).
+Creation — `Begin` — is synchronous and does no I/O: it only allocates the scope and sets the
+ambient `AsyncLocal` (the database connection opens lazily on the first `GetDbContextAsync`).
+Disposal, however, performs real network I/O: it rolls back an uncommitted transaction and
+closes the shared `DbConnection`/`DbTransaction`. A synchronous `Dispose` would block the
+calling thread on that teardown — harmful under async request pipelines and PgBouncer
+transaction pooling. So the correct shape is **synchronous `Begin` + asynchronous
+`Commit`/`Rollback`/`Dispose`**: always `await using var uow = unitOfWorkManager.Begin(...)`.
+
 ```csharp
 // Background / programmatic: ambient must propagate to later calls -> Begin (sync)
 await using var uow = uowManager.Begin(
