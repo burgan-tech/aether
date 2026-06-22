@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.DistributedLock;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using BBT.Aether.Telemetry;
 using BBT.Aether.Uow;
@@ -41,6 +43,12 @@ public class InboxProcessor<TDbContext>(
 
     protected virtual async Task ProcessWithLockAsync(CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(options.Schema))
+        {
+            logger.LogWarning("Inbox processor has no Schema configured; skipping run.");
+            return;
+        }
+
         // Process pending events using database-level locking (no distributed lock needed)
         await ProcessPendingEventsAsync(cancellationToken);
 
@@ -54,31 +62,43 @@ public class InboxProcessor<TDbContext>(
         {
             // Create a new scope for each batch
             await using var scope = scopeFactory.CreateAsyncScope();
+            var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+            var unitOfWorkManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
             var inboxStore = scope.ServiceProvider.GetRequiredService<IInboxStore>();
 
-            // Lease pending events with database-level locking
-            var pendingEvents = await inboxStore.LeaseBatchAsync(
-                options.ProcessingBatchSize,
-                _workerId,
-                options.LeaseDuration,
-                cancellationToken);
-
-            if (!pendingEvents.Any())
+            using (currentSchema.Change(options.Schema!))
             {
-                break;
-            }
+                // Lease pending events with database-level locking inside a short UoW so the
+                // schema-bound context/transaction is available to the store.
+                IReadOnlyList<InboxMessage> pendingEvents;
+                await using (var leaseUow = await unitOfWorkManager.BeginRequiresNew(cancellationToken))
+                {
+                    pendingEvents = await inboxStore.LeaseBatchAsync(
+                        options.ProcessingBatchSize,
+                        _workerId,
+                        options.LeaseDuration,
+                        cancellationToken);
 
-            logger.LogInformation("Leased {Count} pending events in the inbox for worker {WorkerId}", 
-                pendingEvents.Count, _workerId);
+                    await leaseUow.CommitAsync(cancellationToken);
+                }
 
-            foreach (var inboxMessage in pendingEvents)
-            {
-                if (cancellationToken.IsCancellationRequested)
+                if (!pendingEvents.Any())
                 {
                     break;
                 }
 
-                await ProcessSingleEventAsync(inboxMessage, scope.ServiceProvider, cancellationToken);
+                logger.LogInformation("Leased {Count} pending events in the inbox for worker {WorkerId}",
+                    pendingEvents.Count, _workerId);
+
+                foreach (var inboxMessage in pendingEvents)
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    await ProcessSingleEventAsync(inboxMessage, scope.ServiceProvider, cancellationToken);
+                }
             }
         }
     }
@@ -204,16 +224,25 @@ public class InboxProcessor<TDbContext>(
         try
         {
             await using var scope = scopeFactory.CreateAsyncScope();
+            var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+            var unitOfWorkManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
             var inboxStore = scope.ServiceProvider.GetRequiredService<IInboxStore>();
 
-            var deletedCount = await inboxStore.CleanupOldMessagesAsync(
-                options.CleanupBatchSize,
-                options.RetentionPeriod,
-                cancellationToken);
-
-            if (deletedCount > 0)
+            using (currentSchema.Change(options.Schema!))
             {
-                logger.LogInformation("Cleaned up {Count} old inbox messages", deletedCount);
+                await using var uow = await unitOfWorkManager.BeginRequiresNew(cancellationToken);
+
+                var deletedCount = await inboxStore.CleanupOldMessagesAsync(
+                    options.CleanupBatchSize,
+                    options.RetentionPeriod,
+                    cancellationToken);
+
+                await uow.CommitAsync(cancellationToken);
+
+                if (deletedCount > 0)
+                {
+                    logger.LogInformation("Cleaned up {Count} old inbox messages", deletedCount);
+                }
             }
         }
         catch (Exception ex)

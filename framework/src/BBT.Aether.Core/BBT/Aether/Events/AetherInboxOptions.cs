@@ -55,5 +55,13 @@ public class AetherInboxOptions
     /// Default is 30 seconds.
     /// </summary>
     public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The database schema whose inbox table this processor handles. The processor opens a
+    /// UnitOfWork bound to this schema for every run. If null/empty, the processor logs a warning
+    /// and does nothing (no ambient schema exists in a background worker). For multi-schema
+    /// deployments, run one processor instance per schema with this set accordingly.
+    /// </summary>
+    public string? Schema { get; set; }
 }
 
