@@ -183,7 +183,6 @@ public sealed class EndToEndJobLifecycleTests(PostgresFixture fx)
         return new BackgroundJobArmingProcessor(
             sp.GetRequiredService<IServiceScopeFactory>(),
             sp.GetRequiredService<IClock>(),
-            sp.GetRequiredService<IEventSerializer>(),
             options,
             NullLogger<BackgroundJobArmingProcessor>.Instance);
     }

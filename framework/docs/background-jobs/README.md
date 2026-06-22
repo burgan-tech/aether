@@ -225,6 +225,37 @@ handler may run more than once for the same logical job.
 - **One-shot vs recurring deletion.** A finished one-shot (`Completed` or `Failed`) is deleted from the
   scheduler; a recurring job stays armed so it keeps firing.
 
+## Tracing
+
+All background-job operations automatically emit OpenTelemetry spans via the
+`BBT.Aether.Infrastructure` ActivitySource. No additional configuration is needed when using
+`AddAetherTelemetry`.
+
+### Spans
+
+| Span | Description |
+|------|-------------|
+| `BackgroundJob.Enqueue` | Job creation + persistence via `IBackgroundJobService` |
+| `BackgroundJob.Update` | Schedule update via `IBackgroundJobService` |
+| `BackgroundJob.Delete` | Job cancellation via `IBackgroundJobService` |
+| `BackgroundJob.Schedule` | Scheduler-level job registration (e.g. Dapr) |
+| `BackgroundJob.Schedule.Update` | Scheduler-level reschedule |
+| `BackgroundJob.Schedule.Delete` | Scheduler-level job removal |
+| `BackgroundJob.Execute` | Dapr callback entry point (execution bridge) |
+| `BackgroundJob.Dispatch` | Handler invocation |
+
+### Tags
+
+| Tag | Description |
+|-----|-------------|
+| `job.handler_name` | Handler type name (e.g. `"SendEmail"`) |
+| `job.name` | Unique job identifier (e.g. `"send-email-order-123"`) |
+| `job.schedule` | Schedule expression (e.g. `"@daily"`, `"*/15 * * * *"`) |
+| `job.id` | Entity ID from `BackgroundJobInfo` |
+| `job.kind` | `OneShot` or `Recurring` |
+| `job.scheduler` | Scheduler backend (e.g. `"dapr"`) |
+| `job.status` | Final dispatch status (`"completed"`, `"failed"`, `"cancelled"`) |
+
 ## Known follow-up
 
 - `failurePolicyOptions` is accepted by `EnqueueAsync` (and `IJobScheduler.ScheduleAsync` /
@@ -238,7 +269,5 @@ handler may run more than once for the same logical job.
 
 - [Unit of Work](../unit-of-work/README.md) — the transaction model the enqueue/dispatch paths build on.
 - [Multi-Schema](../multi-schema/ADOPTION-GUIDE.md) — schema scoping, which the per-schema poller relies on.
-- [Background Jobs (tracing/handler reference)](../background-job/README.md) — OpenTelemetry spans/tags and
-  additional handler examples.
 - [Distributed Lock](../distributed-lock/README.md) — coordinate work across instances inside a handler.
 ```

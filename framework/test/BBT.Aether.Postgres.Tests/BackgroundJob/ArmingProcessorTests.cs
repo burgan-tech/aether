@@ -111,7 +111,6 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
         return new BackgroundJobArmingProcessor(
             sp.GetRequiredService<IServiceScopeFactory>(),
             sp.GetRequiredService<IClock>(),
-            sp.GetRequiredService<IEventSerializer>(),
             options,
             NullLogger<BackgroundJobArmingProcessor>.Instance);
     }

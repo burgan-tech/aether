@@ -319,4 +319,53 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
         scheduler.ScheduleCalls.ShouldBeEmpty();
         scheduler.DeleteCalls.ShouldBeEmpty();
     }
+
+    [Fact]
+    public async Task Update_reschedules_a_pending_job()
+    {
+        // Regression for the id-based SaveAsync upsert: a Pending job is NOT matched by
+        // GetByJobNameAsync (filtered to Scheduled||Running), so the old name-based upsert fell into the
+        // AddAsync branch and threw on the duplicate PK. The id-based lookup finds the tracked row and the
+        // reschedule succeeds for a job in ANY status.
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        Guid id;
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var ssp = scope.ServiceProvider;
+            var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+            using (currentSchema.Change(_schema))
+            {
+                var svc = ssp.GetRequiredService<IBackgroundJobService>();
+                // Enqueue leaves the row Pending (no poller runs in this test).
+                id = await svc.EnqueueAsync(HandlerName, "job-pending-update", new TestArgs { Value = "x" },
+                    "2026-07-01T10:00:00Z");
+            }
+        }
+
+        (await ReloadAsync(sp, id))!.Status.ShouldBe(BackgroundJobStatus.Pending);
+
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var ssp = scope.ServiceProvider;
+            var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+            using (currentSchema.Change(_schema))
+            {
+                var svc = ssp.GetRequiredService<IBackgroundJobService>();
+                await svc.UpdateAsync(id, "0 0 * * *");
+            }
+        }
+
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded.ShouldNotBeNull();
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Pending);
+        reloaded.ExpressionValue.ShouldBe("0 0 * * *");
+        reloaded.Kind.ShouldBe(JobKind.Recurring);
+        reloaded.NextRetryAt.ShouldNotBeNull();
+        scheduler.ScheduleCalls.ShouldBeEmpty();
+        scheduler.DeleteCalls.ShouldBeEmpty();
+    }
 }

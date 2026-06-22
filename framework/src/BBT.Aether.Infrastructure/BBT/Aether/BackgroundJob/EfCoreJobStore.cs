@@ -38,28 +38,35 @@ public class EfCoreJobStore<TDbContext> : IJobStore
 
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
 
-        // Check if job already exists
-        var existingJob = await GetByJobNameAsync(jobInfo.JobName, cancellationToken);
+        // Id-based upsert: look up by the entity primary key so the operation works for a job in ANY
+        // status (not just Scheduled/Running) and so every persistent field is preserved on update.
+        var existingJob = await dbContext.BackgroundJobs
+            .FirstOrDefaultAsync(j => j.Id == jobInfo.Id, cancellationToken);
 
-        if (existingJob != null)
-        {
-            // Update mutable fields only — never touch the key (Id) or creation audit.
-            // Copying Id via SetValues onto a tracked entity throws:
-            // "The property 'BackgroundJobInfo.Id' is part of a key and so cannot be modified".
-            existingJob.ExpressionValue = jobInfo.ExpressionValue;
-            existingJob.Payload = jobInfo.Payload;
-            existingJob.Status = jobInfo.Status;
-            existingJob.HandledTime = jobInfo.HandledTime;
-            existingJob.RetryCount = jobInfo.RetryCount;
-            existingJob.LastError = jobInfo.LastError;
-            existingJob.ExtraProperties = jobInfo.ExtraProperties;
-            existingJob.ModifiedAt = DateTime.UtcNow;
-        }
-        else
+        if (existingJob == null)
         {
             // Insert new job
             await dbContext.BackgroundJobs.AddAsync(jobInfo, cancellationToken);
+            return;
         }
+
+        // Already the tracked instance (mutated in place) — nothing to copy.
+        if (ReferenceEquals(existingJob, jobInfo))
+            return;
+
+        // Update mutable fields only — never touch the key (Id) or creation audit.
+        existingJob.ExpressionValue = jobInfo.ExpressionValue;
+        existingJob.Payload = jobInfo.Payload;
+        existingJob.Status = jobInfo.Status;
+        existingJob.Kind = jobInfo.Kind;
+        existingJob.MaxRetryCount = jobInfo.MaxRetryCount;
+        existingJob.NextRetryAt = jobInfo.NextRetryAt;
+        existingJob.LastRunAt = jobInfo.LastRunAt;
+        existingJob.HandledTime = jobInfo.HandledTime;
+        existingJob.RetryCount = jobInfo.RetryCount;
+        existingJob.LastError = jobInfo.LastError;
+        existingJob.ExtraProperties = jobInfo.ExtraProperties;
+        existingJob.ModifiedAt = DateTime.UtcNow;
 
         // SaveChanges removed - will be flushed by UoW Commit or calling code
     }
@@ -194,7 +201,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         job.RetryCount++;
         job.NextRetryAt = nextRetryAtUtc;
         job.LastError = error;
-        job.HandledTime = DateTime.UtcNow;
+        // HandledTime intentionally left untouched: a retrying job has not been "handled". It is set
+        // only on a terminal Completed/Failed transition via UpdateStatusAsync.
         job.ModifiedAt = DateTime.UtcNow;
 
         // SaveChanges removed - will be flushed by UoW Commit or calling code

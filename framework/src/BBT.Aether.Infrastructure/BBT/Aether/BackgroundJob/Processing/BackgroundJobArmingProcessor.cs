@@ -7,7 +7,6 @@ using System.Threading.Tasks;
 using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Repositories;
-using BBT.Aether.Events;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.DependencyInjection;
@@ -25,15 +24,9 @@ namespace BBT.Aether.BackgroundJob.Processing;
 public class BackgroundJobArmingProcessor(
     IServiceScopeFactory scopeFactory,
     IClock clock,
-    IEventSerializer eventSerializer,
     BackgroundJobOptions options,
     ILogger<BackgroundJobArmingProcessor> logger)
 {
-    // eventSerializer is intentionally captured even though we reserialize via JsonElement.GetRawText()
-    // below (see comment in RunAsync). Keeping it on the ctor matches BackgroundJobService and lets the
-    // round-trip strategy change without touching call sites.
-    private readonly IEventSerializer _eventSerializer = eventSerializer;
-
     /// <summary>
     /// Runs a single arming pass for the configured schema.
     /// </summary>

@@ -38,12 +38,12 @@ public class EfCoreJobStoreTests
         };
 
     /// <summary>
-    /// Regression: a re-enqueue for the same JobName produces a NEW Guid. The update path must
-    /// copy mutable fields onto the existing tracked entity WITHOUT touching its key, otherwise
-    /// EF throws "The property 'BackgroundJobInfo.Id' is part of a key and so cannot be modified".
+    /// The upsert is keyed by the entity Id (PK), not by JobName. Saving a fresh instance that carries an
+    /// EXISTING Id copies the mutable fields onto the tracked row without touching the key (which would
+    /// otherwise throw "The property 'BackgroundJobInfo.Id' is part of a key and so cannot be modified").
     /// </summary>
     [Fact]
-    public async Task SaveAsync_WhenJobWithSameNameExists_UpdatesMutableFieldsAndPreservesKey()
+    public async Task SaveAsync_WhenJobWithSameIdExists_UpdatesMutableFieldsAndPreservesKey()
     {
         await using var db = NewContext();
 
@@ -54,18 +54,44 @@ public class EfCoreJobStoreTests
 
         var store = new EfCoreJobStore<TestJobDbContext>(new FixedDbContextProvider<TestJobDbContext>(db));
 
-        // Re-enqueue with a DIFFERENT Guid but the SAME JobName (the original failure scenario).
-        var incoming = NewJob(Guid.NewGuid(), "job-1", BackgroundJobStatus.Running, "new", 2);
+        // Re-save a fresh instance with the SAME Id — the id-based upsert copies fields onto the existing row.
+        var incoming = NewJob(existingId, "job-1", BackgroundJobStatus.Running, "new", 2);
 
         await store.SaveAsync(incoming);
-        await Should.NotThrowAsync(db.SaveChangesAsync()); // previously threw on key modification
+        await Should.NotThrowAsync(db.SaveChangesAsync()); // must not throw on key modification
 
         var rows = await db.BackgroundJobs.ToListAsync();
         var row = rows.ShouldHaveSingleItem();
-        row.Id.ShouldBe(existingId); // key preserved, not overwritten by incoming.Id
+        row.Id.ShouldBe(existingId); // key preserved
         row.Status.ShouldBe(BackgroundJobStatus.Running);
         row.ExpressionValue.ShouldBe("new");
         row.ModifiedAt.ShouldNotBeNull();
+    }
+
+    /// <summary>
+    /// The upsert is id-based, not name-based: two jobs that share a JobName but have distinct Ids are two
+    /// distinct rows. (The old name-based upsert incorrectly collapsed them onto one row.)
+    /// </summary>
+    [Fact]
+    public async Task SaveAsync_DistinctIdsWithSameName_AreSeparateRows()
+    {
+        await using var db = NewContext();
+
+        var firstId = Guid.NewGuid();
+        db.BackgroundJobs.Add(NewJob(firstId, "job-1", BackgroundJobStatus.Scheduled, "old", 1));
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var store = new EfCoreJobStore<TestJobDbContext>(new FixedDbContextProvider<TestJobDbContext>(db));
+
+        var secondId = Guid.NewGuid();
+        await store.SaveAsync(NewJob(secondId, "job-1", BackgroundJobStatus.Running, "new", 2));
+        await db.SaveChangesAsync();
+
+        var ids = (await db.BackgroundJobs.ToListAsync()).Select(j => j.Id).ToList();
+        ids.Count.ShouldBe(2);
+        ids.ShouldContain(firstId);
+        ids.ShouldContain(secondId);
     }
 
     [Fact]

@@ -263,4 +263,53 @@ public sealed class JobStoreCasTests(PostgresFixture fx)
         reloaded.NextRetryAt!.Value.ShouldBe(future, TimeSpan.FromMilliseconds(1));
         reloaded.LastError.ShouldBe("boom");
     }
+
+    [Fact]
+    public async Task SaveAsync_updates_existing_by_id_preserving_kind()
+    {
+        // Regression for the dropped-fields bug: the id-based upsert must copy ALL persistent fields,
+        // including Kind/MaxRetryCount/NextRetryAt, which the old name-based upsert silently dropped.
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        // Seed in a state NOT matched by GetByJobNameAsync to also prove the old name-based path is gone.
+        await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Pending, JobKind.OneShot));
+
+        var newNextRetry = DateTime.UtcNow.AddHours(2);
+
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var ssp = scope.ServiceProvider;
+            var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+            var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
+            var store = ssp.GetRequiredService<IJobStore>();
+
+            using (currentSchema.Change(_schema))
+            {
+                await using var uow = uowManager.Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+
+                // A FRESH instance with the SAME Id — a different object than any tracked row, so the
+                // upsert exercises the field-copy branch (not the ReferenceEquals short-circuit).
+                var mutated = new BackgroundJobInfo(id, "TestHandler", "job-" + id.ToString("N"))
+                {
+                    Payload = JsonDocument.Parse("{}").RootElement,
+                    Status = BackgroundJobStatus.Scheduled,
+                    Kind = JobKind.Recurring,
+                    MaxRetryCount = 7,
+                    NextRetryAt = newNextRetry,
+                };
+                await store.SaveAsync(mutated);
+                await uow.CommitAsync();
+            }
+        }
+
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded.ShouldNotBeNull();
+        reloaded!.Kind.ShouldBe(JobKind.Recurring);
+        reloaded.MaxRetryCount.ShouldBe(7);
+        reloaded.NextRetryAt!.Value.ShouldBe(newNextRetry, TimeSpan.FromMilliseconds(1));
+        reloaded.Status.ShouldBe(BackgroundJobStatus.Scheduled);
+    }
 }
