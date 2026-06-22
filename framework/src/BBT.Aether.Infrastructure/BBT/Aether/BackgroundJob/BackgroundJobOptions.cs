@@ -49,6 +49,10 @@ public class BackgroundJobOptions
 
     /// <summary>Max jobs armed per poller run.</summary>
     public int ArmingBatchSize { get; set; } = 100;
+
+    /// <summary>How long a job may stay in Running before the reaper treats it as a crashed/timed-out
+    /// execution and resets it for retry. Set this comfortably above your longest expected handler duration.</summary>
+    public TimeSpan VisibilityTimeout { get; set; } = TimeSpan.FromMinutes(5);
 }
 
 /// <summary>

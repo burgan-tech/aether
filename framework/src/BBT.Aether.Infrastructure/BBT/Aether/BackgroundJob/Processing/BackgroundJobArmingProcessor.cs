@@ -56,11 +56,6 @@ public class BackgroundJobArmingProcessor(
                 await readUow.CommitAsync(ct);
             }
 
-            if (due.Count == 0)
-            {
-                return;
-            }
-
             // PHASE 2: arm each job in the external scheduler (no open transaction), then flip its status.
             foreach (var job in due)
             {
@@ -105,6 +100,55 @@ public class BackgroundJobArmingProcessor(
                 {
                     logger.LogWarning(ex,
                         "Failed to arm background job '{JobName}' (id {JobId}); will retry next interval",
+                        job.JobName, job.Id);
+                }
+            }
+
+            // --- Reap stuck Running jobs (crashed/timed-out executions) ---
+            List<BackgroundJobInfo> stale;
+            await using (var readUow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+            {
+                stale = (await jobStore.GetStaleRunningAsync(
+                    clock.UtcNow - options.VisibilityTimeout, options.ArmingBatchSize, ct)).ToList();
+                await readUow.CommitAsync(ct);
+            }
+
+            foreach (var job in stale)
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                try
+                {
+                    await using var uow = uowManager.Begin(
+                        new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                    const string reason = "Reaped: execution exceeded the visibility timeout";
+                    if (job.Kind == JobKind.Recurring)
+                    {
+                        await jobStore.MarkRecurringRanAsync(job.Id, clock.UtcNow, reason, ct);                 // → Scheduled (next cron tick)
+                    }
+                    else if (job.RetryCount + 1 <= job.MaxRetryCount)
+                    {
+                        await jobStore.MarkRetryingAsync(job.Id, clock.UtcNow, reason, ct);                     // → Retrying, NextRetryAt=now ⇒ arming poller re-arms
+                    }
+                    else
+                    {
+                        await jobStore.UpdateStatusAsync(job.Id, BackgroundJobStatus.Failed, clock.UtcNow,
+                            "Reaped: retries exhausted after a stuck execution", ct);
+                    }
+
+                    await uow.CommitAsync(ct);
+                    logger.LogWarning(
+                        "Reaped stuck background job '{JobName}' (id {JobId}) after visibility timeout",
+                        job.JobName, job.Id);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Failed to reap stuck background job '{JobName}' (id {JobId}); will retry next interval",
                         job.JobName, job.Id);
                 }
             }
