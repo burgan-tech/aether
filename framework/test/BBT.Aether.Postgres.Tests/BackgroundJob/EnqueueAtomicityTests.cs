@@ -222,14 +222,15 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task Enqueue_ambient_rolls_back_with_caller()
+    public async Task Ambient_default_rolls_back_with_caller()
     {
         var scheduler = new FakeJobScheduler();
         var options = BuildOptions();
         var sp = BuildProvider(scheduler, options);
         await ArrangeSchemaAsync(sp);
 
-        // Case 1: ambient UoW rolled back → no row persisted (atomic with the caller).
+        // Case 1: ambient UoW rolled back → no row persisted (atomic with the caller). Default mode is
+        // Ambient and directly:false — the row participates in our own UoW set as uowManager.Current.
         var rolledBackId = Guid.NewGuid();
         await using (var scope = sp.CreateAsyncScope())
         {
@@ -242,14 +243,14 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
                 var svc = ssp.GetRequiredService<IBackgroundJobService>();
                 await svc.EnqueueAsync(HandlerName, "job-rollback", new TestArgs { Value = "x" }, "*/5 * * * *",
-                    useAmbientUnitOfWork: true, jobId: rolledBackId);
+                    jobId: rolledBackId);
                 await uow.RollbackAsync();
             }
         }
 
         (await ReloadAsync(sp, rolledBackId)).ShouldBeNull();
 
-        // Case 2: ambient UoW committed → row persists as Pending.
+        // Case 2: ambient UoW committed → row persists as Pending, scheduler NOT called (directly:false).
         var committedId = Guid.NewGuid();
         await using (var scope = sp.CreateAsyncScope())
         {
@@ -262,7 +263,7 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
                 var svc = ssp.GetRequiredService<IBackgroundJobService>();
                 await svc.EnqueueAsync(HandlerName, "job-commit", new TestArgs { Value = "x" }, "*/5 * * * *",
-                    useAmbientUnitOfWork: true, jobId: committedId);
+                    jobId: committedId);
                 await uow.CommitAsync();
             }
         }
@@ -271,6 +272,108 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
         committed.ShouldNotBeNull();
         committed!.Status.ShouldBe(BackgroundJobStatus.Pending);
         scheduler.ScheduleCalls.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Standalone_survives_caller_rollback()
+    {
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        // Standalone mode commits the row in its own independent transaction, so it survives even when the
+        // caller's ambient UoW later rolls back.
+        var id = Guid.NewGuid();
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var ssp = scope.ServiceProvider;
+            var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+            var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
+            using (currentSchema.Change(_schema))
+            {
+                await using var uow = uowManager.Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                var svc = ssp.GetRequiredService<IBackgroundJobService>();
+                await svc.EnqueueAsync(HandlerName, "job-standalone", new TestArgs { Value = "x" }, "*/5 * * * *",
+                    mode: JobEnqueueMode.Standalone, jobId: id);
+                await uow.RollbackAsync();
+            }
+        }
+
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded.ShouldNotBeNull();
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Pending);
+        scheduler.ScheduleCalls.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Directly_arms_immediately_when_no_ambient()
+    {
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        // No ambient UoW → standalone commit, then the directly flag arms the scheduler inline and flips
+        // the row to Scheduled, without the poller running.
+        Guid id;
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var ssp = scope.ServiceProvider;
+            var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+            using (currentSchema.Change(_schema))
+            {
+                var svc = ssp.GetRequiredService<IBackgroundJobService>();
+                id = await svc.EnqueueAsync(HandlerName, "job-directly", new TestArgs { Value = "x" },
+                    "*/5 * * * *", directly: true);
+            }
+        }
+
+        scheduler.ScheduleCalls.Count.ShouldBe(1);
+        scheduler.ScheduleCalls[0].jobName.ShouldBe("job-directly");
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded.ShouldNotBeNull();
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
+    }
+
+    [Fact]
+    public async Task Directly_ambient_arms_after_commit()
+    {
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        // Ambient + directly: arming is deferred to the ambient UoW's OnCompleted, so it must NOT fire
+        // before commit, and MUST fire (and flip Scheduled) after commit.
+        var id = Guid.NewGuid();
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var ssp = scope.ServiceProvider;
+            var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+            var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
+            using (currentSchema.Change(_schema))
+            {
+                await using var uow = uowManager.Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                var svc = ssp.GetRequiredService<IBackgroundJobService>();
+                await svc.EnqueueAsync(HandlerName, "job-directly-ambient", new TestArgs { Value = "x" },
+                    "*/5 * * * *", directly: true, jobId: id);
+
+                // BEFORE commit: not yet armed.
+                scheduler.ScheduleCalls.ShouldBeEmpty();
+
+                await uow.CommitAsync();
+            }
+        }
+
+        // AFTER commit: armed and flipped to Scheduled.
+        scheduler.ScheduleCalls.Count.ShouldBe(1);
+        scheduler.ScheduleCalls[0].jobName.ShouldBe("job-directly-ambient");
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded.ShouldNotBeNull();
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
     }
 
     [Fact]
