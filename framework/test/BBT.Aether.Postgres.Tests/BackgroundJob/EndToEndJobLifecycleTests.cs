@@ -221,7 +221,8 @@ public sealed class EndToEndJobLifecycleTests(PostgresFixture fx)
     }
 
     /// <summary>Enqueues a job through the REAL service while a schema scope is active.</summary>
-    private async Task<Guid> EnqueueAsync(IServiceProvider sp, string jobName, string schedule)
+    private async Task<Guid> EnqueueAsync(IServiceProvider sp, string jobName, string schedule,
+        JobEnqueueMode mode = JobEnqueueMode.Ambient, bool directly = false)
     {
         await using var scope = sp.CreateAsyncScope();
         var ssp = scope.ServiceProvider;
@@ -229,8 +230,49 @@ public sealed class EndToEndJobLifecycleTests(PostgresFixture fx)
         using (currentSchema.Change(_schema))
         {
             var svc = ssp.GetRequiredService<IBackgroundJobService>();
-            return await svc.EnqueueAsync(HandlerName, jobName, new TestArgs { Value = "x" }, schedule);
+            return await svc.EnqueueAsync(
+                HandlerName, jobName, new TestArgs { Value = "x" }, schedule, mode: mode, directly: directly);
         }
+    }
+
+    /// <summary>
+    /// Atomically claims a Scheduled job (Scheduled→Running, stamping RunningSince=now) through the REAL
+    /// store, exactly as the dispatcher would on a fire — used to drive a job into Running so the reaper has
+    /// a real stuck row to recover.
+    /// </summary>
+    private async Task<bool> ClaimAsync(IServiceProvider sp, Guid id)
+    {
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var store = ssp.GetRequiredService<IJobStore>();
+        var clock = ssp.GetRequiredService<IClock>();
+
+        using (currentSchema.Change(_schema))
+        {
+            await using var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+            var claimed = await store.TryClaimAsync(id, clock.UtcNow);
+            await uow.CommitAsync();
+            return claimed;
+        }
+    }
+
+    /// <summary>
+    /// Backdates a job's RunningSince via raw SQL so it sits past the reaper's VisibilityTimeout, simulating a
+    /// crashed/hung execution without waiting real time.
+    /// </summary>
+    private async Task BackdateRunningSinceAsync(Guid id, TimeSpan age)
+    {
+        await using var conn = new NpgsqlConnection(fx.ConnectionString);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            $"UPDATE \"{_schema}\".\"BackgroundJobs\" SET \"RunningSince\" = @t WHERE \"Id\" = @id;";
+        cmd.Parameters.AddWithValue("t", DateTime.UtcNow - age);
+        cmd.Parameters.AddWithValue("id", id);
+        await cmd.ExecuteNonQueryAsync();
     }
 
     private async Task<BackgroundJobInfo?> ReloadAsync(IServiceProvider sp, Guid id)
@@ -426,5 +468,105 @@ public sealed class EndToEndJobLifecycleTests(PostgresFixture fx)
         failed.LastError.ShouldNotBeNull();
         scheduler.DeleteCalls.Count.ShouldBe(1);
         scheduler.DeleteCalls[0].jobName.ShouldBe(jobName);
+    }
+
+    /// <summary>
+    /// Capstone for the <c>directly</c> immediate-arm path: enqueuing with <c>directly: true</c> (and no
+    /// ambient UoW, so the standalone branch arms inline right after the row commits) registers the job in
+    /// the scheduler and flips the row Pending→Scheduled WITHOUT the arming poller ever running. The captured
+    /// payload is then fed to the bridge to prove the fire still completes end-to-end.
+    /// </summary>
+    [Fact]
+    public async Task Directly_enqueue_arms_immediately_then_fire_completes()
+    {
+        TestHandler.Reset();
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        // 1) Enqueue recurring with directly: true and no ambient UoW → the standalone branch commits the row
+        // then arms inline (ScheduleAsync + Pending→Scheduled). NO poller is run anywhere in this test.
+        var jobName = "e2e-directly-" + Guid.NewGuid().ToString("N");
+        var id = await EnqueueAsync(sp, jobName, "*/5 * * * *", directly: true);
+
+        // 2) Already armed immediately: the fake scheduler was called and the row is Scheduled, despite the
+        // arming poller never having run.
+        scheduler.ScheduleCalls.Count.ShouldBe(1);
+        scheduler.ScheduleCalls[0].jobName.ShouldBe(jobName);
+        scheduler.CapturedPayloads.ShouldContainKey(jobName);
+        var armed = await ReloadAsync(sp, id);
+        armed!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
+
+        // 3) Simulate the Dapr fire with the captured bytes → handler runs, recurring stays Scheduled.
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var bridge = scope.ServiceProvider.GetRequiredService<IJobExecutionBridge>();
+            await bridge.ExecuteAsync(jobName, scheduler.CapturedPayloads[jobName], CancellationToken.None);
+        }
+
+        TestHandler.InvocationCount.ShouldBe(1);
+        var afterFire = await ReloadAsync(sp, id);
+        afterFire!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
+        afterFire.LastRunAt.ShouldNotBeNull();
+        afterFire.RunningSince.ShouldBeNull();
+    }
+
+    /// <summary>
+    /// Capstone for reaper recovery: a one-shot armed and then claimed into Running, whose RunningSince is
+    /// backdated past the VisibilityTimeout, is reaped by the arming processor (Running→Retrying), re-armed
+    /// on the next pass (Retrying→Scheduled), and then completes when fired. Proves a crashed/hung execution
+    /// is recovered without losing the job.
+    /// </summary>
+    [Fact]
+    public async Task Stuck_running_is_reaped_then_reruns()
+    {
+        TestHandler.Reset();
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions(); // default VisibilityTimeout = 5 min
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        // 1) Enqueue a one-shot and arm it via the poller (Pending → ScheduleAsync → Scheduled).
+        var jobName = "e2e-reaper-" + Guid.NewGuid().ToString("N");
+        var id = await EnqueueAsync(sp, jobName, "2099-01-01T00:00:00Z");
+        await BuildArmingProcessor(sp, options).RunAsync();
+        scheduler.ScheduleCalls.Count.ShouldBe(1);
+        (await ReloadAsync(sp, id))!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
+
+        // 2) Drive it into Running via the real CAS claim (stamps RunningSince=now), then backdate
+        // RunningSince past the visibility timeout to simulate a crashed/hung dispatcher.
+        (await ClaimAsync(sp, id)).ShouldBeTrue();
+        var claimed = await ReloadAsync(sp, id);
+        claimed!.Status.ShouldBe(BackgroundJobStatus.Running);
+        claimed.RunningSince.ShouldNotBeNull();
+        await BackdateRunningSinceAsync(id, TimeSpan.FromMinutes(10));
+
+        // 3) Reaper phase of the arming processor: stuck one-shot → Retrying (re-armed), RunningSince cleared.
+        await BuildArmingProcessor(sp, options).RunAsync();
+        var reaped = await ReloadAsync(sp, id);
+        reaped!.Status.ShouldBe(BackgroundJobStatus.Retrying);
+        reaped.RunningSince.ShouldBeNull();
+        reaped.NextRetryAt.ShouldNotBeNull();
+
+        // 4) Pull NextRetryAt into the past, then run the processor again so the due Retrying job is re-armed
+        // (Retrying → ScheduleOneShotAsync → Scheduled).
+        await PullNextRetryIntoPastAsync(id);
+        await BuildArmingProcessor(sp, options).RunAsync();
+        scheduler.ScheduleOneShotCalls.Count.ShouldBe(1);
+        (await ReloadAsync(sp, id))!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
+
+        // 5) Fire with the captured payload → the recovered job completes.
+        scheduler.CapturedPayloads.ShouldContainKey(jobName);
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var bridge = scope.ServiceProvider.GetRequiredService<IJobExecutionBridge>();
+            await bridge.ExecuteAsync(jobName, scheduler.CapturedPayloads[jobName], CancellationToken.None);
+        }
+
+        TestHandler.InvocationCount.ShouldBe(1);
+        var done = await ReloadAsync(sp, id);
+        done!.Status.ShouldBe(BackgroundJobStatus.Completed);
+        done.RunningSince.ShouldBeNull();
     }
 }

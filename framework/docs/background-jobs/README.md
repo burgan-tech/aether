@@ -16,8 +16,8 @@ The pieces:
 | `IBackgroundJobService` (`BackgroundJobService`) | `EnqueueAsync` / `UpdateAsync` / `DeleteAsync`. Writes/updates the job row. Never calls the scheduler on the enqueue path. |
 | `BackgroundJobArmingProcessor` | Per-schema poller. Leases due rows, arms them in the scheduler **outside** any transaction, then flips them to `Scheduled`. |
 | `IJobScheduler` (`DaprJobScheduler`) | The external scheduler abstraction (`ScheduleAsync`, `ScheduleOneShotAsync`, `DeleteAsync`). |
-| `IJobExecutionBridge` (`DaprJobExecutionBridge`) | Dapr trigger entry point: looks the job up (in its own UoW) and delegates to the dispatcher. |
-| `IJobDispatcher` (`JobDispatcher`) | CAS-claims `Scheduled→Running`, invokes the handler, records the outcome. |
+| `IJobExecutionBridge` (`DaprJobExecutionBridge`) | Dapr trigger entry point: looks the job up (in its own UoW) and delegates to the dispatcher. Does no other DB work. |
+| `IJobDispatcher` (`JobDispatcher`) | CAS-claims `Scheduled→Running` (stamping `RunningSince`), invokes the handler with **no dispatcher-owned transaction**, records the outcome. |
 | `IJobStore` (`EfCoreJobStore<TDbContext>`) | EF Core persistence + the atomic status transitions. |
 
 ## Lifecycle
@@ -35,8 +35,8 @@ The pieces:
                      │ Scheduled │◀───────────────────────────────┐
                      └───────────┘                                │
                          │  Dapr fires → bridge → dispatcher       │
-                         ▼  (CAS Scheduled→Running)                │
-                     ┌─────────┐                                   │
+                         ▼  (CAS Scheduled→Running, stamp          │
+                     ┌─────────┐    RunningSince = now)            │
                      │ Running │                                   │
                      └─────────┘                                   │
             ┌────────────┼─────────────────────────┐              │
@@ -52,6 +52,11 @@ The pieces:
         │          │ Failed │
         │          └────────┘
         └─ scheduler entry deleted        (Failed also deletes the scheduler entry)
+
+  Reaper (arming processor): a job stuck in Running past VisibilityTimeout is reset —
+      Running --(visibility timeout)--> Retrying   (one-shot, retries left → re-armed)
+      Running --(visibility timeout)--> Scheduled  (recurring → re-armed)
+      Running --(visibility timeout)--> Failed     (one-shot, retries exhausted)
 ```
 
 Outcome rules recorded by the dispatcher:
@@ -64,6 +69,10 @@ Outcome rules recorded by the dispatcher:
 - **Recurring failure** → back to `Scheduled`, `RetryCount++`, error recorded, **not** deleted. Recurring
   jobs do **not** use framework retry/backoff — they simply wait for the next cron occurrence.
 - **Cancellation** → `Cancelled`, scheduler entry deleted.
+
+Every recorded outcome (and every reaper reset) clears `RunningSince`; the dispatcher stamps it on the
+`Scheduled→Running` claim and the row is no longer "running" once an outcome lands. See
+[Reaper / visibility timeout](#reaper--visibility-timeout) for what happens when an outcome never lands.
 
 Statuses: `Pending`, `Scheduled`, `Running`, `Retrying`, `Completed`, `Failed`, `Cancelled`.
 Job kinds: `JobKind.OneShot`, `JobKind.Recurring`.
@@ -150,28 +159,56 @@ job id. It makes **no scheduler call** — the arming poller arms the row after 
 inferred from the schedule when `kind` is omitted: a value starting with `@` (e.g. `@every 5m`, `@daily`) or a
 5–6 field cron expression ⇒ `Recurring`; anything else (e.g. an ISO-8601 instant) ⇒ `OneShot`.
 
-### Atomic enqueue with the caller's transaction
+### Enqueue modes (`JobEnqueueMode`)
 
-Pass `useAmbientUnitOfWork: true` to persist the job row into the **caller's** ambient UnitOfWork instead of a
-private one:
+`EnqueueAsync` takes a `JobEnqueueMode mode = JobEnqueueMode.Ambient` controlling how the job row is persisted
+relative to the caller's UnitOfWork:
+
+| Mode | Behavior |
+|------|----------|
+| `JobEnqueueMode.Ambient` (default) | When an ambient UnitOfWork is active, the row is persisted **into it** — the job commits atomically with the caller's business transaction and a rollback discards it. When there is **no** ambient UoW, a short standalone `RequiresNew` transaction is opened and committed. |
+| `JobEnqueueMode.Standalone` | Always opens a **new, independent** `RequiresNew` transaction that commits immediately, regardless of any ambient UoW. The job survives even if the caller later rolls back (fire-and-forget). |
+
+#### Atomic enqueue with the caller's transaction (`Ambient`)
+
+The default mode makes the job row atomic with the caller's business data:
 
 ```csharp
-await using var uow = uowManager.Begin(/* transactional */);
+await using var uow = uowManager.Begin(
+    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
 
 // ... write business data ...
 
 await jobs.EnqueueAsync(
     "SendEmail", jobName, payload, "@once",
-    useAmbientUnitOfWork: true,
-    jobId: correlationId);   // optional caller-supplied id to reuse for the caller's own tracking row
+    mode: JobEnqueueMode.Ambient,   // default — participate in the ambient UoW above
+    jobId: correlationId);          // optional caller-supplied id to reuse for the caller's own tracking row
 
-await uow.CommitAsync();      // job row commits atomically with the business data
+await uow.CommitAsync();             // job row commits atomically with the business data
 ```
 
 The row commits with the business data in one transaction. If the caller rolls back, the row never exists, so
 there is never an orphaned scheduled job. The poller arms the row only after a successful commit, and the
 scheduler is only ever touched after that — no scheduler call runs inside the caller's transaction (which also
 avoids nested-UoW / shared-DbContext collisions).
+
+Use `JobEnqueueMode.Standalone` when the job must **not** be tied to the caller's transaction — e.g. an
+audit/notification you want to keep even if the surrounding business operation rolls back.
+
+### Arming immediately (`directly`)
+
+By default arming is left entirely to the poller. Pass `directly: true` to arm the scheduler **inline**
+immediately after the job row is durably committed (and flip it `Pending → Scheduled`) instead of waiting for
+the next poller pass:
+
+```csharp
+await jobs.EnqueueAsync("SendEmail", jobName, payload, "@daily", directly: true);
+```
+
+- In the **ambient** case, arming is deferred to the ambient UoW's `OnCompleted` callback, so it only fires
+  after the caller's commit (a rollback still discards everything — nothing is armed).
+- The arming **poller remains the backstop**: if the inline arm fails it is logged as a warning and the row is
+  left `Pending` for the poller to arm on its next pass. `directly` only trades latency, never correctness.
 
 ## Job management
 
@@ -202,6 +239,68 @@ public class SendEmailJobHandler(IEmailService email) : IBackgroundJobHandler<Se
 
 Make handlers **idempotent**: the at-least-once delivery guarantee plus the framework retry path means a
 handler may run more than once for the same logical job.
+
+### Handler unit-of-work contract (BREAKING)
+
+**The dispatcher no longer wraps the handler in a transaction.** It claims the job (`Scheduled→Running`),
+sets up the **schema scope** for the handler, invokes it, and records the outcome in its own short
+UnitOfWork — but it holds **no open connection or transaction across your handler**. A handler that touches
+the database must therefore **open its own UnitOfWork** around that work:
+
+```csharp
+public class GenerateReportJobHandler(
+    IUnitOfWorkManager uowManager,
+    IReportRepository reports) : IBackgroundJobHandler<GenerateReportArgs>
+{
+    public async Task HandleAsync(GenerateReportArgs args, CancellationToken cancellationToken)
+    {
+        // long-running, no DB connection pinned here ...
+
+        await using var uow = uowManager.Begin(
+            new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+
+        await reports.InsertAsync(/* ... */, cancellationToken);
+
+        await uow.CommitAsync(cancellationToken);   // commit your own boundary
+    }
+}
+```
+
+The schema scope is already active when `HandleAsync` runs, so the UoW you open resolves the right schema's
+DbContext automatically — you only own the transaction boundary, not the scope. A handler decorated with
+`[UnitOfWork]` works the same way (the aspect opens the boundary for you).
+
+**Why:** background-job handlers can run for a long time. If the dispatcher held a transaction open across the
+whole handler, it would pin a database connection for the entire run — exactly what trips PgBouncer's
+`idle_in_transaction` limits and exhausts the pool. Owning a short UoW around just the DB writes keeps
+connections free while the handler does its slow work, and lets the handler commit/rollback at its own
+boundaries.
+
+## Reaper / visibility timeout
+
+A handler can crash, hang, or have its process killed **after** the job was claimed (`Running`) but **before**
+an outcome is recorded — leaving the row stuck in `Running` forever. The arming processor includes a **reaper**
+phase that recovers these.
+
+The dispatcher stamps `BackgroundJobInfo.RunningSince` when it claims a job. On each pass the arming processor
+treats any job whose `RunningSince` is older than `BackgroundJobOptions.VisibilityTimeout` (default **5
+minutes**) as a crashed/timed-out execution and resets it (clearing `RunningSince`):
+
+- **One-shot, retries left** → `Retrying` (and re-armed at `NextRetryAt`).
+- **Recurring** → `Scheduled` (re-armed).
+- **One-shot, retries exhausted** → `Failed`.
+
+```csharp
+services.AddAetherBackgroundJob<MyDbContext>(o =>
+{
+    o.VisibilityTimeout = TimeSpan.FromMinutes(30); // set comfortably ABOVE your longest handler
+    // ...
+});
+```
+
+**Set `VisibilityTimeout` above your longest expected handler duration.** A handler that legitimately runs
+longer than the timeout will be reaped while it is still working, causing a duplicate run — which idempotent
+handlers tolerate, but it wastes work. The default of 5 minutes suits short handlers; raise it for long ones.
 
 ## Concepts
 
