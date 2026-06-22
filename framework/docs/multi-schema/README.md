@@ -8,9 +8,26 @@ active schema is an **immutable working context** selected via a nested, auto-re
 scope, and a Unit of Work isolates each schema-bound `DbContext` on a single shared
 connection/transaction by issuing `SET LOCAL search_path` before every command.
 
-PostgreSQL is the supported provider for this model. `Npgsql` is a direct dependency of
-`BBT.Aether.Infrastructure` because the Unit of Work owns the raw `NpgsqlConnection` /
-`NpgsqlTransaction` directly.
+## Database providers
+
+`BBT.Aether.Infrastructure` is **provider-agnostic** — it has no `Npgsql` dependency. The Unit
+of Work owns a single shared `DbConnection` / `DbTransaction` and talks to an
+[`IAetherDatabaseProvider`](../../src/BBT.Aether.Infrastructure/BBT/Aether/Uow/EntityFrameworkCore/IAetherDatabaseProvider.cs)
+seam (connection creation, binding options to the shared connection, and the per-schema
+strategy). Pick a provider package:
+
+- **`BBT.Aether.Npgsql`** — PostgreSQL, **full multi-schema** (`NpgsqlAetherProvider` +
+  `SearchPathCommandInterceptor` + `PostgreSqlIdentifier`). Register with
+  `services.AddAetherNpgsql<MyDbContext>(connectionString);`.
+- **`BBT.Aether.SqlServer`** — SQL Server, **single-schema** (`SqlServerAetherProvider`).
+  Register with `services.AddAetherSqlServer<MyDbContext>(connectionString);`.
+
+Both wrap the core registration
+`services.AddAetherDbContext<MyDbContext>(provider, connectionString, configure?)`; a custom
+provider can be registered through that overload directly.
+
+The multi-schema model below (runtime `SET LOCAL search_path` per command) is **PostgreSQL-only**
+and lives in `BBT.Aether.Npgsql`. See [SQL Server limitations](#sql-server-limitations).
 
 ## The current schema is a scope, not a setting
 
@@ -190,6 +207,22 @@ Rules for safe operation under transaction pooling:
    transaction is open.
 3. **No external service calls inside an open transaction** (HTTP, broker publishes, etc.).
    Do that work before opening or after committing the Unit of Work.
+
+## SQL Server limitations
+
+SQL Server is supported via `BBT.Aether.SqlServer` (`SqlServerAetherProvider`), but only as a
+**single-schema** provider. It supplies the shared connection/transaction and binds
+`UseSqlServer`, but does **not** switch schema per command — SQL Server has no
+transaction-scoped `SET LOCAL search_path` equivalent.
+
+- **Single-schema only.** Bind the schema in the model — `modelBuilder.HasDefaultSchema("x")`
+  or schema-qualified `ToTable("orders", "x")`. There is no runtime per-command schema switching.
+- **Runtime cross-schema-in-one-transaction is PostgreSQL-only.** The multi-schema flow above
+  (entering several `currentSchema.Change(...)` scopes and writing across schemas in one
+  transaction) relies on the transaction-scoped `SET LOCAL search_path` that SQL Server lacks.
+- **Outbox/Inbox is not yet supported on SQL Server.** Processing currently uses
+  PostgreSQL-specific lease SQL (`FOR UPDATE SKIP LOCKED`, in `EfCoreOutboxStore` /
+  `EfCoreInboxStore`). SQL Server support is a follow-up.
 
 ## Background pollers are single-schema
 

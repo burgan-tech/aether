@@ -46,25 +46,38 @@ public sealed class AppDbContext : AetherDbContext<AppDbContext>
 }
 ```
 
-## Adım 2 — DI kaydı (connection string'i AÇIKÇA ver)
+## Adım 2 — DI kaydı (provider paketini seç, connection string'i AÇIKÇA ver)
 
-`AddAetherDbContext` artık connection string'i **ayrı parametre** olarak alır — UoW kendi
-paylaşılan bağlantısını bu string'ten açar. `AuditInterceptor` otomatik eklenir;
-`AddAetherUnitOfWork` içeride çağrılır.
+`BBT.Aether.Infrastructure` artık **provider-agnostik** — Npgsql bağımlılığı yok. UoW,
+[`IAetherDatabaseProvider`](../../src/BBT.Aether.Infrastructure/BBT/Aether/Uow/EntityFrameworkCore/IAetherDatabaseProvider.cs)
+seam'i üzerinden tek bir paylaşılan `DbConnection`/`DbTransaction` ile konuşur. Bir provider
+paketi seç:
+
+- **`BBT.Aether.Npgsql`** — PostgreSQL, tam çok-schema → `AddAetherNpgsql<T>(connectionString)`
+- **`BBT.Aether.SqlServer`** — SQL Server, tek-schema → `AddAetherSqlServer<T>(connectionString)`
+
+Her ikisi de connection string'i **ayrı parametre** olarak alır — UoW kendi paylaşılan
+bağlantısını bu string'ten açar. `AuditInterceptor` otomatik eklenir; `AddAetherUnitOfWork`
+içeride çağrılır.
 
 ```csharp
 services.AddAetherCore(_ => { });
 
-services.AddAetherDbContext<AppDbContext>(
-    connectionString,
-    (sp, options) => options.UseNpgsql(connectionString));
+// PostgreSQL (tam çok-schema):
+services.AddAetherNpgsql<AppDbContext>(connectionString);
+
+// veya SQL Server (tek-schema):
+// services.AddAetherSqlServer<AppDbContext>(connectionString);
 
 // Opsiyonel yetenekler (gerektikçe):
 services.AddAetherDomainEvents<AppDbContext>();  // domain event → outbox
-services.AddAetherOutbox<AppDbContext>();        // transactional outbox + processor
-services.AddAetherInbox<AppDbContext>();
+services.AddAetherOutbox<AppDbContext>();        // transactional outbox + processor (yalnız PostgreSQL)
+services.AddAetherInbox<AppDbContext>();          // (yalnız PostgreSQL)
 services.AddAetherBackgroundJob<AppDbContext>();
 ```
+
+Özel bir provider için çekirdek overload'ı doğrudan çağır:
+`services.AddAetherDbContext<AppDbContext>(provider, connectionString, configure?)`.
 
 > ⚠️ **Kırıcı değişiklik:** Eski `AddAetherDbContext<T>(options => …)` (connection string'siz)
 > imzası kaldırıldı. `NpgsqlSchemaConnectionInterceptor` de silindi — artık eklemeyin.
@@ -163,8 +176,26 @@ await uow.CommitAsync();   // iki schema TEK transaction'da commit olur (ya hep 
 | **📥 Poller başına tek schema** | Outbox/Inbox processor tek `Schema` işler. Birden çok schema varsa her biri için ayrı instance çalıştır; `Schema` boşsa processor uyarı loglar ve çalışmaz. |
 | **🏷️ Job'lar schema taşımalı** | Background job kuyruğa alınırken `currentSchema.Name` envelope'a yazılır. Hiçbir schema kapsamı yokken enqueue edilen job'da schema null olur ve dispatch sırasında hata verir. |
 | **🔢 MaxDbContextCount** | Tek UoW içinde farklı `(tip, schema)` sayısı varsayılan **16** ile sınırlıdır (guardrail). 50+ schema'yı aynı UoW'da gezme — uzun transaction riski. |
-| **🐘 Sadece PostgreSQL** | Shared-connection modeli Npgsql'e bağlıdır; `BBT.Aether.Infrastructure` artık doğrudan Npgsql'e bağımlıdır. SQL Server interceptor'ı kaldırıldı. |
+| **🐘 Çok-schema = PostgreSQL** | `BBT.Aether.Infrastructure` provider-agnostiktir; PostgreSQL desteği `BBT.Aether.Npgsql`'de yaşar. Çalışma zamanı çok-schema (`SET LOCAL search_path`) ve Outbox/Inbox işleme **yalnız PostgreSQL'dedir** (aşağıdaki SQL Server kısıtlarına bak). |
 | **✍️ Schema adı kuralı** | Schema adı `^[a-zA-Z_][a-zA-Z0-9_]*$` deseniyle doğrulanır (SQL injection'a karşı). Geçersiz ad `InvalidOperationException` verir. |
+
+---
+
+## SQL Server kısıtları
+
+SQL Server `BBT.Aether.SqlServer` (`SqlServerAetherProvider`) ile desteklenir, ancak yalnızca
+**tek-schema** provider olarak. Paylaşılan bağlantı/transaction'ı sağlar ve `UseSqlServer`'ı
+bağlar, fakat komut başına schema değiştirmez — SQL Server'da transaction kapsamlı
+`SET LOCAL search_path` karşılığı yoktur.
+
+- **Yalnız tek-schema.** Schema'yı modele bağla: `modelBuilder.HasDefaultSchema("x")` veya
+  schema-nitelikli `ToTable("orders", "x")`. Çalışma zamanı komut-başına schema değişimi yok.
+- **Tek transaction'da çalışma-zamanı çok-schema (runtime `Change()` ile schema'lar arası)
+  yalnız PostgreSQL'dedir** — transaction kapsamlı `SET LOCAL search_path`'e dayanır, SQL
+  Server'da bu yok.
+- **Outbox/Inbox işleme henüz SQL Server'da desteklenmiyor.** İşleme şu an PostgreSQL'e özgü
+  lease SQL'i (`FOR UPDATE SKIP LOCKED`, `EfCoreOutboxStore` / `EfCoreInboxStore`) kullanır;
+  SQL Server desteği bir sonraki adım.
 
 ---
 

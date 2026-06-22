@@ -3,13 +3,26 @@
 ## Overview
 
 A Unit of Work (UoW) groups all database work for one logical operation so it commits or
-rolls back together. In Aether the UoW is backed by a **single shared `NpgsqlConnection` and a
-single `NpgsqlTransaction`**: every `DbContext` it hands out enlists on that one transaction.
+rolls back together. In Aether the UoW is backed by a **single shared `DbConnection` and a
+single `DbTransaction`**: every `DbContext` it hands out enlists on that one transaction.
 This is what makes multi-schema work atomic — writes to several schemas in one UoW commit as a
 unit. See [Multi-Schema Support](../multi-schema/README.md) for the schema-isolation details.
 
-PostgreSQL is the supported provider for this model; `Npgsql` is a direct dependency of
-`BBT.Aether.Infrastructure`.
+### Database providers
+
+`BBT.Aether.Infrastructure` is **provider-agnostic** — it has no `Npgsql` dependency. The UoW
+talks to an
+[`IAetherDatabaseProvider`](../../src/BBT.Aether.Infrastructure/BBT/Aether/Uow/EntityFrameworkCore/IAetherDatabaseProvider.cs)
+seam that owns connection creation, binding options to the shared connection, and the
+per-schema strategy. Pick a provider package and register it (see [Registration](#registration)):
+
+- **`BBT.Aether.Npgsql`** — PostgreSQL, full multi-schema. `AddAetherNpgsql<T>(connectionString)`.
+- **`BBT.Aether.SqlServer`** — SQL Server, single-schema. `AddAetherSqlServer<T>(connectionString)`.
+
+A custom provider can be registered through the core overload
+`AddAetherDbContext<T>(provider, connectionString)`. Full runtime cross-schema transactions and
+Outbox/Inbox processing are **PostgreSQL-only** today — see the multi-schema doc's
+[SQL Server limitations](../multi-schema/README.md#sql-server-limitations).
 
 ## Getting a DbContext
 
@@ -114,15 +127,26 @@ public class UnitOfWorkOptions
 ## Registration
 
 ```csharp
+// PostgreSQL (BBT.Aether.Npgsql) — full multi-schema
+services.AddAetherNpgsql<MyDbContext>(connectionString);
+
+// SQL Server (BBT.Aether.SqlServer) — single-schema
+services.AddAetherSqlServer<MyDbContext>(connectionString);
+```
+
+Both wrap the core overload, which selects the provider explicitly:
+
+```csharp
 services.AddAetherDbContext<MyDbContext>(
+    new NpgsqlAetherProvider(),   // or SqlServerAetherProvider(), or a custom IAetherDatabaseProvider
     connectionString,
-    (sp, options) => options.UseNpgsql(connectionString));
+    (sp, options) => { /* optional extra EF Core configuration */ });
 ```
 
 The **connection string is captured** so the UoW can open the single shared connection it
-hands contexts out from; the `configure` delegate is captured (and re-applied with the shared
-connection bound) for each schema-bound context. There is also a `(connectionString,
-Action<DbContextOptionsBuilder>)` overload when you do not need `IServiceProvider`.
+hands contexts out from; the optional `configure` delegate
+(`Action<IServiceProvider, DbContextOptionsBuilder>`) is captured (and re-applied with the
+shared connection bound) for each schema-bound context.
 
 `AddAetherDbContext` calls `AddAetherUnitOfWork<TDbContext>()`, which registers the ambient
 accessor, `IUnitOfWorkManager`, the domain-event sink, and `IAetherDbContextProvider<>`. Call
