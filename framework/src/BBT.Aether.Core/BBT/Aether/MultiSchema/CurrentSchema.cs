@@ -1,18 +1,25 @@
 using System;
-using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Threading;
 
 namespace BBT.Aether.MultiSchema;
 
 /// <summary>
-/// Default <see cref="ICurrentSchema"/> backed by an AsyncLocal stack so nested
+/// Default <see cref="ICurrentSchema"/> backed by an AsyncLocal of an IMMUTABLE stack so nested
 /// schema scopes flow across async calls and restore the previous schema on dispose.
 /// </summary>
+/// <remarks>
+/// Every <see cref="Change"/>/dispose REASSIGNS <c>Current.Value</c> with a new immutable stack
+/// (copy-on-write). This is what makes scopes isolated across async boundaries: AsyncLocal copies
+/// the reference into child flows, so mutating a shared mutable stack in place would leak pushes/pops
+/// between parallel branches and the parent. Reassigning a new immutable value keeps each flow's view
+/// private.
+/// </remarks>
 public sealed class CurrentSchema(ISchemaNameFormatter formatter) : ICurrentSchema
 {
-    private static readonly AsyncLocal<Stack<string>?> Current = new();
+    private static readonly AsyncLocal<ImmutableStack<string>?> Current = new();
 
-    public string? Name => Current.Value is { Count: > 0 } s ? s.Peek() : null;
+    public string? Name => Current.Value is { IsEmpty: false } s ? s.Peek() : null;
 
     public IDisposable Change(string schema)
     {
@@ -22,13 +29,13 @@ public sealed class CurrentSchema(ISchemaNameFormatter formatter) : ICurrentSche
         }
 
         var formatted = formatter.Format(schema);
-        Current.Value ??= new Stack<string>();
-        Current.Value.Push(formatted);
+        var previous = Current.Value ?? ImmutableStack<string>.Empty;
+        Current.Value = previous.Push(formatted);
 
-        return new PopOnDispose(formatted);
+        return new RestoreOnDispose(previous, formatted);
     }
 
-    private sealed class PopOnDispose(string expected) : IDisposable
+    private sealed class RestoreOnDispose(ImmutableStack<string> previous, string expected) : IDisposable
     {
         private bool _disposed;
 
@@ -37,11 +44,13 @@ public sealed class CurrentSchema(ISchemaNameFormatter formatter) : ICurrentSche
             if (_disposed) return;
             _disposed = true;
 
-            var popped = Current.Value?.Count > 0 ? Current.Value.Pop() : null;
-            if (!string.Equals(popped, expected, StringComparison.Ordinal))
+            var current = Current.Value;
+            if (current is null || current.IsEmpty || !string.Equals(current.Peek(), expected, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException("Schema scope corrupted: out-of-order disposal detected.");
             }
+
+            Current.Value = previous;
         }
     }
 }
