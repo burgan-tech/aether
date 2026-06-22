@@ -58,8 +58,7 @@ public sealed class DaprJobExecutionBridge(
                 var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
                 var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
 
-                Guid jobId;
-                string handlerName;
+                string resolvedJobName;
 
                 // The provider-backed jobStore read needs an ambient UoW; wrap just the lookup. The
                 // dispatcher (called below) opens its own UoWs (claim, run, outcome), so it stays outside this one.
@@ -80,13 +79,13 @@ public sealed class DaprJobExecutionBridge(
 
                     activity?.SetTag("job.handler_name", jobInfo.HandlerName);
                     activity?.SetTag("job.id", jobInfo.Id.ToString());
-                    jobId = jobInfo.Id;
-                    handlerName = jobInfo.HandlerName;
+                    resolvedJobName = jobInfo.JobName;
                     await uow.CommitAsync(cancellationToken);
                 }
 
-                // Dispatch to handler with extracted data payload. The dispatcher opens its own UoWs.
-                await jobDispatcher.DispatchAsync(jobId, handlerName, dataPayload, cancellationToken);
+                // Dispatch by job name with the extracted data payload. The dispatcher re-resolves the job,
+                // atomically claims it, runs the handler with no held transaction, and records the outcome.
+                await jobDispatcher.DispatchAsync(resolvedJobName, dataPayload, cancellationToken);
 
                 activity?.SetStatus(ActivityStatusCode.Ok);
             }

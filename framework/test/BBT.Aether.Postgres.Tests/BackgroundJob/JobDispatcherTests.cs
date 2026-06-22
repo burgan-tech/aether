@@ -82,6 +82,48 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
     }
 
     /// <summary>
+    /// Handler used by the "no held transaction" headline test. At the moment it runs it asserts there is
+    /// no ambient UoW held by the dispatcher (<c>uowManager.Current is null</c>), then opens its OWN UoW,
+    /// does a trivial DB write, and commits — proving handler-owned UoW works under the active schema scope.
+    /// </summary>
+    private sealed class UowAssertingHandler(IServiceProvider serviceProvider)
+        : IBackgroundJobHandler<TestArgs>
+    {
+        public static bool? AmbientUowWasNull { get; private set; }
+        public static bool HandlerOwnedUowCommitted { get; private set; }
+
+        public static void Reset()
+        {
+            AmbientUowWasNull = null;
+            HandlerOwnedUowCommitted = false;
+        }
+
+        public async Task HandleAsync(TestArgs args, CancellationToken cancellationToken)
+        {
+            var uowManager = serviceProvider.GetRequiredService<IUnitOfWorkManager>();
+
+            // The whole point: the dispatcher holds no open UoW/transaction across the handler.
+            AmbientUowWasNull = uowManager.Current is null;
+
+            // The handler owns its own UoW boundary; a trivial write proves it works under the schema scope.
+            await using var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+            var provider = serviceProvider.GetRequiredService<IAetherDbContextProvider<TestJobDbContext>>();
+            var ctx = await provider.GetDbContextAsync(cancellationToken);
+            await ctx.BackgroundJobs.AddAsync(
+                new BackgroundJobInfo(Guid.NewGuid(), HandlerName, "handler-owned-" + Guid.NewGuid().ToString("N"))
+                {
+                    ExpressionValue = "@every 1m",
+                    Payload = JsonDocument.Parse("{\"Value\":\"y\"}").RootElement.Clone(),
+                    Status = BackgroundJobStatus.Pending,
+                    Kind = JobKind.OneShot,
+                }, cancellationToken);
+            await uow.CommitAsync(cancellationToken);
+            HandlerOwnedUowCommitted = true;
+        }
+    }
+
+    /// <summary>
     /// Test invoker mirroring the framework's internal BackgroundJobInvoker&lt;TArgs&gt;: resolves the handler
     /// from the dispatch scope, deserializes the args, and invokes it. Implements the public
     /// <see cref="IBackgroundJobInvoker"/> so it can be placed directly into <c>options.Invokers</c>.
@@ -185,10 +227,12 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         }
     }
 
+    private static string JobNameFor(Guid id) => "job-" + id.ToString("N");
+
     private static BackgroundJobInfo NewJob(Guid id, BackgroundJobStatus status, JobKind kind = JobKind.OneShot,
         int retryCount = 0, int maxRetry = 3)
     {
-        return new BackgroundJobInfo(id, HandlerName, "job-" + id.ToString("N"))
+        return new BackgroundJobInfo(id, HandlerName, JobNameFor(id))
         {
             ExpressionValue = "@every 1m",
             Payload = JsonDocument.Parse("{\"Value\":\"x\"}").RootElement.Clone(),
@@ -270,13 +314,14 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         var id = Guid.NewGuid();
         await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Scheduled));
 
-        await BuildDispatcher(sp, options).DispatchAsync(id, HandlerName, BuildPayload(sp));
+        await BuildDispatcher(sp, options).DispatchAsync(JobNameFor(id), BuildPayload(sp));
 
         TestHandler.InvocationCount.ShouldBe(1);
         var reloaded = await ReloadAsync(sp, id);
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Completed);
+        reloaded.RunningSince.ShouldBeNull();
         scheduler.DeleteCalls.Count.ShouldBe(1);
-        scheduler.DeleteCalls[0].jobName.ShouldBe("job-" + id.ToString("N"));
+        scheduler.DeleteCalls[0].jobName.ShouldBe(JobNameFor(id));
     }
 
     [Fact]
@@ -291,12 +336,13 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         var id = Guid.NewGuid();
         await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Scheduled, JobKind.Recurring));
 
-        await BuildDispatcher(sp, options).DispatchAsync(id, HandlerName, BuildPayload(sp));
+        await BuildDispatcher(sp, options).DispatchAsync(JobNameFor(id), BuildPayload(sp));
 
         TestHandler.InvocationCount.ShouldBe(1);
         var reloaded = await ReloadAsync(sp, id);
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
         reloaded.LastRunAt.ShouldNotBeNull();
+        reloaded.RunningSince.ShouldBeNull();
         scheduler.DeleteCalls.ShouldBeEmpty();
     }
 
@@ -314,12 +360,13 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Scheduled, retryCount: 0, maxRetry: 3));
 
         var before = sp.GetRequiredService<IClock>().UtcNow;
-        await BuildDispatcher(sp, options).DispatchAsync(id, HandlerName, BuildPayload(sp));
+        await BuildDispatcher(sp, options).DispatchAsync(JobNameFor(id), BuildPayload(sp));
 
         var reloaded = await ReloadAsync(sp, id);
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Retrying);
         reloaded.RetryCount.ShouldBe(1);
         reloaded.LastError.ShouldNotBeNull();
+        reloaded.RunningSince.ShouldBeNull();
         // retryCount=0 → backoff = base * 2^0 = RetryBaseDelay.
         var expected = before + options.RetryBaseDelay;
         reloaded.NextRetryAt!.Value.ShouldBe(expected, TimeSpan.FromSeconds(5));
@@ -339,11 +386,12 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         var id = Guid.NewGuid();
         await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Scheduled, retryCount: 3, maxRetry: 3));
 
-        await BuildDispatcher(sp, options).DispatchAsync(id, HandlerName, BuildPayload(sp));
+        await BuildDispatcher(sp, options).DispatchAsync(JobNameFor(id), BuildPayload(sp));
 
         var reloaded = await ReloadAsync(sp, id);
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Failed);
         reloaded.LastError.ShouldNotBeNull();
+        reloaded.RunningSince.ShouldBeNull();
         scheduler.DeleteCalls.Count.ShouldBe(1);
     }
 
@@ -360,12 +408,13 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         var id = Guid.NewGuid();
         await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Scheduled, JobKind.Recurring, retryCount: 0));
 
-        await BuildDispatcher(sp, options).DispatchAsync(id, HandlerName, BuildPayload(sp));
+        await BuildDispatcher(sp, options).DispatchAsync(JobNameFor(id), BuildPayload(sp));
 
         var reloaded = await ReloadAsync(sp, id);
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
         reloaded.LastError.ShouldNotBeNull();
         reloaded.RetryCount.ShouldBe(1);
+        reloaded.RunningSince.ShouldBeNull();
         scheduler.DeleteCalls.ShouldBeEmpty();
     }
 
@@ -381,9 +430,10 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         var id = Guid.NewGuid();
         await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Running));
 
-        await BuildDispatcher(sp, options).DispatchAsync(id, HandlerName, BuildPayload(sp));
+        await BuildDispatcher(sp, options).DispatchAsync(JobNameFor(id), BuildPayload(sp));
 
-        // CAS Scheduled→Running fails (already Running), so handler never runs and status is unchanged.
+        // GetByJobNameAsync returns the Running row, but the atomic claim (TryClaimAsync pins Scheduled)
+        // fails, so the handler never runs and status is unchanged.
         TestHandler.InvocationCount.ShouldBe(0);
         var reloaded = await ReloadAsync(sp, id);
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Running);
@@ -391,7 +441,7 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task Terminal_job_is_deleted_and_skipped()
+    public async Task Missing_job_is_noop()
     {
         TestHandler.Reset();
         var scheduler = new FakeJobScheduler();
@@ -399,14 +449,49 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         var sp = BuildProvider(scheduler, options);
         await ArrangeSchemaAsync(sp);
 
-        var id = Guid.NewGuid();
-        await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Completed));
-
-        await BuildDispatcher(sp, options).DispatchAsync(id, HandlerName, BuildPayload(sp));
+        // No row seeded for this job name → GetByJobNameAsync returns null; dispatcher logs and returns.
+        await Should.NotThrowAsync(() =>
+            BuildDispatcher(sp, options).DispatchAsync("job-does-not-exist", BuildPayload(sp)));
 
         TestHandler.InvocationCount.ShouldBe(0);
+        scheduler.DeleteCalls.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// Headline test for H3: the handler runs with NO dispatcher-owned transaction. At the moment
+    /// <c>HandleAsync</c> runs there is no ambient UoW; the handler then opens its OWN UoW, writes, and
+    /// commits — proving handler-owned UoW works under the active schema scope.
+    /// </summary>
+    [Fact]
+    public async Task Handler_runs_with_no_open_dispatcher_transaction()
+    {
+        TestHandler.Reset();
+        UowAssertingHandler.Reset();
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+
+        var services = new ServiceCollection();
+        services.AddAetherCore(_ => { });
+        services.AddAetherNpgsql<TestJobDbContext>(fx.ConnectionString);
+        services.AddScoped<IJobStore, global::BBT.Aether.BackgroundJob.EfCoreJobStore<TestJobDbContext>>();
+        services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
+        services.AddSingleton<IJobScheduler>(scheduler);
+        services.AddSingleton(options);
+        services.AddScoped<IBackgroundJobHandler<TestArgs>, UowAssertingHandler>();
+        var sp = services.BuildServiceProvider();
+
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Scheduled));
+
+        await BuildDispatcher(sp, options).DispatchAsync(JobNameFor(id), BuildPayload(sp));
+
+        UowAssertingHandler.AmbientUowWasNull.ShouldBe(true);
+        UowAssertingHandler.HandlerOwnedUowCommitted.ShouldBeTrue();
+
         var reloaded = await ReloadAsync(sp, id);
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Completed);
-        scheduler.DeleteCalls.Count.ShouldBe(1);
+        reloaded.RunningSince.ShouldBeNull();
     }
 }

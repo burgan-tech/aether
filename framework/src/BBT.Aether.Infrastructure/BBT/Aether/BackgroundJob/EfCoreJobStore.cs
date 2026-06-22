@@ -138,6 +138,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
 
         job.Status = status;
         job.ModifiedAt = DateTime.UtcNow;
+        // Leaving Running: clear the claim stamp so the visibility-timeout reaper won't re-pick it.
+        job.RunningSince = null;
         if (handledTime.HasValue)
         {
             job.HandledTime = handledTime.Value;
@@ -201,6 +203,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         job.RetryCount++;
         job.NextRetryAt = nextRetryAtUtc;
         job.LastError = error;
+        // Leaving Running: clear the claim stamp so the visibility-timeout reaper won't re-pick it.
+        job.RunningSince = null;
         // HandledTime intentionally left untouched: a retrying job has not been "handled". It is set
         // only on a terminal Completed/Failed transition via UpdateStatusAsync.
         job.ModifiedAt = DateTime.UtcNow;
@@ -224,6 +228,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
 
         job.Status = BackgroundJobStatus.Scheduled;
         job.LastRunAt = ranAtUtc;
+        // Leaving Running: clear the claim stamp so the visibility-timeout reaper won't re-pick it.
+        job.RunningSince = null;
         if (error != null)
         {
             job.LastError = error;

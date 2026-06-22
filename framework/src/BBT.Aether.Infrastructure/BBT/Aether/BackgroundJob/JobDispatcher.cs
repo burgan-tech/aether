@@ -25,27 +25,22 @@ public class JobDispatcher(
 {
     /// <inheritdoc/>
     public virtual async Task DispatchAsync(
-        Guid jobId,
-        string handlerName,
+        string jobName,
         ReadOnlyMemory<byte> jobPayload,
         CancellationToken cancellationToken = default)
     {
-        if (jobId == Guid.Empty)
-            throw new ArgumentException("Job ID cannot be empty.", nameof(jobId));
-
-        if (string.IsNullOrWhiteSpace(handlerName))
-            throw new ArgumentNullException(nameof(handlerName));
+        if (string.IsNullOrWhiteSpace(jobName))
+            throw new ArgumentNullException(nameof(jobName));
 
         using var activity = InfrastructureActivitySource.Source.StartActivity(
             "BackgroundJob.Dispatch",
             ActivityKind.Internal,
             Activity.Current?.Context ?? default);
 
-        activity?.SetTag("job.id", jobId.ToString());
-        activity?.SetTag("job.handler_name", handlerName);
+        activity?.SetTag("job.name", jobName);
 
         await using var scope = scopeFactory.CreateAsyncScope();
-        
+
         var argsPayload = CloudEventEnvelopeHelper.ExtractDataPayload(eventSerializer, jobPayload, out var envelope);
 
         IDisposable? schemaScope = null;
@@ -57,14 +52,13 @@ public class JobDispatcher(
 
         using (schemaScope)
         {
-            await DispatchCoreAsync(scope, jobId, handlerName, argsPayload, activity, cancellationToken);
+            await DispatchCoreAsync(scope, jobName, argsPayload, activity, cancellationToken);
         }
     }
 
     private async Task DispatchCoreAsync(
         AsyncServiceScope scope,
-        Guid jobId,
-        string handlerName,
+        string jobName,
         ReadOnlyMemory<byte> argsPayload,
         Activity? activity,
         CancellationToken cancellationToken)
@@ -73,76 +67,66 @@ public class JobDispatcher(
         var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
         var jobScheduler = scope.ServiceProvider.GetRequiredService<IJobScheduler>();
 
-        string? jobName = null;
-        JobKind kind = JobKind.OneShot;
-        int retryCount = 0, maxRetry = 0;
+        Guid jobId;
+        string handlerName;
+        JobKind kind;
+        int retryCount, maxRetry;
 
-        // --- Phase 1: load + atomic claim (one UoW) ---
+        // --- Phase 1: single load + atomic claim (one UoW) ---
         await using (var claimUow = uowManager.Begin(
             new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
         {
-            var jobInfo = await jobStore.GetAsync(jobId, cancellationToken);
-            if (jobInfo == null)
+            var jobInfo = await jobStore.GetByJobNameAsync(jobName, cancellationToken);
+            if (jobInfo is null)
             {
+                logger.LogWarning("Job '{JobName}' not found in an active state; skipping", jobName);
                 activity?.SetStatus(ActivityStatusCode.Ok);
                 await claimUow.CommitAsync(cancellationToken);
                 return;
             }
 
-            jobName = jobInfo.JobName;
+            jobId = jobInfo.Id;
+            handlerName = jobInfo.HandlerName;
             kind = jobInfo.Kind;
             retryCount = jobInfo.RetryCount;
             maxRetry = jobInfo.MaxRetryCount;
-            activity?.SetTag("job.name", jobName);
-
-            // Terminal already → nothing to do, ensure scheduler stops triggering, return.
-            if (jobInfo.Status is BackgroundJobStatus.Completed or BackgroundJobStatus.Cancelled
-                or BackgroundJobStatus.Failed)
-            {
-                activity?.SetTag("job.status", jobInfo.Status.ToString().ToLowerInvariant());
-                activity?.SetStatus(ActivityStatusCode.Ok);
-                await claimUow.CommitAsync(cancellationToken);
-                await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
-                return;
-            }
+            activity?.SetTag("job.id", jobId.ToString());
+            activity?.SetTag("job.handler_name", handlerName);
 
             if (!options.Invokers.ContainsKey(handlerName))
             {
-                logger.LogWarning("No handler found for handler name '{HandlerName}' with job id '{JobId}'", handlerName,
+                logger.LogWarning("No handler found for handler name '{HandlerName}' (job id '{JobId}')", handlerName,
                     jobId);
                 await jobStore.UpdateStatusAsync(jobId, BackgroundJobStatus.Failed, clock.UtcNow,
                     "No handler found for handler type", cancellationToken);
-                activity?.SetTag("job.status", "failed");
-                activity?.SetStatus(ActivityStatusCode.Error, "No handler found for handler type");
                 await claimUow.CommitAsync(cancellationToken);
                 await TryDeleteFromSchedulerAsync(jobScheduler, handlerName, jobName, cancellationToken);
+                activity?.SetTag("job.status", "failed");
+                activity?.SetStatus(ActivityStatusCode.Error, "No handler");
                 return;
             }
 
-            // Atomic claim: only one worker wins Scheduled→Running.
-            var claimed = await jobStore.TryTransitionStatusAsync(jobId, BackgroundJobStatus.Scheduled,
-                BackgroundJobStatus.Running, cancellationToken);
+            // Atomic claim: only one worker wins Scheduled→Running (and stamps RunningSince).
+            var claimed = await jobStore.TryClaimAsync(jobId, clock.UtcNow, cancellationToken);
             await claimUow.CommitAsync(cancellationToken);
             if (!claimed)
             {
                 logger.LogInformation(
-                    "Job id '{JobId}' was not in Scheduled state (already claimed or late delivery); skipping", jobId);
+                    "Job id '{JobId}' was not Scheduled (already claimed or late delivery); skipping", jobId);
                 activity?.SetTag("job.status", "skipped");
                 activity?.SetStatus(ActivityStatusCode.Ok);
                 return;
             }
         }
 
-        // --- Phase 2: run handler (own UoW) + record outcome (separate UoW) ---
+        // --- Phase 2: run the handler with NO dispatcher transaction ---
+        // The dispatcher holds no open UoW/connection across the handler. The handler owns its own UoW
+        // boundaries (it can open IUnitOfWorkManager.Begin around its DB work). The schema scope is active.
         try
         {
-            await using (var runUow = uowManager.Begin(
-                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
-            {
-                await InvokeHandlerAsync(scope.ServiceProvider, handlerName, argsPayload, cancellationToken);
-                await runUow.CommitAsync(cancellationToken);
-            }
+            await InvokeHandlerAsync(scope.ServiceProvider, handlerName, argsPayload, cancellationToken);
 
+            // --- Phase 3: record success (short UoW) ---
             await using (var doneUow = uowManager.Begin(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
             {

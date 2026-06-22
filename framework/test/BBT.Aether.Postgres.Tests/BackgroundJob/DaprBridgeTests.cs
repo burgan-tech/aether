@@ -59,12 +59,12 @@ public sealed class DaprBridgeTests(PostgresFixture fx)
     /// </summary>
     private sealed class FakeJobDispatcher : IJobDispatcher
     {
-        public List<(Guid jobId, string handlerName)> Dispatches { get; } = new();
+        public List<string> Dispatches { get; } = new();
 
-        public Task DispatchAsync(Guid jobId, string handlerName, ReadOnlyMemory<byte> jobPayload,
+        public Task DispatchAsync(string jobName, ReadOnlyMemory<byte> jobPayload,
             CancellationToken cancellationToken = default)
         {
-            Dispatches.Add((jobId, handlerName));
+            Dispatches.Add(jobName);
             return Task.CompletedTask;
         }
     }
@@ -195,8 +195,7 @@ public sealed class DaprBridgeTests(PostgresFixture fx)
             bridge.ExecuteAsync(jobName, BuildPayload(sp), CancellationToken.None));
 
         dispatcher.Dispatches.Count.ShouldBe(1);
-        dispatcher.Dispatches[0].jobId.ShouldBe(id);
-        dispatcher.Dispatches[0].handlerName.ShouldBe(HandlerName);
+        dispatcher.Dispatches[0].ShouldBe(jobName);
     }
 
     [Fact]
