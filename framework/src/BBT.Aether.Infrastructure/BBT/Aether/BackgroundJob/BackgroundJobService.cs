@@ -74,7 +74,6 @@ public sealed class BackgroundJobService(
         string schedule,
         Dictionary<string, object>? metadata = null,
         JobScheduleFailurePolicy? failurePolicyOptions = null,
-        JobEnqueueMode mode = JobEnqueueMode.Ambient,
         bool directly = false,
         Guid? jobId = null,
         JobKind? kind = null,
@@ -156,47 +155,45 @@ public sealed class BackgroundJobService(
         // Bytes for the scheduler (the `directly` arm path). Equivalent to the JSON the poller arms with.
         var payloadBytes = eventSerializer.Serialize(envelope);
 
-        switch (mode)
+        // Atomic-ambient: when the caller has an ambient UoW, persist into it (commits with their business
+        // transaction — a rollback discards the row). Otherwise open a short own transaction.
+        if (uowManager.Current is { } ambient)
         {
-            case JobEnqueueMode.Ambient when uowManager.Current is { } ambient:
-                // Participate in the caller's ambient UoW: the row commits atomically with their business
-                // transaction; a rollback discards it. No own UoW, no self-commit.
-                await jobStore.SaveAsync(jobInfo, cancellationToken);
-                if (directly)
-                    ambient.OnCompleted(_ => ArmNowAsync(handlerName, jobName, schedule, payloadBytes,
-                        failurePolicyOptions, effectiveJobId, cancellationToken));
-                logger.LogInformation(
-                    "Enqueued Pending job '{HandlerName}'/'{JobName}' into ambient UoW. Id: {Id}",
-                    handlerName, jobName, effectiveJobId);
-                activity?.SetStatus(ActivityStatusCode.Ok);
-                return effectiveJobId;
-
-            default: // Standalone, OR Ambient with no current ambient UoW
-                await using (var uow = uowManager.Begin(
-                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
-                {
-                    try
-                    {
-                        await jobStore.SaveAsync(jobInfo, cancellationToken);
-                        await uow.CommitAsync(cancellationToken);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "Failed to enqueue job '{HandlerName}'/'{JobName}'", handlerName, jobName);
-                        RecordException(activity, ex);
-                        await uow.RollbackAsync(cancellationToken);
-                        throw;
-                    }
-                }
-                if (directly)
-                    await ArmNowAsync(handlerName, jobName, schedule, payloadBytes, failurePolicyOptions,
-                        effectiveJobId, cancellationToken);
-                logger.LogInformation(
-                    "Enqueued Pending job '{HandlerName}'/'{JobName}'. Id: {Id}",
-                    handlerName, jobName, effectiveJobId);
-                activity?.SetStatus(ActivityStatusCode.Ok);
-                return effectiveJobId;
+            await jobStore.SaveAsync(jobInfo, cancellationToken);
+            if (directly)
+                ambient.OnCompleted(_ => ArmNowAsync(handlerName, jobName, schedule, payloadBytes,
+                    failurePolicyOptions, effectiveJobId, cancellationToken));
+            logger.LogInformation(
+                "Enqueued Pending job '{HandlerName}'/'{JobName}' into ambient UoW. Id: {Id}",
+                handlerName, jobName, effectiveJobId);
+            activity?.SetStatus(ActivityStatusCode.Ok);
+            return effectiveJobId;
         }
+
+        await using (var uow = uowManager.Begin(
+            new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+        {
+            try
+            {
+                await jobStore.SaveAsync(jobInfo, cancellationToken);
+                await uow.CommitAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to enqueue job '{HandlerName}'/'{JobName}'", handlerName, jobName);
+                RecordException(activity, ex);
+                await uow.RollbackAsync(cancellationToken);
+                throw;
+            }
+        }
+        if (directly)
+            await ArmNowAsync(handlerName, jobName, schedule, payloadBytes, failurePolicyOptions,
+                effectiveJobId, cancellationToken);
+        logger.LogInformation(
+            "Enqueued Pending job '{HandlerName}'/'{JobName}'. Id: {Id}",
+            handlerName, jobName, effectiveJobId);
+        activity?.SetStatus(ActivityStatusCode.Ok);
+        return effectiveJobId;
     }
 
     /// <summary>

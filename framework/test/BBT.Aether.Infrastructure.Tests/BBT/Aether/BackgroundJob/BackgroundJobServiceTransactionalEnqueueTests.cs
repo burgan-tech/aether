@@ -116,31 +116,9 @@ public class BackgroundJobServiceTransactionalEnqueueTests
     }
 
     [Fact]
-    public async Task EnqueueAsync_Standalone_AlwaysOpensOwnUoW_IgnoringAmbient()
+    public async Task EnqueueAsync_Directly_NoAmbient_ArmsImmediatelyAfterCommit()
     {
-        // Arrange — an ambient UoW IS active but Standalone must ignore it and open its own RequiresNew UoW.
-        var ambientUow = Substitute.For<IUnitOfWork>();
-        _uowManager.Current.Returns(ambientUow);
-        var ownUow = Substitute.For<IUnitOfWork>();
-        _uowManager.Begin(Arg.Any<UnitOfWorkOptions>()).Returns(ownUow);
-
-        // Act
-        await _sut.EnqueueAsync(
-            "handler", "job-standalone", new { X = 1 }, "@every 5s",
-            mode: JobEnqueueMode.Standalone, cancellationToken: CancellationToken.None);
-
-        // Assert — own UoW opened and committed; ambient UoW untouched; no scheduler call (directly:false).
-        _uowManager.Received(1).Begin(Arg.Any<UnitOfWorkOptions>());
-        await ownUow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
-        await _jobStore.Received(1).SaveAsync(Arg.Any<BackgroundJobInfo>(), Arg.Any<CancellationToken>());
-        ambientUow.DidNotReceiveWithAnyArgs().OnCompleted(default!);
-        await _jobScheduler.DidNotReceiveWithAnyArgs().ScheduleAsync(default!, default!, default!, default);
-    }
-
-    [Fact]
-    public async Task EnqueueAsync_Standalone_Directly_ArmsImmediatelyAfterCommit()
-    {
-        // Arrange — no ambient; Standalone + directly arms the scheduler inline after the commit and CASes
+        // Arrange — no ambient; directly arms the scheduler inline after the commit and CASes
         // the row Pending → Scheduled in its own UoW.
         _uowManager.Current.Returns((IUnitOfWork?)null);
         _uowManager.Begin(Arg.Any<UnitOfWorkOptions>()).Returns(_ => Substitute.For<IUnitOfWork>());
@@ -148,7 +126,7 @@ public class BackgroundJobServiceTransactionalEnqueueTests
         // Act
         var id = await _sut.EnqueueAsync(
             "handler", "job-direct", new { X = 1 }, "@every 5s",
-            mode: JobEnqueueMode.Standalone, directly: true, cancellationToken: CancellationToken.None);
+            directly: true, cancellationToken: CancellationToken.None);
 
         // Assert — scheduler armed once, and the CAS transition Pending → Scheduled was attempted.
         await _jobScheduler.Received(1).ScheduleAsync(

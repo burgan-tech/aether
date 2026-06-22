@@ -14,6 +14,9 @@ public interface IBackgroundJobService
     /// <summary>
     /// Enqueues a background job with the specified parameters and schedule.
     /// Creates a new job entity, persists it, and schedules it with the underlying scheduler.
+    /// The job row is persisted atomically with the caller's ambient unit of work when one is active
+    /// (a rollback discards it); otherwise a short transaction is opened and committed. The arming poller
+    /// arms it after commit, or — when <paramref name="directly"/> is true — it is armed immediately.
     /// </summary>
     /// <typeparam name="TPayload">The type of the job payload.</typeparam>
     /// <param name="handlerName">The name of the handler type to execute (e.g., "SendEmail", "GenerateReport").</param>
@@ -22,15 +25,6 @@ public interface IBackgroundJobService
     /// <param name="schedule">The schedule expression defining when the job should be executed (e.g., cron expression).</param>
     /// <param name="metadata">Additional metadata associated with the job (optional).</param>
     /// <param name="failurePolicyOptions">Retry/failure policy for the scheduled job (optional).</param>
-    /// <param name="mode">
-    /// Controls how the job row is persisted relative to the caller's unit of work.
-    /// <see cref="JobEnqueueMode.Ambient"/> (default): when an ambient unit of work is active the row is
-    /// persisted into it, so the job commits atomically with the caller's business transaction and a
-    /// rollback discards it; when there is no ambient unit of work a short standalone RequiresNew
-    /// transaction is opened and committed. <see cref="JobEnqueueMode.Standalone"/>: always open a new,
-    /// independent RequiresNew transaction that commits immediately regardless of any ambient unit of
-    /// work, so the job survives even if the caller later rolls back (fire-and-forget).
-    /// </param>
     /// <param name="directly">
     /// When <c>true</c>, the scheduler is armed inline immediately after the job row is durably committed
     /// (and the row is flipped Pending → Scheduled), instead of waiting for the arming poller. In the
@@ -66,7 +60,6 @@ public interface IBackgroundJobService
         string schedule,
         Dictionary<string, object>? metadata = null,
         JobScheduleFailurePolicy? failurePolicyOptions = null,
-        JobEnqueueMode mode = JobEnqueueMode.Ambient,
         bool directly = false,
         Guid? jobId = null,
         BBT.Aether.Domain.Entities.JobKind? kind = null,

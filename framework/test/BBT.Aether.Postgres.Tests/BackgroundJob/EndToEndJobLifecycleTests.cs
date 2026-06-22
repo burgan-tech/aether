@@ -222,7 +222,7 @@ public sealed class EndToEndJobLifecycleTests(PostgresFixture fx)
 
     /// <summary>Enqueues a job through the REAL service while a schema scope is active.</summary>
     private async Task<Guid> EnqueueAsync(IServiceProvider sp, string jobName, string schedule,
-        JobEnqueueMode mode = JobEnqueueMode.Ambient, bool directly = false)
+        bool directly = false)
     {
         await using var scope = sp.CreateAsyncScope();
         var ssp = scope.ServiceProvider;
@@ -231,7 +231,7 @@ public sealed class EndToEndJobLifecycleTests(PostgresFixture fx)
         {
             var svc = ssp.GetRequiredService<IBackgroundJobService>();
             return await svc.EnqueueAsync(
-                HandlerName, jobName, new TestArgs { Value = "x" }, schedule, mode: mode, directly: directly);
+                HandlerName, jobName, new TestArgs { Value = "x" }, schedule, directly: directly);
         }
     }
 

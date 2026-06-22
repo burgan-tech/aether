@@ -222,15 +222,15 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task Ambient_default_rolls_back_with_caller()
+    public async Task Ambient_rolls_back_with_caller()
     {
         var scheduler = new FakeJobScheduler();
         var options = BuildOptions();
         var sp = BuildProvider(scheduler, options);
         await ArrangeSchemaAsync(sp);
 
-        // Case 1: ambient UoW rolled back → no row persisted (atomic with the caller). Default mode is
-        // Ambient and directly:false — the row participates in our own UoW set as uowManager.Current.
+        // Case 1: ambient UoW rolled back → no row persisted (atomic with the caller). directly:false — the
+        // row participates in our own UoW set as uowManager.Current.
         var rolledBackId = Guid.NewGuid();
         await using (var scope = sp.CreateAsyncScope())
         {
@@ -271,39 +271,6 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
         var committed = await ReloadAsync(sp, committedId);
         committed.ShouldNotBeNull();
         committed!.Status.ShouldBe(BackgroundJobStatus.Pending);
-        scheduler.ScheduleCalls.ShouldBeEmpty();
-    }
-
-    [Fact]
-    public async Task Standalone_survives_caller_rollback()
-    {
-        var scheduler = new FakeJobScheduler();
-        var options = BuildOptions();
-        var sp = BuildProvider(scheduler, options);
-        await ArrangeSchemaAsync(sp);
-
-        // Standalone mode commits the row in its own independent transaction, so it survives even when the
-        // caller's ambient UoW later rolls back.
-        var id = Guid.NewGuid();
-        await using (var scope = sp.CreateAsyncScope())
-        {
-            var ssp = scope.ServiceProvider;
-            var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
-            var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
-            using (currentSchema.Change(_schema))
-            {
-                await using var uow = uowManager.Begin(
-                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                var svc = ssp.GetRequiredService<IBackgroundJobService>();
-                await svc.EnqueueAsync(HandlerName, "job-standalone", new TestArgs { Value = "x" }, "*/5 * * * *",
-                    mode: JobEnqueueMode.Standalone, jobId: id);
-                await uow.RollbackAsync();
-            }
-        }
-
-        var reloaded = await ReloadAsync(sp, id);
-        reloaded.ShouldNotBeNull();
-        reloaded!.Status.ShouldBe(BackgroundJobStatus.Pending);
         scheduler.ScheduleCalls.ShouldBeEmpty();
     }
 

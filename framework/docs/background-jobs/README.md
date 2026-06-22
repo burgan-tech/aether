@@ -159,19 +159,11 @@ job id. It makes **no scheduler call** — the arming poller arms the row after 
 inferred from the schedule when `kind` is omitted: a value starting with `@` (e.g. `@every 5m`, `@daily`) or a
 5–6 field cron expression ⇒ `Recurring`; anything else (e.g. an ISO-8601 instant) ⇒ `OneShot`.
 
-### Enqueue modes (`JobEnqueueMode`)
+### Atomic enqueue with the caller's transaction
 
-`EnqueueAsync` takes a `JobEnqueueMode mode = JobEnqueueMode.Ambient` controlling how the job row is persisted
-relative to the caller's UnitOfWork:
-
-| Mode | Behavior |
-|------|----------|
-| `JobEnqueueMode.Ambient` (default) | When an ambient UnitOfWork is active, the row is persisted **into it** — the job commits atomically with the caller's business transaction and a rollback discards it. When there is **no** ambient UoW, a short standalone `RequiresNew` transaction is opened and committed. |
-| `JobEnqueueMode.Standalone` | Always opens a **new, independent** `RequiresNew` transaction that commits immediately, regardless of any ambient UoW. The job survives even if the caller later rolls back (fire-and-forget). |
-
-#### Atomic enqueue with the caller's transaction (`Ambient`)
-
-The default mode makes the job row atomic with the caller's business data:
+Enqueue is **always atomic** with the caller's ambient UnitOfWork. When an ambient UoW is active, the row is
+persisted **into it** — the job commits atomically with the caller's business transaction and a rollback
+discards the job. When there is **no** ambient UoW, a short `RequiresNew` transaction is opened and committed.
 
 ```csharp
 await using var uow = uowManager.Begin(
@@ -181,7 +173,6 @@ await using var uow = uowManager.Begin(
 
 await jobs.EnqueueAsync(
     "SendEmail", jobName, payload, "@once",
-    mode: JobEnqueueMode.Ambient,   // default — participate in the ambient UoW above
     jobId: correlationId);          // optional caller-supplied id to reuse for the caller's own tracking row
 
 await uow.CommitAsync();             // job row commits atomically with the business data
@@ -192,8 +183,8 @@ there is never an orphaned scheduled job. The poller arms the row only after a s
 scheduler is only ever touched after that — no scheduler call runs inside the caller's transaction (which also
 avoids nested-UoW / shared-DbContext collisions).
 
-Use `JobEnqueueMode.Standalone` when the job must **not** be tied to the caller's transaction — e.g. an
-audit/notification you want to keep even if the surrounding business operation rolls back.
+To enqueue a job that must survive a caller rollback, enqueue it outside that transaction (manage the UoW
+boundary yourself).
 
 ### Arming immediately (`directly`)
 
