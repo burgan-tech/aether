@@ -146,6 +146,42 @@ public sealed class MultiSchemaUnitOfWorkTests(PostgresFixture fx)
         await uow.DisposeAsync();
     }
 
+    [Fact]
+    public async Task Same_schema_reads_stay_correct_after_cross_schema_switch()
+    {
+        // Proves the SET-skip optimization does not break correctness: consecutive same-schema
+        // reads, and a flow_a read after touching flow_b, all resolve to the right schema.
+        await ArrangeSchemasAsync();
+        var sp = BuildProvider();
+
+        var uow = new CompositeUnitOfWork(sp);
+        await uow.InitializeAsync(new UnitOfWorkOptions { IsTransactional = true });
+
+        var a = await uow.GetDbContextAsync<ProbeDbContext>(_schemaA);
+        a.Set<Thing>().Add(new Thing { Id = Guid.NewGuid(), Name = "a1" });
+        a.Set<Thing>().Add(new Thing { Id = Guid.NewGuid(), Name = "a2" });
+
+        var b = await uow.GetDbContextAsync<ProbeDbContext>(_schemaB);
+        b.Set<Thing>().Add(new Thing { Id = Guid.NewGuid(), Name = "b1" });
+
+        await uow.SaveChangesAsync();
+
+        // Two consecutive same-schema reads on flow_a (second one exercises the skip path).
+        (await a.Set<Thing>().CountAsync()).ShouldBe(2);
+        (await a.Set<Thing>().CountAsync()).ShouldBe(2);
+
+        // Cross-schema switch to flow_b, then back to flow_a must re-apply flow_a's search_path.
+        (await b.Set<Thing>().CountAsync()).ShouldBe(1);
+        (await a.Set<Thing>().CountAsync()).ShouldBe(2);
+
+        // And consecutive flow_b reads after the switch back also stay correct.
+        (await b.Set<Thing>().CountAsync()).ShouldBe(1);
+        (await b.Set<Thing>().CountAsync()).ShouldBe(1);
+
+        await uow.CommitAsync();
+        await uow.DisposeAsync();
+    }
+
     public sealed class Thing
     {
         public Guid Id { get; set; }

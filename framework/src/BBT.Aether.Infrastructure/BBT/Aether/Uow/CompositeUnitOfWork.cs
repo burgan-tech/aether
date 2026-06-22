@@ -34,6 +34,8 @@ public sealed class CompositeUnitOfWork(
     private readonly List<Func<IUnitOfWork, Exception?, Task>> _failedHandlers = new();
     private readonly List<Action<IUnitOfWork>> _disposedHandlers = new();
 
+    private readonly SearchPathState _searchPathState = new();
+
     private NpgsqlConnection? _connection;
     private NpgsqlTransaction? _transaction;
     private UnitOfWorkOptions _options = new();
@@ -153,6 +155,9 @@ public sealed class CompositeUnitOfWork(
             await _connection.OpenAsync(cancellationToken);
             _transaction = await _connection.BeginTransactionAsync(
                 _options.IsolationLevel ?? IsolationLevel.ReadCommitted, cancellationToken);
+
+            // A fresh transaction has no SET LOCAL applied yet.
+            _searchPathState.Current = null;
         }
 
         // Extend the configurator-built options with a per-command search_path interceptor.
@@ -161,7 +166,7 @@ public sealed class CompositeUnitOfWork(
         // interceptor issues the search_path before every command, guaranteeing correct schema
         // resolution per statement (also required under PgBouncer transaction pooling).
         var options = new DbContextOptionsBuilder<TDbContext>(configurator.BuildOptions(_connection))
-            .AddInterceptors(new SearchPathCommandInterceptor(schema))
+            .AddInterceptors(new SearchPathCommandInterceptor(schema, _searchPathState))
             .Options;
 
         var context = ActivatorUtilities.CreateInstance<TDbContext>(serviceProvider, options);
