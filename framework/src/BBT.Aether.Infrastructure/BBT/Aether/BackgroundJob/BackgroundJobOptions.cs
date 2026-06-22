@@ -29,9 +29,26 @@ public class BackgroundJobOptions
     {
         var handlerType = typeof(THandler);
         var name = handlerName ?? handlerType.Name;
-        
+
         Handlers.Add(new JobHandlerRegistration(name, handlerType));
     }
+
+    /// <summary>The database schema whose background jobs this arming processor handles. The processor
+    /// opens a UnitOfWork bound to this schema each run. If null/empty it logs a warning and does nothing.
+    /// For multi-schema deployments run one processor instance per schema.</summary>
+    public string? Schema { get; set; }
+
+    /// <summary>Default maximum framework retry attempts for one-shot jobs (used by enqueue/dispatcher).</summary>
+    public int MaxRetryCount { get; set; } = 3;
+
+    /// <summary>Base delay for exponential retry backoff.</summary>
+    public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Interval between arming-poller runs.</summary>
+    public TimeSpan ArmingInterval { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>Max jobs armed per poller run.</summary>
+    public int ArmingBatchSize { get; set; } = 100;
 }
 
 /// <summary>
