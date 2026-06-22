@@ -80,6 +80,8 @@ public static class AetherEfCoreServiceCollectionExtensions
         
         services.AddScoped(typeof(IDbContextProvider<>), typeof(DbContextProvider<>));
 
+        services.AddScoped(typeof(IAetherDbContextProvider<>), typeof(AetherDbContextProvider<>));
+
         return services;
     }
 

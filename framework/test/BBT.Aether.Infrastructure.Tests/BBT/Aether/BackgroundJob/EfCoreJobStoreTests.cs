@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.EntityFrameworkCore.Modeling;
 using BBT.Aether.Persistence;
+using BBT.Aether.TestSupport;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using Xunit;
@@ -51,7 +52,7 @@ public class EfCoreJobStoreTests
         await db.SaveChangesAsync();
         db.ChangeTracker.Clear(); // simulate a fresh request scope / load
 
-        var store = new EfCoreJobStore<TestJobDbContext>(db);
+        var store = new EfCoreJobStore<TestJobDbContext>(new FixedDbContextProvider<TestJobDbContext>(db));
 
         // Re-enqueue with a DIFFERENT Guid but the SAME JobName (the original failure scenario).
         var incoming = NewJob(Guid.NewGuid(), "job-1", BackgroundJobStatus.Running, "new", 2);
@@ -71,7 +72,7 @@ public class EfCoreJobStoreTests
     public async Task SaveAsync_WhenNoExistingJob_InsertsNewRow()
     {
         await using var db = NewContext();
-        var store = new EfCoreJobStore<TestJobDbContext>(db);
+        var store = new EfCoreJobStore<TestJobDbContext>(new FixedDbContextProvider<TestJobDbContext>(db));
 
         var id = Guid.NewGuid();
         await store.SaveAsync(NewJob(id, "job-new", BackgroundJobStatus.Scheduled, "expr", 1));

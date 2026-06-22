@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
+using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -18,15 +19,15 @@ namespace BBT.Aether.BackgroundJob;
 public class EfCoreJobStore<TDbContext> : IJobStore
     where TDbContext : DbContext, IHasEfCoreBackgroundJobs
 {
-    private readonly TDbContext _dbContext;
+    private readonly IAetherDbContextProvider<TDbContext> _dbContextProvider;
 
     /// <summary>
     /// Initializes a new instance of the EfCoreJobStore class.
     /// </summary>
-    /// <param name="dbContext">The database context for job persistence.</param>
-    public EfCoreJobStore(TDbContext dbContext)
+    /// <param name="dbContextProvider">Provider resolving the schema-bound database context for job persistence.</param>
+    public EfCoreJobStore(IAetherDbContextProvider<TDbContext> dbContextProvider)
     {
-        _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
+        _dbContextProvider = dbContextProvider ?? throw new ArgumentNullException(nameof(dbContextProvider));
     }
 
     /// <inheritdoc/>
@@ -34,6 +35,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     {
         if (jobInfo == null)
             throw new ArgumentNullException(nameof(jobInfo));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
 
         // Check if job already exists
         var existingJob = await GetByJobNameAsync(jobInfo.JobName, cancellationToken);
@@ -55,7 +58,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         else
         {
             // Insert new job
-            await _dbContext.BackgroundJobs.AddAsync(jobInfo, cancellationToken);
+            await dbContext.BackgroundJobs.AddAsync(jobInfo, cancellationToken);
         }
 
         // SaveChanges removed - will be flushed by UoW Commit or calling code
@@ -67,7 +70,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
-        return await _dbContext.BackgroundJobs
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
             .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
     }
 
@@ -78,7 +82,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (string.IsNullOrWhiteSpace(jobName))
             throw new ArgumentNullException(nameof(jobName));
 
-        return await _dbContext.BackgroundJobs
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
             .FirstOrDefaultAsync(j => j.JobName == jobName
                     && (j.Status == BackgroundJobStatus.Scheduled || j.Status == BackgroundJobStatus.Running),
                 cancellationToken);
@@ -91,7 +96,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (string.IsNullOrWhiteSpace(handlerName))
             throw new ArgumentNullException(nameof(handlerName));
 
-        return await _dbContext.BackgroundJobs
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
             .Where(j => j.HandlerName == handlerName)
             .ToListAsync(cancellationToken);
     }
@@ -99,7 +105,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     /// <inheritdoc/>
     public async Task<IEnumerable<BackgroundJobInfo>> GetActiveAsync(CancellationToken cancellationToken = default)
     {
-        return await _dbContext.BackgroundJobs
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
             .Where(j => j.Status == BackgroundJobStatus.Scheduled || j.Status == BackgroundJobStatus.Running)
             .ToListAsync(cancellationToken);
     }
@@ -115,7 +122,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
-        var job = await _dbContext.BackgroundJobs
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var job = await dbContext.BackgroundJobs
             .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
 
         if (job == null)
