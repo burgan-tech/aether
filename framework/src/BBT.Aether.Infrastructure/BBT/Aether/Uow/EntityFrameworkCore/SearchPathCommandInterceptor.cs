@@ -25,7 +25,7 @@ namespace BBT.Aether.Uow.EntityFrameworkCore;
 /// without materializing) across interleaved schema-bound contexts.
 /// </remarks>
 /// </summary>
-public sealed class SearchPathCommandInterceptor(string schema, SearchPathState state) : DbCommandInterceptor
+public sealed class SearchPathCommandInterceptor(string schema, SchemaScopeState state) : DbCommandInterceptor
 {
     private readonly string _schema = schema;
     private readonly string _setSearchPath = $"SET LOCAL search_path TO {PostgreSqlIdentifier.QuoteSchema(schema)}, public";

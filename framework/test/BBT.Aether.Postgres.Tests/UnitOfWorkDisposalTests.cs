@@ -63,9 +63,7 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
         services.AddAetherCore(_ => { });
 
         // DbContext + UnitOfWork wiring (configurator, UoW manager, ambient accessor, provider).
-        services.AddAetherDbContext<TestDbContext>(
-            fx.ConnectionString,
-            (_, b) => b.UseNpgsql(fx.ConnectionString));
+        services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString);
 
         return services.BuildServiceProvider();
     }

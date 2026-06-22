@@ -12,9 +12,9 @@ namespace BBT.Aether.Uow.EntityFrameworkCore;
 public interface IAetherDbContextConfigurator<TDbContext>
     where TDbContext : DbContext
 {
-    /// <summary>The connection string the UnitOfWork opens its single shared connection from.</summary>
-    string ConnectionString { get; }
+    /// <summary>Creates a new provider-specific connection for the UnitOfWork's single shared connection.</summary>
+    DbConnection CreateConnection();
 
-    /// <summary>Builds options that use the given already-open shared connection.</summary>
-    DbContextOptions<TDbContext> BuildOptions(DbConnection sharedConnection);
+    /// <summary>Builds options that use the given already-open shared connection, bound to the given schema.</summary>
+    DbContextOptions<TDbContext> BuildOptions(DbConnection sharedConnection, string schema, SchemaScopeState state);
 }

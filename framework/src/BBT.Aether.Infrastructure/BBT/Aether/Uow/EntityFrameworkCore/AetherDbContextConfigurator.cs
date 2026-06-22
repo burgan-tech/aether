@@ -6,22 +6,19 @@ namespace BBT.Aether.Uow.EntityFrameworkCore;
 
 public sealed class AetherDbContextConfigurator<TDbContext>(
     string connectionString,
+    IAetherDatabaseProvider provider,
     Action<IServiceProvider, DbContextOptionsBuilder> configure,
     IServiceProvider serviceProvider)
     : IAetherDbContextConfigurator<TDbContext>
     where TDbContext : DbContext
 {
-    public string ConnectionString => connectionString;
+    public DbConnection CreateConnection() => provider.CreateConnection(connectionString);
 
-    public DbContextOptions<TDbContext> BuildOptions(DbConnection sharedConnection)
+    public DbContextOptions<TDbContext> BuildOptions(DbConnection sharedConnection, string schema, SchemaScopeState state)
     {
         var builder = new DbContextOptionsBuilder<TDbContext>();
-        // Apply the registered configuration (interceptors, provider tuning, etc.)...
         configure(serviceProvider, builder);
-        // ...then bind to the shared connection. UseNpgsql(connection) overrides any
-        // connection-string-based provider call made by `configure`, while keeping
-        // interceptors/options added via AddInterceptors.
-        builder.UseNpgsql(sharedConnection);
+        provider.ApplyShared(builder, sharedConnection, schema, state);
         return builder.Options;
     }
 }

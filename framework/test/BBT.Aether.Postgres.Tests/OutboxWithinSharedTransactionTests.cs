@@ -108,9 +108,7 @@ public sealed class OutboxWithinSharedTransactionTests(PostgresFixture fx)
         services.AddAetherCore(_ => { });
 
         // DbContext + UnitOfWork wiring (configurator, UoW manager, ambient accessor, provider).
-        services.AddAetherDbContext<TestDbContext>(
-            fx.ConnectionString,
-            (_, b) => b.UseNpgsql(fx.ConnectionString));
+        services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString);
 
         // Domain-event dispatcher (default strategy = AlwaysUseOutbox).
         services.AddAetherDomainEvents<TestDbContext>();
@@ -148,7 +146,8 @@ public sealed class OutboxWithinSharedTransactionTests(PostgresFixture fx)
             BBT.Aether.Uow.EntityFrameworkCore.IAetherDbContextConfigurator<TestDbContext>>();
         await using var modelConn = new NpgsqlConnection(fx.ConnectionString);
         await modelConn.OpenAsync();
-        await using var ctx = ActivatorUtilities.CreateInstance<TestDbContext>(sp, configurator.BuildOptions(modelConn));
+        await using var ctx = ActivatorUtilities.CreateInstance<TestDbContext>(
+            sp, configurator.BuildOptions(modelConn, _schema, new BBT.Aether.Uow.EntityFrameworkCore.SchemaScopeState()));
         var script = ctx.Database.GenerateCreateScript();
 
         await using var ddlConn = new NpgsqlConnection(fx.ConnectionString);

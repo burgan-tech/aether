@@ -13,32 +13,22 @@ namespace Microsoft.Extensions.DependencyInjection;
 public static class AetherEfCoreServiceCollectionExtensions
 {
     /// <summary>
-    /// Adds Aether DbContext with EF Core configuration.
-    /// Use this overload if you don't need access to IServiceProvider in your configuration.
-    /// </summary>
-    public static IServiceCollection AddAetherDbContext<TDbContext>(
-        this IServiceCollection services,
-        string connectionString,
-        Action<DbContextOptionsBuilder> configure)
-        where TDbContext : AetherDbContext<TDbContext>
-        => services.AddAetherDbContext<TDbContext>(connectionString, (_, b) => configure(b));
-
-    /// <summary>
-    /// Adds Aether DbContext with EF Core configuration.
+    /// Adds Aether DbContext with EF Core configuration, using the supplied database provider.
     /// The supplied connection string is the one the UnitOfWork opens its single shared
     /// connection from; the configure delegate is captured to build schema-bound contexts that
-    /// all enlist on that shared connection. Schema is resolved at runtime via
-    /// <c>SET LOCAL search_path</c> by the UnitOfWork, so do not bake a schema into the model.
+    /// all enlist on that shared connection. Schema is resolved at runtime by the provider, so
+    /// do not bake a schema into the model.
     /// </summary>
     /// <example>
     /// <code>
-    /// services.AddAetherDbContext&lt;MyDbContext&gt;(connectionString, (sp, options) => options.UseNpgsql(connectionString));
+    /// services.AddAetherNpgsql&lt;MyDbContext&gt;(connectionString);
     /// </code>
     /// </example>
     public static IServiceCollection AddAetherDbContext<TDbContext>(
         this IServiceCollection services,
+        IAetherDatabaseProvider provider,
         string connectionString,
-        Action<IServiceProvider, DbContextOptionsBuilder> configure)
+        Action<IServiceProvider, DbContextOptionsBuilder>? configure = null)
         where TDbContext : AetherDbContext<TDbContext>
     {
         services.AddSingleton<AuditInterceptor>();
@@ -46,21 +36,31 @@ public static class AetherEfCoreServiceCollectionExtensions
         // Always include AuditInterceptor regardless of what the consumer configures.
         Action<IServiceProvider, DbContextOptionsBuilder> wrapped = (sp, b) =>
         {
-            configure(sp, b);
+            configure?.Invoke(sp, b);
             b.AddInterceptors(sp.GetRequiredService<AuditInterceptor>());
         };
 
         // The configurator builds options bound to the UoW's shared connection.
         services.AddScoped<IAetherDbContextConfigurator<TDbContext>>(sp =>
-            new AetherDbContextConfigurator<TDbContext>(connectionString, wrapped, sp));
+            new AetherDbContextConfigurator<TDbContext>(connectionString, provider, wrapped, sp));
 
         // Keep a design-time/migrations registration of the scoped DbContext.
-        services.AddDbContext<TDbContext>((sp, b) => wrapped(sp, b));
+        services.AddDbContext<TDbContext>((sp, b) => { wrapped(sp, b); provider.ApplyConnectionString(b, connectionString); });
 
         services.AddAetherUnitOfWork<TDbContext>();
 
         return services;
     }
+
+    /// <summary>
+    /// TEMPORARY shim that registers an Aether DbContext backed by PostgreSQL (Npgsql).
+    /// Will move to BBT.Aether.Npgsql in a later task.
+    /// </summary>
+    public static IServiceCollection AddAetherNpgsql<TDbContext>(
+        this IServiceCollection services, string connectionString,
+        Action<IServiceProvider, DbContextOptionsBuilder>? configure = null)
+        where TDbContext : AetherDbContext<TDbContext>
+        => services.AddAetherDbContext<TDbContext>(new NpgsqlAetherProvider(), connectionString, configure);
 
     /// <summary>
     /// Registers Unit of Work services for the specified DbContext.

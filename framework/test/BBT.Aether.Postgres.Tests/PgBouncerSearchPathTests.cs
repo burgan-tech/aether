@@ -60,6 +60,7 @@ public sealed class PgBouncerSearchPathTests(PostgresFixture fx)
         services.AddSingleton<IAetherDbContextConfigurator<ProbeDbContext>>(
             new AetherDbContextConfigurator<ProbeDbContext>(
                 fx.ConnectionString,
+                new NpgsqlAetherProvider(),
                 configure: (_, _) => { },
                 serviceProvider: null!));
         return services.BuildServiceProvider();

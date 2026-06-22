@@ -8,18 +8,18 @@ using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.Services;
 using BBT.Aether.Events;
 using BBT.Aether.Uow.EntityFrameworkCore;
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Npgsql;
 
 namespace BBT.Aether.Uow;
 
 /// <summary>
-/// Root unit of work backed by a single shared <see cref="NpgsqlConnection"/> and a single
-/// <see cref="NpgsqlTransaction"/>. Hands out lazily-created schema-bound <see cref="DbContext"/>
+/// Root unit of work backed by a single shared <see cref="DbConnection"/> and a single
+/// <see cref="DbTransaction"/>. Hands out lazily-created schema-bound <see cref="DbContext"/>
 /// instances keyed by (DbContextType, Schema). Each created context enlists on the shared
-/// transaction via <c>UseTransactionAsync</c> and runs <c>SET LOCAL search_path</c> so schema
-/// isolation is correct under PgBouncer transaction pooling.
+/// transaction via <c>UseTransactionAsync</c> and is bound to its schema by the configured
+/// database provider, so schema isolation is a provider concern.
 /// Dispatches domain events after successful commit, preserving the outbox / direct-publish pipeline.
 /// </summary>
 public sealed class CompositeUnitOfWork(
@@ -34,10 +34,10 @@ public sealed class CompositeUnitOfWork(
     private readonly List<Func<IUnitOfWork, Exception?, Task>> _failedHandlers = new();
     private readonly List<Action<IUnitOfWork>> _disposedHandlers = new();
 
-    private readonly SearchPathState _searchPathState = new();
+    private readonly SchemaScopeState _schemaState = new();
 
-    private NpgsqlConnection? _connection;
-    private NpgsqlTransaction? _transaction;
+    private DbConnection? _connection;
+    private DbTransaction? _transaction;
     private UnitOfWorkOptions _options = new();
     private bool _isInitialized;
     private bool _isDisposed;
@@ -161,24 +161,16 @@ public sealed class CompositeUnitOfWork(
 
         if (_connection is null)
         {
-            _connection = new NpgsqlConnection(configurator.ConnectionString);
+            _connection = configurator.CreateConnection();
             await _connection.OpenAsync(cancellationToken);
             _transaction = await _connection.BeginTransactionAsync(
                 _options.IsolationLevel ?? IsolationLevel.ReadCommitted, cancellationToken);
 
-            // A fresh transaction has no SET LOCAL applied yet.
-            _searchPathState.Current = null;
+            // A fresh transaction has no per-schema state applied yet.
+            _schemaState.Current = null;
         }
 
-        // Extend the configurator-built options with a per-command search_path interceptor.
-        // SET LOCAL search_path is transaction-scoped, so a single statement at creation time
-        // would be clobbered by other schema-bound contexts sharing this transaction. The
-        // interceptor issues the search_path before every command, guaranteeing correct schema
-        // resolution per statement (also required under PgBouncer transaction pooling).
-        var options = new DbContextOptionsBuilder<TDbContext>(configurator.BuildOptions(_connection))
-            .AddInterceptors(new SearchPathCommandInterceptor(schema, _searchPathState))
-            .Options;
-
+        var options = configurator.BuildOptions(_connection, schema, _schemaState);
         var context = ActivatorUtilities.CreateInstance<TDbContext>(serviceProvider, options);
 
         await context.Database.UseTransactionAsync(_transaction!, cancellationToken);
