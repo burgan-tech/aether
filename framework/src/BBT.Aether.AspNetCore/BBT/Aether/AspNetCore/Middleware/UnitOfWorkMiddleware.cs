@@ -8,8 +8,10 @@ using Microsoft.Extensions.Options;
 namespace BBT.Aether.AspNetCore.Middleware;
 
 /// <summary>
-/// Middleware that automatically manages Unit of Work for HTTP requests.
-/// Starts UoW before request processing, commits on success, rolls back on exception.
+/// Middleware that owns the Unit of Work for an HTTP request. It eagerly Begins the request UoW
+/// (no I/O — the connection/transaction open lazily on the first repository call), commits on
+/// success, and rolls back on exception. Because the UoW is begun (not merely prepared), a direct
+/// repository call works downstream even without the <c>[UnitOfWork]</c> aspect.
 /// Configurable via UnitOfWorkMiddlewareOptions to exclude specific paths/methods.
 /// </summary>
 public sealed class UnitOfWorkMiddleware : IMiddleware
@@ -35,21 +37,26 @@ public sealed class UnitOfWorkMiddleware : IMiddleware
     /// </summary>
     public async Task InvokeAsync(HttpContext context, RequestDelegate next)
     {
-        // Check if UoW should be started for this request
         if (!ShouldStartUnitOfWork(context))
         {
             await next(context);
             return;
         }
 
-        // Prepare UoW (creates placeholder without initializing)
-        await using var scope = _uowManager.Prepare(UnitOfWorkOptions.PrepareName);
-
-        // Process request
-        await next(context);
-
-        // // Auto-commit on success (no-op if not initialized, exception triggers auto-rollback via DisposeAsync)
-        // await scope.CommitAsync(context.RequestAborted);
+        // Own the request UnitOfWork: eager Begin (no I/O — connection/transaction open lazily on first
+        // repository call), commit on success, roll back on exception. Begin (not Prepare) means a direct
+        // repository call works downstream without the [UnitOfWork] aspect.
+        await using var uow = _uowManager.Begin(_options.DefaultOptions);
+        try
+        {
+            await next(context);
+            await uow.CommitAsync(context.RequestAborted);
+        }
+        catch
+        {
+            await uow.RollbackAsync(context.RequestAborted);
+            throw;
+        }
     }
 
     /// <summary>

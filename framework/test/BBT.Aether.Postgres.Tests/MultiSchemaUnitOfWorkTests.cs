@@ -255,6 +255,59 @@ public sealed class MultiSchemaUnitOfWorkTests(PostgresFixture fx)
         failedHandlerCalls.ShouldBe(1);
     }
 
+    [Fact]
+    public async Task Required_participant_work_is_committed_by_the_owner()
+    {
+        await ArrangeSchemasAsync();
+        var mgr = new UnitOfWorkManager(new AsyncLocalAmbientUowAccessor(), BuildProvider());
+
+        await using var owner = mgr.Begin(new UnitOfWorkOptions { IsTransactional = true });
+
+        var db1 = await ((IEfCoreUnitOfWork)mgr.Current!).GetDbContextAsync<ProbeDbContext>(_schemaA);
+        db1.Set<Thing>().Add(new Thing { Id = Guid.NewGuid(), Name = "outer" });
+
+        // Nested Required participant: shares the owner's root, does NOT own it, must NOT commit.
+        await using (var participant = mgr.Begin(new UnitOfWorkOptions
+                     {
+                         IsTransactional = true, Scope = UnitOfWorkScopeOption.Required
+                     }))
+        {
+            var db2 = await ((IEfCoreUnitOfWork)mgr.Current!).GetDbContextAsync<ProbeDbContext>(_schemaA);
+            db2.Set<Thing>().Add(new Thing { Id = Guid.NewGuid(), Name = "inner" });
+            // intentionally no CommitAsync — the owner commits everything.
+        }
+
+        await owner.CommitAsync();
+
+        (await CountAsync(_schemaA)).ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task RequiresNew_commits_independently_of_a_rolled_back_outer()
+    {
+        await ArrangeSchemasAsync();
+        var mgr = new UnitOfWorkManager(new AsyncLocalAmbientUowAccessor(), BuildProvider());
+
+        await using var outer = mgr.Begin(new UnitOfWorkOptions { IsTransactional = true });
+        var outerDb = await ((IEfCoreUnitOfWork)mgr.Current!).GetDbContextAsync<ProbeDbContext>(_schemaA);
+        outerDb.Set<Thing>().Add(new Thing { Id = Guid.NewGuid(), Name = "outer" });
+
+        await using (var inner = mgr.Begin(new UnitOfWorkOptions
+                     {
+                         IsTransactional = true, Scope = UnitOfWorkScopeOption.RequiresNew
+                     }))
+        {
+            var innerDb = await ((IEfCoreUnitOfWork)mgr.Current!).GetDbContextAsync<ProbeDbContext>(_schemaB);
+            innerDb.Set<Thing>().Add(new Thing { Id = Guid.NewGuid(), Name = "inner" });
+            await inner.CommitAsync();
+        }
+
+        await outer.RollbackAsync();
+
+        (await CountAsync(_schemaB)).ShouldBe(1);
+        (await CountAsync(_schemaA)).ShouldBe(0);
+    }
+
     public sealed class Thing
     {
         public Guid Id { get; set; }

@@ -28,4 +28,9 @@
         <ProjectReference Include="..\..\src\BBT.Aether.Application\BBT.Aether.Application.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+        <ProjectReference Include="..\..\src\BBT.Aether.AspNetCore\BBT.Aether.AspNetCore.csproj" />
+    </ItemGroup>
+
 </Project>
