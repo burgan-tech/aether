@@ -1,5 +1,7 @@
 using System;
 using BBT.Aether.Domain.EntityFrameworkCore;
+using BBT.Aether.Events;
+using BBT.Aether.Persistence;
 using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 
@@ -33,5 +35,13 @@ public static class AetherNpgsqlServiceCollectionExtensions
         SchemaSwitchingMode mode = SchemaSwitchingMode.TransactionLocal,
         Action<IServiceProvider, DbContextOptionsBuilder>? configure = null)
         where TDbContext : AetherDbContext<TDbContext>
-        => services.AddAetherDbContext<TDbContext>(new NpgsqlAetherProvider(mode), connectionString, configure);
+    {
+        services.AddAetherDbContext<TDbContext>(new NpgsqlAetherProvider(mode), connectionString, configure);
+
+        if (typeof(IHasEfCoreOutbox).IsAssignableFrom(typeof(TDbContext)))
+            services.AddScoped(typeof(IOutboxLeaseStore),
+                typeof(NpgsqlOutboxLeaseStore<>).MakeGenericType(typeof(TDbContext)));
+
+        return services;
+    }
 }
