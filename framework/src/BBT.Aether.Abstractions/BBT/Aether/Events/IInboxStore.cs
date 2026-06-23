@@ -32,7 +32,8 @@ public interface IInboxStore
     Task MarkAsProcessedAsync(string eventId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Marks an event as failed/discarded.
+    /// Marks an event as failed. Increments retry count and sets status back to Pending for retry,
+    /// or sets status to DeadLetter if the maximum retry count has been reached.
     /// </summary>
     /// <param name="eventId">The unique event ID</param>
     /// <param name="cancellationToken">Cancellation token</param>
