@@ -42,6 +42,10 @@ public static class AetherNpgsqlServiceCollectionExtensions
             services.AddScoped(typeof(IOutboxLeaseStore),
                 typeof(NpgsqlOutboxLeaseStore<>).MakeGenericType(typeof(TDbContext)));
 
+        if (typeof(IHasEfCoreInbox).IsAssignableFrom(typeof(TDbContext)))
+            services.AddScoped(typeof(IInboxLeaseStore),
+                typeof(NpgsqlInboxLeaseStore<>).MakeGenericType(typeof(TDbContext)));
+
         return services;
     }
 }
