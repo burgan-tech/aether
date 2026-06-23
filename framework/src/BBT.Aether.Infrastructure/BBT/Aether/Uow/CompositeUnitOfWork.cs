@@ -143,17 +143,24 @@ public sealed class CompositeUnitOfWork(
         {
             _connection = configurator.CreateConnection();
             await _connection.OpenAsync(cancellationToken);
-            _transaction = await _connection.BeginTransactionAsync(
-                _options.IsolationLevel ?? IsolationLevel.ReadCommitted, cancellationToken);
 
-            // A fresh transaction has no per-schema state applied yet.
+            // Reset schema state whenever a fresh connection is established.
             _schemaState.Current = null;
+
+            if (_options.IsTransactional)
+            {
+                _transaction = await _connection.BeginTransactionAsync(
+                    _options.IsolationLevel ?? IsolationLevel.ReadCommitted, cancellationToken);
+            }
         }
 
         var options = configurator.BuildOptions(_connection, schema, _schemaState);
         var context = ActivatorUtilities.CreateInstance<TDbContext>(serviceProvider, options);
 
-        await context.Database.UseTransactionAsync(_transaction!, cancellationToken);
+        if (_transaction is not null)
+        {
+            await context.Database.UseTransactionAsync(_transaction, cancellationToken);
+        }
 
         if (context is AetherDbContext<TDbContext> aether)
         {
@@ -369,6 +376,21 @@ public sealed class CompositeUnitOfWork(
         // the connection is the pooled resource whose leak we must avoid. Collect and surface
         // the first failure after everything has been attempted.
         Exception? firstFailure = null;
+
+        // For SessionSearchPath mode the provider registers a cleanup that resets the session-level
+        // search_path before the connection is returned to the pool.
+        if (_schemaState.Cleanup is not null && _schemaState.Current is not null && _connection is not null)
+        {
+            try
+            {
+                await _schemaState.Cleanup(_connection, CancellationToken.None);
+                _schemaState.Current = null;
+            }
+            catch
+            {
+                // Swallow — a cleanup failure must not prevent connection disposal.
+            }
+        }
 
         foreach (var context in _contexts.Values)
         {
