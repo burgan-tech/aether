@@ -23,6 +23,11 @@ public enum IncomingEventStatus
     /// <summary>
     /// Event has been discarded (e.g., exceeded max retry count).
     /// </summary>
-    Discarded = 3
+    Discarded = 3,
+
+    /// <summary>
+    /// Event has exceeded the maximum retry count and will not be retried.
+    /// </summary>
+    DeadLetter = 4
 }
 
