@@ -3,17 +3,11 @@ using System.Threading.Tasks;
 
 namespace BBT.Aether.Events;
 
-/// <summary>
-/// Defines the interface for the inbox processor.
-/// Cleans up old processed inbox messages.
-/// </summary>
+/// <summary>Defines the interface for the inbox processor.</summary>
 public interface IInboxProcessor
 {
     /// <summary>
-    /// Runs the inbox processor with the specified cancellation token.
-    /// This method contains the processing loop.
+    /// Runs one processing cycle. Returns the number of messages processed.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token</param>
-    Task RunAsync(CancellationToken cancellationToken = default);
+    Task<int> RunAsync(CancellationToken cancellationToken = default);
 }
-
