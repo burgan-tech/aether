@@ -1,3 +1,4 @@
+using System;
 using BBT.Aether.Events;
 using Microsoft.Extensions.Hosting;
 using NSubstitute;
