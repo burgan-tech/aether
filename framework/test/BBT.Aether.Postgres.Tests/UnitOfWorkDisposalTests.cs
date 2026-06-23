@@ -8,6 +8,7 @@ using BBT.Aether.Domain.Entities;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using BBT.Aether.Uow;
+using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
@@ -65,6 +66,14 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
         // DbContext + UnitOfWork wiring (configurator, UoW manager, ambient accessor, provider).
         services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString);
 
+        return services.BuildServiceProvider();
+    }
+
+    private IServiceProvider BuildSessionSearchPathProvider()
+    {
+        var services = new ServiceCollection();
+        services.AddAetherCore(_ => { });
+        services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString, SchemaSwitchingMode.SessionSearchPath);
         return services.BuildServiceProvider();
     }
 
@@ -166,5 +175,158 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
         }
 
         conn.State.ShouldBe(ConnectionState.Closed);
+    }
+
+    [Fact]
+    public async Task SessionSearchPath_opens_connection_without_transaction()
+    {
+        await ArrangeSchemaAsync();
+        var sp = BuildSessionSearchPathProvider();
+
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var mgr = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
+
+        using (currentSchema.Change(_schema))
+        {
+            await using var uow = mgr.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
+
+            var db = await provider.GetDbContextAsync();
+
+            db.Database.GetDbConnection().State.ShouldBe(ConnectionState.Open);
+            db.Database.CurrentTransaction.ShouldBeNull();
+
+            await uow.CommitAsync();
+        }
+    }
+
+    [Fact]
+    public async Task SessionSearchPath_two_queries_share_same_connection()
+    {
+        await ArrangeSchemaAsync();
+        var sp = BuildSessionSearchPathProvider();
+
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var mgr = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
+
+        using (currentSchema.Change(_schema))
+        {
+            await using var uow = mgr.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
+
+            var db1 = await provider.GetDbContextAsync();
+            var db2 = await provider.GetDbContextAsync();
+
+            db2.ShouldBeSameAs(db1);
+            db2.Database.GetDbConnection().ShouldBeSameAs(db1.Database.GetDbConnection());
+
+            await uow.CommitAsync();
+        }
+    }
+
+    [Fact]
+    public async Task TransactionLocal_still_opens_transaction()
+    {
+        await ArrangeSchemaAsync();
+        var sp = BuildProvider();
+
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var mgr = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
+
+        using (currentSchema.Change(_schema))
+        {
+            await using var uow = mgr.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+
+            var db = await provider.GetDbContextAsync();
+
+            db.Database.GetDbConnection().State.ShouldBe(ConnectionState.Open);
+            db.Database.CurrentTransaction.ShouldNotBeNull();
+
+            await uow.CommitAsync();
+        }
+    }
+
+    [Fact]
+    public async Task TransactionLocal_throws_when_used_without_transaction()
+    {
+        await ArrangeSchemaAsync();
+        var sp = BuildProvider();
+
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var mgr = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
+
+        using (currentSchema.Change(_schema))
+        {
+            await using var uow = mgr.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
+
+            await Should.ThrowAsync<InvalidOperationException>(async () =>
+            {
+                var db = await provider.GetDbContextAsync();
+                await db.Set<Thing>().CountAsync();
+            });
+        }
+    }
+
+    [Fact]
+    public async Task SessionSearchPath_search_path_reset_prevents_pool_leakage()
+    {
+        var schemaA = "leak_a_" + Guid.NewGuid().ToString("N");
+        var schemaB = "leak_b_" + Guid.NewGuid().ToString("N");
+
+        await using (var setupConn = new NpgsqlConnection(fx.ConnectionString))
+        {
+            await setupConn.OpenAsync();
+            await using var cmd = setupConn.CreateCommand();
+            cmd.CommandText =
+                $"""
+                 CREATE SCHEMA "{schemaA}";
+                 CREATE TABLE "{schemaA}".things ("Id" uuid PRIMARY KEY, "Name" text NOT NULL);
+                 INSERT INTO "{schemaA}".things VALUES (gen_random_uuid(), 'from-a');
+                 CREATE SCHEMA "{schemaB}";
+                 CREATE TABLE "{schemaB}".things ("Id" uuid PRIMARY KEY, "Name" text NOT NULL);
+                 """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var sp = BuildSessionSearchPathProvider();
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var mgr = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
+
+        using (currentSchema.Change(schemaA))
+        {
+            var uowA = mgr.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
+            var dbA = await provider.GetDbContextAsync();
+            (await dbA.Set<Thing>().CountAsync()).ShouldBe(1);
+            await uowA.CommitAsync();
+            await uowA.DisposeAsync();
+        }
+
+        using (currentSchema.Change(schemaB))
+        {
+            await using var uowB = mgr.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
+            var dbB = await provider.GetDbContextAsync();
+            (await dbB.Set<Thing>().CountAsync())
+                .ShouldBe(0, "search_path from the previous UoW must not leak into this one");
+            await uowB.CommitAsync();
+        }
     }
 }
