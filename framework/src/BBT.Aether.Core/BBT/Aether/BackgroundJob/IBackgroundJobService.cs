@@ -60,7 +60,7 @@ public interface IBackgroundJobService
         string schedule,
         Dictionary<string, object>? metadata = null,
         JobScheduleFailurePolicy? failurePolicyOptions = null,
-        bool directly = false,
+        bool directly = true,
         Guid? jobId = null,
         BBT.Aether.Domain.Entities.JobKind? kind = null,
         CancellationToken cancellationToken = default);

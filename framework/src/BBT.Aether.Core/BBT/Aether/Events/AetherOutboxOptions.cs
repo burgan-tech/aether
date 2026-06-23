@@ -50,6 +50,6 @@ public class AetherOutboxOptions
     /// and does nothing (no ambient schema exists in a background worker). For multi-schema
     /// deployments, run one processor instance per schema with this set accordingly.
     /// </summary>
-    public string? Schema { get; set; }
+    public string? Schema { get; set; } = "sys_queues";
 }
 

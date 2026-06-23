@@ -180,7 +180,8 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
             using (currentSchema.Change(_schema))
             {
                 var svc = ssp.GetRequiredService<IBackgroundJobService>();
-                id = await svc.EnqueueAsync(HandlerName, "job-cron", new TestArgs { Value = "x" }, "*/5 * * * *");
+                id = await svc.EnqueueAsync(HandlerName, "job-cron", new TestArgs { Value = "x" }, "*/5 * * * *",
+                    directly: false);
             }
         }
 
@@ -211,7 +212,7 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
             {
                 var svc = ssp.GetRequiredService<IBackgroundJobService>();
                 id = await svc.EnqueueAsync(HandlerName, "job-oneshot", new TestArgs { Value = "x" },
-                    "2026-07-01T10:00:00Z");
+                    "2026-07-01T10:00:00Z", directly: false);
             }
         }
 
@@ -243,7 +244,7 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
                 var svc = ssp.GetRequiredService<IBackgroundJobService>();
                 await svc.EnqueueAsync(HandlerName, "job-rollback", new TestArgs { Value = "x" }, "*/5 * * * *",
-                    jobId: rolledBackId);
+                    directly: false, jobId: rolledBackId);
                 await uow.RollbackAsync();
             }
         }
@@ -263,7 +264,7 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
                 var svc = ssp.GetRequiredService<IBackgroundJobService>();
                 await svc.EnqueueAsync(HandlerName, "job-commit", new TestArgs { Value = "x" }, "*/5 * * * *",
-                    jobId: committedId);
+                    directly: false, jobId: committedId);
                 await uow.CommitAsync();
             }
         }
@@ -412,7 +413,7 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
                 var svc = ssp.GetRequiredService<IBackgroundJobService>();
                 // Enqueue leaves the row Pending (no poller runs in this test).
                 id = await svc.EnqueueAsync(HandlerName, "job-pending-update", new TestArgs { Value = "x" },
-                    "2026-07-01T10:00:00Z");
+                    "2026-07-01T10:00:00Z", directly: false);
             }
         }
 

@@ -14,14 +14,16 @@ public static class BackgroundJobModelBuilderExtensions
     /// <param name="builder">The ModelBuilder instance</param>
     /// <returns>The ModelBuilder for method chaining</returns>
     /// <remarks>
-    /// The table is mapped without an explicit schema. Schema is resolved at runtime via
-    /// <c>SET LOCAL search_path</c> by the UnitOfWork, so baking it into the EF model is avoided.
+    /// By default the table is mapped without an explicit schema and is resolved at runtime via
+    /// <c>SET LOCAL search_path</c> by the UnitOfWork. Pass a non-null <paramref name="schema"/> to bake a
+    /// fixed (system) schema into the model instead — e.g. to keep job/queue infrastructure tables in a
+    /// dedicated schema separate from per-tenant business data.
     /// </remarks>
-    public static ModelBuilder ConfigureBackgroundJob(this ModelBuilder builder)
+    public static ModelBuilder ConfigureBackgroundJob(this ModelBuilder builder, string? schema = null)
     {
         builder.Entity<BackgroundJobInfo>(entity =>
         {
-            entity.ToTable("BackgroundJobs");
+            entity.ToTable("BackgroundJobs", schema);
 
             entity.HasKey(e => e.Id);
 
