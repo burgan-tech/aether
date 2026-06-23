@@ -1,3 +1,4 @@
+using System;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
@@ -7,28 +8,47 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 namespace BBT.Aether.Uow.EntityFrameworkCore;
 
 /// <summary>
-/// Prepends <c>SET LOCAL search_path</c> to every command issued by a schema-bound
-/// <see cref="Microsoft.EntityFrameworkCore.DbContext"/>.
-/// <para>
-/// When multiple schema-bound contexts share a single connection and transaction (the
-/// multi-schema UnitOfWork model), a one-time <c>SET LOCAL search_path</c> is insufficient:
-/// <c>SET LOCAL</c> is transaction-scoped, so the most recently set search_path would apply to
-/// every subsequent statement regardless of which context issued it. Issuing the search_path
-/// as a prefix on each command guarantees correct schema resolution per command, which is also
-/// required under PgBouncer transaction pooling.
-/// </para>
+/// Sets the active PostgreSQL <c>search_path</c> before each command issued by a schema-bound
+/// <see cref="Microsoft.EntityFrameworkCore.DbContext"/>. Behaviour depends on
+/// <see cref="SchemaSwitchingMode"/>:
+/// <list type="bullet">
+///   <item>
+///     <term><see cref="SchemaSwitchingMode.TransactionLocal"/></term>
+///     <description>
+///       Issues <c>SET LOCAL search_path</c> inside the active transaction.
+///       PostgreSQL reverts the effect at transaction end automatically.
+///       Throws if the command has no transaction.
+///     </description>
+///   </item>
+///   <item>
+///     <term><see cref="SchemaSwitchingMode.SessionSearchPath"/></term>
+///     <description>
+///       Issues a session-level <c>SET search_path</c> when the schema changes.
+///       The caller (UnitOfWork dispose) is responsible for running <c>RESET search_path</c>
+///       before returning the connection to the pool via <see cref="SchemaScopeState.Cleanup"/>.
+///     </description>
+///   </item>
+///   <item>
+///     <term><see cref="SchemaSwitchingMode.QualifiedNames"/></term>
+///     <description>Not yet implemented — throws <see cref="NotSupportedException"/>.</description>
+///   </item>
+/// </list>
 /// <remarks>
-/// Assumes query results are buffered (EF Core's default). Because a single Npgsql connection
-/// does not support multiple active result sets, issuing a command while an un-buffered/streaming
-/// <see cref="DbDataReader"/> from a sibling schema-bound context is still open on the same
-/// connection will fail. Within one UnitOfWork, do not stream (e.g. <c>AsAsyncEnumerable</c>
-/// without materializing) across interleaved schema-bound contexts.
+/// Assumes query results are buffered (EF Core's default). A single Npgsql connection does not
+/// support multiple active result sets; do not stream (<c>AsAsyncEnumerable</c> without
+/// materializing) across interleaved schema-bound contexts on the same connection.
 /// </remarks>
 /// </summary>
-public sealed class SearchPathCommandInterceptor(string schema, SchemaScopeState state) : DbCommandInterceptor
+public sealed class SearchPathCommandInterceptor(
+    string schema,
+    SchemaScopeState state,
+    SchemaSwitchingMode mode) : DbCommandInterceptor
 {
     private readonly string _schema = schema;
-    private readonly string _setSearchPath = $"SET LOCAL search_path TO {PostgreSqlIdentifier.QuoteSchema(schema)}, public";
+    private readonly string _setLocal =
+        $"SET LOCAL search_path TO {PostgreSqlIdentifier.QuoteSchema(schema)}, public";
+    private readonly string _setSession =
+        $"SET search_path TO {PostgreSqlIdentifier.QuoteSchema(schema)}, public";
 
     public override InterceptionResult<DbDataReader> ReaderExecuting(
         DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
@@ -75,50 +95,85 @@ public sealed class SearchPathCommandInterceptor(string schema, SchemaScopeState
         return result;
     }
 
-    // Run SET LOCAL search_path as its own command (same connection + transaction) right before
-    // the intercepted command, rather than concatenating it onto the command text. Concatenating
-    // adds an extra result set that breaks EF's rows-affected accounting for INSERT/UPDATE batches.
     private void ApplySearchPath(DbCommand command)
     {
-        if (command.Transaction is null)
+        switch (mode)
         {
-            throw new System.InvalidOperationException(
-                "SearchPathCommandInterceptor requires the command to run inside the UnitOfWork transaction; Transaction was null. SET LOCAL search_path would be silently ignored, breaking schema isolation.");
+            case SchemaSwitchingMode.TransactionLocal:
+                if (command.Transaction is null)
+                {
+                    throw new InvalidOperationException(
+                        $"SchemaSwitchingMode.TransactionLocal requires a transaction, but none is active. " +
+                        $"Use IsTransactional = true, or switch to SchemaSwitchingMode.SessionSearchPath " +
+                        $"(direct/session pool) or SchemaSwitchingMode.QualifiedNames (PgBouncer transaction pool).");
+                }
+                if (state.Current == _schema) return;
+                using (var cmd = command.Connection!.CreateCommand())
+                {
+                    cmd.Transaction = command.Transaction;
+                    cmd.CommandText = _setLocal;
+                    cmd.ExecuteNonQuery();
+                }
+                state.Current = _schema;
+                break;
+
+            case SchemaSwitchingMode.SessionSearchPath:
+                if (state.Current == _schema) return;
+                using (var cmd = command.Connection!.CreateCommand())
+                {
+                    cmd.CommandText = _setSession;
+                    cmd.ExecuteNonQuery();
+                }
+                state.Current = _schema;
+                break;
+
+            case SchemaSwitchingMode.QualifiedNames:
+                throw new NotSupportedException(
+                    "SchemaSwitchingMode.QualifiedNames is not yet implemented.");
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown SchemaSwitchingMode.");
         }
-
-        // Skip the redundant SET when the shared connection already has this schema applied.
-        if (state.Current == _schema)
-        {
-            return;
-        }
-
-        using var setCmd = command.Connection!.CreateCommand();
-        setCmd.Transaction = command.Transaction;
-        setCmd.CommandText = _setSearchPath;
-        setCmd.ExecuteNonQuery();
-
-        state.Current = _schema;
     }
 
     private async Task ApplySearchPathAsync(DbCommand command, CancellationToken cancellationToken)
     {
-        if (command.Transaction is null)
+        switch (mode)
         {
-            throw new System.InvalidOperationException(
-                "SearchPathCommandInterceptor requires the command to run inside the UnitOfWork transaction; Transaction was null. SET LOCAL search_path would be silently ignored, breaking schema isolation.");
+            case SchemaSwitchingMode.TransactionLocal:
+                if (command.Transaction is null)
+                {
+                    throw new InvalidOperationException(
+                        $"SchemaSwitchingMode.TransactionLocal requires a transaction, but none is active. " +
+                        $"Use IsTransactional = true, or switch to SchemaSwitchingMode.SessionSearchPath " +
+                        $"(direct/session pool) or SchemaSwitchingMode.QualifiedNames (PgBouncer transaction pool).");
+                }
+                if (state.Current == _schema) return;
+                await using (var cmd = command.Connection!.CreateCommand())
+                {
+                    cmd.Transaction = command.Transaction;
+                    cmd.CommandText = _setLocal;
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+                state.Current = _schema;
+                break;
+
+            case SchemaSwitchingMode.SessionSearchPath:
+                if (state.Current == _schema) return;
+                await using (var cmd = command.Connection!.CreateCommand())
+                {
+                    cmd.CommandText = _setSession;
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+                state.Current = _schema;
+                break;
+
+            case SchemaSwitchingMode.QualifiedNames:
+                throw new NotSupportedException(
+                    "SchemaSwitchingMode.QualifiedNames is not yet implemented.");
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown SchemaSwitchingMode.");
         }
-
-        // Skip the redundant SET when the shared connection already has this schema applied.
-        if (state.Current == _schema)
-        {
-            return;
-        }
-
-        await using var setCmd = command.Connection!.CreateCommand();
-        setCmd.Transaction = command.Transaction;
-        setCmd.CommandText = _setSearchPath;
-        await setCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        state.Current = _schema;
     }
 }
