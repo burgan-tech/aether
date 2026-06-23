@@ -10,14 +10,28 @@ public static class AetherNpgsqlServiceCollectionExtensions
     /// <summary>
     /// Registers an Aether DbContext backed by PostgreSQL (Npgsql).
     /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="connectionString">PostgreSQL connection string.</param>
+    /// <param name="mode">
+    /// Schema switching strategy. Default is <see cref="SchemaSwitchingMode.TransactionLocal"/>
+    /// (requires <c>IsTransactional = true</c>). Use <see cref="SchemaSwitchingMode.SessionSearchPath"/>
+    /// for non-transactional UoWs with Npgsql's native connection pool.
+    /// </param>
+    /// <param name="configure">Optional additional DbContext options.</param>
     /// <example>
     /// <code>
+    /// // Transactional (default):
     /// services.AddAetherNpgsql&lt;MyDbContext&gt;(connectionString);
+    ///
+    /// // Non-transactional with direct/session pool:
+    /// services.AddAetherNpgsql&lt;MyDbContext&gt;(connectionString, SchemaSwitchingMode.SessionSearchPath);
     /// </code>
     /// </example>
     public static IServiceCollection AddAetherNpgsql<TDbContext>(
-        this IServiceCollection services, string connectionString,
+        this IServiceCollection services,
+        string connectionString,
+        SchemaSwitchingMode mode = SchemaSwitchingMode.TransactionLocal,
         Action<IServiceProvider, DbContextOptionsBuilder>? configure = null)
         where TDbContext : AetherDbContext<TDbContext>
-        => services.AddAetherDbContext<TDbContext>(new NpgsqlAetherProvider(), connectionString, configure);
+        => services.AddAetherDbContext<TDbContext>(new NpgsqlAetherProvider(mode), connectionString, configure);
 }
