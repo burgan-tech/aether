@@ -32,12 +32,6 @@ public sealed class SuppressedUowScope : IUnitOfWork
     public IUnitOfWork? Outer => _previousAmbient;
 
     /// <inheritdoc />
-    public bool IsPrepared => false;
-
-    /// <inheritdoc />
-    public string? PreparationName => null;
-
-    /// <inheritdoc />
     public bool IsAborted => false;
 
     /// <inheritdoc />
@@ -45,24 +39,6 @@ public sealed class SuppressedUowScope : IUnitOfWork
 
     /// <inheritdoc />
     public bool IsDisposed => false;
-
-    /// <inheritdoc />
-    public void Prepare(string preparationName)
-    {
-        // No-op for suppressed scope
-    }
-
-    /// <inheritdoc />
-    public void Initialize(UnitOfWorkOptions options)
-    {
-        // No-op for suppressed scope
-    }
-
-    /// <inheritdoc />
-    public bool IsPreparedFor(string preparationName)
-    {
-        return false;
-    }
 
     /// <inheritdoc />
     public void SetOuter(IUnitOfWork? outer)

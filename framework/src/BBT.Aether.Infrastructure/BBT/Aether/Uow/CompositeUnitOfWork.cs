@@ -73,12 +73,6 @@ public sealed class CompositeUnitOfWork(
     /// <inheritdoc />
     public IUnitOfWork? Outer { get; private set; }
 
-    /// <inheritdoc />
-    public bool IsPrepared => false;
-
-    /// <inheritdoc />
-    public string? PreparationName => null;
-
     /// <summary>
     /// Initializes the unit of work. Does NOT open the connection here — the connection and
     /// transaction are opened lazily on the first <see cref="GetDbContextAsync{TDbContext}"/>
@@ -107,21 +101,6 @@ public sealed class CompositeUnitOfWork(
         Options = options;
         _isInitialized = true;
     }
-
-    /// <inheritdoc />
-    public void Prepare(string preparationName)
-    {
-        throw new NotSupportedException("CompositeUnitOfWork does not support prepare pattern. Use UnitOfWorkScope instead.");
-    }
-
-    /// <inheritdoc />
-    public void Initialize(UnitOfWorkOptions options)
-    {
-        throw new NotSupportedException("Use InitializeAsync instead.");
-    }
-
-    /// <inheritdoc />
-    public bool IsPreparedFor(string preparationName) => false;
 
     /// <inheritdoc />
     public void SetOuter(IUnitOfWork? outer)

@@ -44,7 +44,7 @@ public sealed class UnitOfWorkMiddleware : IMiddleware
         }
 
         // Own the request UnitOfWork: eager Begin (no I/O — connection/transaction open lazily on first
-        // repository call), commit on success, roll back on exception. Begin (not Prepare) means a direct
+        // repository call), commit on success, roll back on exception. Eager Begin means a direct
         // repository call works downstream without the [UnitOfWork] aspect.
         await using var uow = _uowManager.Begin(_options.DefaultOptions);
         try
