@@ -46,6 +46,5 @@ public interface IInboxStore
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>Number of messages deleted</returns>
     Task<int> CleanupOldMessagesAsync(int batchSize, TimeSpan retentionPeriod, CancellationToken cancellationToken = default);
-    // REMOVED: GetPendingEventsAsync, MarkAsProcessingAsync, LeaseBatchAsync
 }
 
