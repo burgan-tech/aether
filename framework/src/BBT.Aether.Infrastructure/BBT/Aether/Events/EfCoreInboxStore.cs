@@ -116,7 +116,8 @@ public class EfCoreInboxStore<TDbContext>(
         if (oldMessages.Count == 0)
             return 0;
 
+        var count = oldMessages.Count;
         dbContext.InboxMessages.RemoveRange(oldMessages);
-        return await dbContext.SaveChangesAsync(cancellationToken);
+        return count;
     }
 }
