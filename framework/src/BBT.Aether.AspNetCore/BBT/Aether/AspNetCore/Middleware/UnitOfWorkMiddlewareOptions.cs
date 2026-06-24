@@ -18,7 +18,7 @@ public sealed class UnitOfWorkMiddlewareOptions
     /// </summary>
     public UnitOfWorkOptions DefaultOptions { get; set; } = new()
     {
-        IsTransactional = true,
+        IsTransactional = false,
         Scope = UnitOfWorkScopeOption.Required,
         IsolationLevel = null
     };

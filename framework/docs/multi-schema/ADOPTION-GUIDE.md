@@ -50,10 +50,9 @@ public sealed class AppDbContext : AetherDbContext<AppDbContext>
 
 `BBT.Aether.Infrastructure` artık **provider-agnostik** — Npgsql bağımlılığı yok. UoW,
 [`IAetherDatabaseProvider`](../../src/BBT.Aether.Infrastructure/BBT/Aether/Uow/EntityFrameworkCore/IAetherDatabaseProvider.cs)
-seam'i üzerinden tek bir paylaşılan `DbConnection`/`DbTransaction` ile konuşur. Bir provider
-paketi seç:
+seam'i üzerinden tek bir paylaşılan `DbConnection` ile konuşur. Bir provider paketi seç:
 
-- **`BBT.Aether.Npgsql`** — PostgreSQL, tam çok-schema → `AddAetherNpgsql<T>(connectionString)`
+- **`BBT.Aether.Npgsql`** — PostgreSQL, tam çok-schema → `AddAetherNpgsql<T>(connectionString [, mode])`
 - **`BBT.Aether.SqlServer`** — SQL Server, tek-schema → `AddAetherSqlServer<T>(connectionString)`
 
 Her ikisi de connection string'i **ayrı parametre** olarak alır — UoW kendi paylaşılan
@@ -63,8 +62,11 @@ içeride çağrılır.
 ```csharp
 services.AddAetherCore(_ => { });
 
-// PostgreSQL (tam çok-schema):
+// PostgreSQL — TransactionLocal (varsayılan, PgBouncer + native pool uyumlu):
 services.AddAetherNpgsql<AppDbContext>(connectionString);
+
+// PostgreSQL — SessionSearchPath (transaction'sız, yalnız native Npgsql pool):
+services.AddAetherNpgsql<AppDbContext>(connectionString, SchemaSwitchingMode.SessionSearchPath);
 
 // veya SQL Server (tek-schema):
 // services.AddAetherSqlServer<AppDbContext>(connectionString);
@@ -75,6 +77,14 @@ services.AddAetherOutbox<AppDbContext>();        // transactional outbox + proce
 services.AddAetherInbox<AppDbContext>();          // (yalnız PostgreSQL)
 services.AddAetherBackgroundJob<AppDbContext>();
 ```
+
+`SchemaSwitchingMode` enum değerleri:
+
+| Değer | Komut | Transaction gerekli? | Pool uyumu |
+|-------|-------|----------------------|-----------|
+| `TransactionLocal` (varsayılan) | `SET LOCAL search_path` her komut öncesi | **Evet** (`IsTransactional = true`) | PgBouncer transaction pooling ✅ |
+| `SessionSearchPath` | `SET search_path` bir kez + `RESET` dispose'da | Hayır (`IsTransactional = false`) | Yalnız native Npgsql pool ✅ |
+| `QualifiedNames` | _(henüz implemente edilmedi)_ | Hayır | — |
 
 Özel bir provider için çekirdek overload'ı doğrudan çağır:
 `services.AddAetherDbContext<AppDbContext>(provider, connectionString, configure?)`.
@@ -133,6 +143,8 @@ public async Task CreateAsync(Order order)
 > `await uowManager.BeginAsync(...)` UoW'u çağıranın akışında ambient yapmaz
 > (bkz. Bölüm B → "Ambient") → repository/store `"No active UnitOfWork"` fırlatır.
 
+**Transactional (`TransactionLocal` mode — PgBouncer uyumlu):**
+
 ```csharp
 using (currentSchema.Change("flow_a"))
 await using (var uow = uowManager.Begin(
@@ -141,6 +153,21 @@ await using (var uow = uowManager.Begin(
     var db = await dbContextProvider.GetDbContextAsync();   // flow_a'ya bağlı
     db.Set<Order>().Add(order);
     await uow.CommitAsync();
+}
+```
+
+**Non-transactional (`SessionSearchPath` mode — sadece native Npgsql pool):**
+
+```csharp
+// Kayıt: services.AddAetherNpgsql<AppDbContext>(connectionString, SchemaSwitchingMode.SessionSearchPath);
+
+using (currentSchema.Change("flow_a"))
+await using (var uow = uowManager.Begin(
+        new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false }))
+{
+    var db = await dbContextProvider.GetDbContextAsync();   // flow_a'ya bağlı, transaction yok
+    var list = await db.Set<Order>().ToListAsync();
+    // UoW dispose'da otomatik: RESET search_path (pool sızıntısını önler)
 }
 ```
 
@@ -172,11 +199,12 @@ await uow.CommitAsync();   // iki schema TEK transaction'da commit olur (ya hep 
 |---|---|
 | **🔁 Begin vs BeginAsync** | Repository/store/context çözecek her programatik akışta senkron `Begin()`/`BeginRequiresNew()` kullan. `BeginAsync` yalnız ambient'a ihtiyaç duymayan durumlar için bırakıldı. |
 | **🧱 ToTable'da schema yok** | `ToTable("x", "schema")` veya `HasDefaultSchema` kullanma. Schema runtime'da `search_path` ile çözülür; modele gömülürse EF model cache schema başına kirlenir. |
-| **⏱️ Transaction'ı kısa tut** | PgBouncer transaction pooling: açık transaction içinde **dış servis çağrısı yapma** (HTTP, mesaj broker). Outbox processor bu yüzden lease→publish→update olarak 3 faza ayrılmıştır. |
+| **🔀 SchemaSwitchingMode seçimi** | `TransactionLocal` (varsayılan) PgBouncer transaction pooling ve native pool altında güvenlidir; `IsTransactional = true` gerektirir. `SessionSearchPath` transaction'sız, daha az RT yükü; yalnız native Npgsql pool ile kullan — PgBouncer transaction pooling ile **kullanma**. |
+| **⏱️ Transaction'ı kısa tut** | `TransactionLocal` + PgBouncer: açık transaction içinde **dış servis çağrısı yapma** (HTTP, mesaj broker). Outbox processor bu yüzden lease→publish→update olarak 3 faza ayrılmıştır. |
 | **📥 Poller başına tek schema** | Outbox/Inbox processor tek `Schema` işler. Birden çok schema varsa her biri için ayrı instance çalıştır; `Schema` boşsa processor uyarı loglar ve çalışmaz. |
 | **🏷️ Job'lar schema taşımalı** | Background job kuyruğa alınırken `currentSchema.Name` envelope'a yazılır. Hiçbir schema kapsamı yokken enqueue edilen job'da schema null olur ve dispatch sırasında hata verir. |
 | **🔢 MaxDbContextCount** | Tek UoW içinde farklı `(tip, schema)` sayısı varsayılan **16** ile sınırlıdır (guardrail). 50+ schema'yı aynı UoW'da gezme — uzun transaction riski. |
-| **🐘 Çok-schema = PostgreSQL** | `BBT.Aether.Infrastructure` provider-agnostiktir; PostgreSQL desteği `BBT.Aether.Npgsql`'de yaşar. Çalışma zamanı çok-schema (`SET LOCAL search_path`) ve Outbox/Inbox işleme **yalnız PostgreSQL'dedir** (aşağıdaki SQL Server kısıtlarına bak). |
+| **🐘 Çok-schema = PostgreSQL** | `BBT.Aether.Infrastructure` provider-agnostiktir; PostgreSQL desteği `BBT.Aether.Npgsql`'de yaşar. Çalışma zamanı çok-schema ve Outbox/Inbox işleme **yalnız PostgreSQL'dedir** (aşağıdaki SQL Server kısıtlarına bak). |
 | **✍️ Schema adı kuralı** | Schema adı `^[a-zA-Z_][a-zA-Z0-9_]*$` deseniyle doğrulanır (SQL injection'a karşı). Geçersiz ad `InvalidOperationException` verir. |
 
 ---
@@ -207,6 +235,7 @@ bağlar, fakat komut başına schema değiştirmez — SQL Server'da transaction
 | `No active UnitOfWork.` | Ambient UoW yok. Programatik kodda `BeginAsync` yerine senkron `Begin()` kullan; istekte `UseAetherUnitOfWork` + `[UnitOfWork]` var mı bak. |
 | `UnitOfWork DbContext limit exceeded. Limit: N` | Tek UoW'da çok fazla farklı `(tip, schema)`. Tasarımı gözden geçir veya `UnitOfWorkOptions.MaxDbContextCount`'u bilinçli artır. |
 | `Invalid PostgreSQL schema name: X` | Schema adı geçersiz karakter içeriyor. |
+| `TransactionLocal mode requires IsTransactional = true.` | `SchemaSwitchingMode.TransactionLocal` kullanılmış ama `IsTransactional = false`. Ya `IsTransactional = true` yap, ya da `SessionSearchPath` moduna geç. |
 | `Unit of work is prepared but not initialized.` | Hazırlanmış (prepared) UoW henüz initialize edilmeden context istendi. İstek akışında aspect/`[UnitOfWork]` başlatmadan önce DB erişimi olmuş. |
 | `Schema scope corrupted: out-of-order disposal detected.` | `Change(...)` kapsamları iç içe ve sırasıyla dispose edilmeli; `using` kullan, elle Dispose'u karıştırma. |
 
@@ -241,25 +270,43 @@ flowchart TB
 |---|---|
 | `ICurrentSchema` | Aktif schema'yı `AsyncLocal` bir *stack*'te tutar. `Change(s)` push eder ve dispose'ta pop eder (iç içe, otomatik geri alma). |
 | `IUnitOfWorkManager` | UoW yaratır ve ambient'ı yönetir: `Begin` (senkron), `Prepare` (istek), `BeginAsync` (legacy). `Current` aktif UoW'u verir. |
-| `CompositeUnitOfWork` | Kök. Tek `NpgsqlConnection`+`NpgsqlTransaction` sahibi; `(tip,schema)` başına DbContext üretir; commit/rollback ve event/outbox boru hattını yürütür. |
+| `CompositeUnitOfWork` | Kök. Tek `NpgsqlConnection` sahibi; `IsTransactional = true` ise `NpgsqlTransaction` da açar. `(tip,schema)` başına DbContext üretir; dispose'da `SchemaScopeState.Cleanup` çağırır, commit/rollback ve event/outbox boru hattını yürütür. |
 | `UnitOfWorkScope` | Kökü saran ambient katman. `accessor.Current`'ı set/restore eder; **sahibi** ise dispose'ta kökü (ve bağlantıyı) kapatır. |
 | `IAetherDbContextProvider` | `ICurrentSchema.Name` + `manager.Current`'tan schema-bağlı context'i çözer. Repository ve store'lar bunu kullanır. |
-| `SearchPathCommandInterceptor` | Her EF komutundan önce `SET LOCAL search_path` çalıştırır (`SearchPathState` ile gereksiz tekrarları atlar). |
+| `SearchPathCommandInterceptor` | `SchemaSwitchingMode`'a göre davranır: `TransactionLocal` → her komut öncesi `SET LOCAL search_path` (transaction gerekli); `SessionSearchPath` → UoW başına bir kez `SET search_path`, dispose'da `RESET`. `SchemaScopeState.Current` ile gereksiz tekrarları atlar. |
+| `SchemaScopeState` | `SearchPathCommandInterceptor` ile `CompositeUnitOfWork` arasında paylaşılan durum. `Current` (son uygulanan schema) ve `Cleanup` (dispose delegate'i) alanlarını taşır. |
 
 ## Bir UoW'nin yaşam döngüsü
+
+**TransactionLocal (IsTransactional = true):**
 
 ```text
 Begin(RequiresNew)            → scope ambient olur, BAĞLANTI HENÜZ AÇILMAZ
                                  (tek maliyet: nesne; boş UoW bedava)
 İlk GetDbContextAsync(flow_a) → NpgsqlConnection.Open + BeginTransaction (lazy, bir kez)
-                               → configurator options + SET LOCAL interceptor + UseTransaction
+                               → configurator options + TransactionLocal interceptor + UseTransaction
                                → context cache'e konur; LocalEventEnqueuer bağlanır
 Change(flow_b)+GetDbContext   → AYNI bağlantı/transaction; yeni schema-bağlı context
-İş (Add/Update/Query)         → her komut öncesi SET LOCAL search_path
+İş (Add/Update/Query)         → her komut öncesi SET LOCAL search_path (aynı schema ise atlanır)
 CommitAsync()                 → SaveChanges(tüm context) → event'ler outbox'a (tx içinde)
                                → SaveChanges → TEK transaction.Commit → OnCompleted hook'ları
 DisposeAsync (sahip scope)    → commit olmadıysa rollback
                                → context/transaction/CONNECTION kapatılır
+```
+
+**SessionSearchPath (IsTransactional = false):**
+
+```text
+Begin(RequiresNew)            → scope ambient olur, BAĞLANTI HENÜZ AÇILMAZ
+İlk GetDbContextAsync(flow_a) → NpgsqlConnection.Open (transaction YOK)
+                               → configurator options + SessionSearchPath interceptor
+                               → SET search_path TO "flow_a", public (bir kez)
+                               → context cache'e konur
+Change(flow_b)+GetDbContext   → AYNI bağlantı; yeni schema-bağlı context
+                               → SET search_path TO "flow_b", public
+İş (Query)                    → aynı schema ise SET atlanır (SchemaScopeState.Current takibi)
+DisposeAsync (sahip scope)    → RESET search_path (pool'a temiz session döner)
+                               → context/CONNECTION kapatılır
 ```
 
 Bağlantı ilk context istendiğinde **lazy** açılır; **sahibi** olan scope dispose'unda kapanır

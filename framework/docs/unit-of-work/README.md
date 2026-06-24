@@ -122,10 +122,15 @@ public class UnitOfWorkOptions
 }
 ```
 
+- **`IsTransactional`** — `true` opens a `DbTransaction` on the shared connection before the
+  first context is handed out; `false` runs without a transaction. The default is `false` on
+  the struct, but the **HTTP middleware default is `true`** (see [HTTP middleware](#http-middleware)).
+  This flag is meaningful: a non-transactional UoW never calls `BeginTransaction`, which is
+  required for `SessionSearchPath` mode and lighter-weight read-only flows.
 - **`Scope`** — `Required` (join an existing UoW or create one), `RequiresNew` (always an
   independent UoW), or `Suppress` (non-transactional).
 - **`IsolationLevel`** — applied when the shared transaction is opened (defaults to
-  `ReadCommitted`).
+  `ReadCommitted`). Ignored when `IsTransactional = false`.
 - **`MaxDbContextCount`** — guardrail on the number of distinct `(DbContextType, Schema)`
   contexts materialized in one UoW (default 16). Exceeding it throws.
 
@@ -140,18 +145,25 @@ public class UnitOfWorkOptions
 ## Registration
 
 ```csharp
-// PostgreSQL (BBT.Aether.Npgsql) — full multi-schema
+// PostgreSQL (BBT.Aether.Npgsql) — full multi-schema, TransactionLocal mode (default)
 services.AddAetherNpgsql<MyDbContext>(connectionString);
+
+// PostgreSQL — non-transactional SessionSearchPath mode (native Npgsql pool, no PgBouncer)
+services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.SessionSearchPath);
 
 // SQL Server (BBT.Aether.SqlServer) — single-schema
 services.AddAetherSqlServer<MyDbContext>(connectionString);
 ```
 
-Both wrap the core overload, which selects the provider explicitly:
+`AddAetherNpgsql` accepts an optional `SchemaSwitchingMode` (second parameter, default
+`TransactionLocal`). See [Multi-Schema Support](../multi-schema/README.md#schema-switching-modes)
+for when to choose each mode.
+
+Both Npgsql/SqlServer overloads wrap the core overload, which selects the provider explicitly:
 
 ```csharp
 services.AddAetherDbContext<MyDbContext>(
-    new NpgsqlAetherProvider(),   // or SqlServerAetherProvider(), or a custom IAetherDatabaseProvider
+    new NpgsqlAetherProvider(SchemaSwitchingMode.TransactionLocal),   // or SqlServerAetherProvider()
     connectionString,
     (sp, options) => { /* optional extra EF Core configuration */ });
 ```
@@ -167,15 +179,36 @@ accessor, `IUnitOfWorkManager`, the domain-event sink, and `IAetherDbContextProv
 
 ### HTTP middleware
 
+The `UnitOfWorkMiddleware` opens a UoW for every non-excluded HTTP request. Configure it via
+`UnitOfWorkMiddlewareOptions`:
+
 ```csharp
-app.UseUnitOfWorkMiddleware(options =>
+builder.Services.Configure<UnitOfWorkMiddlewareOptions>(options =>
 {
-    options.IsEnabled = true;
-    options.IsTransactional = true;
-    options.IsolationLevel = IsolationLevel.ReadCommitted;
-    options.Filter = context => !HttpMethods.IsGet(context.Request.Method);
+    // Default UoW options applied to every request (IsTransactional defaults to true here):
+    options.DefaultOptions = new UnitOfWorkOptions
+    {
+        IsTransactional = true,
+        Scope = UnitOfWorkScopeOption.Required,
+        IsolationLevel = IsolationLevel.ReadCommitted,
+    };
+
+    // HTTP methods that skip the UoW:
+    options.ExcludedMethods.Add("GET");
+
+    // Path prefixes that skip the UoW (wildcards supported):
+    options.ExcludedPathPrefixes.Add("/health*");
+
+    // Dynamic exclusion predicate:
+    options.ExcludeWhen = ctx => ctx.Request.Path.StartsWithSegments("/hangfire");
 });
+
+app.UseUnitOfWorkMiddleware();
 ```
+
+> **Default:** `IsTransactional = true`, `Scope = Required`. The middleware default is
+> explicitly transactional so that `TransactionLocal` schema switching (which requires an open
+> transaction) works without further configuration.
 
 ## Commit pipeline
 
@@ -211,7 +244,8 @@ data, and a rollback discards both.
 | `Current schema is not set.` | A context is requested with no active `currentSchema.Change(...)` scope. |
 | `No active UnitOfWork.` | A context is requested with no ambient UoW (common when using `BeginAsync` where the ambient does not propagate to the caller — use `Begin`). |
 | `UnitOfWork DbContext limit exceeded. Limit: N` | More than `MaxDbContextCount` distinct `(Type, Schema)` contexts in one UoW. |
-| `Invalid PostgreSQL schema name: X` | The active schema name fails the PostgreSQL identifier check before `SET LOCAL`. |
+| `Invalid PostgreSQL schema name: X` | The active schema name fails the PostgreSQL identifier check before a `SET` command. |
+| `TransactionLocal mode requires IsTransactional = true.` | `SchemaSwitchingMode.TransactionLocal` was used with `IsTransactional = false`. Either set `IsTransactional = true` or switch to `SessionSearchPath` mode. |
 
 ## Programmatic helpers
 

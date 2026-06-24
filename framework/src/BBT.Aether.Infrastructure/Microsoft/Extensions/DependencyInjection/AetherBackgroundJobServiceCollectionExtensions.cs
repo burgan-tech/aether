@@ -34,7 +34,8 @@ public static class AetherBackgroundJobServiceCollectionExtensions
     /// </example>
     public static IServiceCollection AddAetherBackgroundJob<TDbContext>(
         this IServiceCollection services,
-        Action<BackgroundJobOptions>? configure = null)
+        Action<BackgroundJobOptions>? configure = null,
+        bool withHostedService = false)
         where TDbContext : DbContext, IHasEfCoreBackgroundJobs
     {
         // Validate that TDbContext implements IHasEfCoreBackgroundJobs
@@ -89,10 +90,12 @@ public static class AetherBackgroundJobServiceCollectionExtensions
         // outbox processor's singleton lifetime.
         services.TryAddSingleton<BackgroundJobArmingProcessor>();
 
-        // Drive the poller as a hosted service. Hosted services only run inside a built Host, so unit /
-        // integration tests that construct services directly never auto-start the loop.
-        services.AddHostedService<BackgroundJobArmingHostedService>();
-
+        if (withHostedService)
+        {
+            // Drive the poller as a hosted service. Hosted services only run inside a built Host, so unit /
+            // integration tests that construct services directly never auto-start the loop.
+            services.AddHostedService<BackgroundJobArmingHostedService>();    
+        }
         return services;
     }
 

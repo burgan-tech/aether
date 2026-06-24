@@ -36,7 +36,7 @@ public class BackgroundJobOptions
     /// <summary>The database schema whose background jobs this arming processor handles. The processor
     /// opens a UnitOfWork bound to this schema each run. If null/empty it logs a warning and does nothing.
     /// For multi-schema deployments run one processor instance per schema.</summary>
-    public string? Schema { get; set; }
+    public string? Schema { get; set; } = "sys_queues";
 
     /// <summary>Default maximum framework retry attempts for one-shot jobs (used by enqueue/dispatcher).</summary>
     public int MaxRetryCount { get; set; } = 3;

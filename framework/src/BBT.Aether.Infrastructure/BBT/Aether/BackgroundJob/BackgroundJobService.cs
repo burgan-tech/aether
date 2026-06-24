@@ -171,7 +171,7 @@ public sealed class BackgroundJobService(
         }
 
         await using (var uow = uowManager.Begin(
-            new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+                         new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
         {
             try
             {
@@ -186,6 +186,7 @@ public sealed class BackgroundJobService(
                 throw;
             }
         }
+
         if (directly)
             await ArmNowAsync(handlerName, jobName, schedule, payloadBytes, failurePolicyOptions,
                 effectiveJobId, cancellationToken);
@@ -217,7 +218,8 @@ public sealed class BackgroundJobService(
             {
                 rollbackUow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                await jobStore.TryTransitionStatusAsync(jobId, BackgroundJobStatus.Scheduled, BackgroundJobStatus.Pending, ct);
+                await jobStore.TryTransitionStatusAsync(jobId, BackgroundJobStatus.Scheduled,
+                    BackgroundJobStatus.Pending, ct);
                 await rollbackUow.CommitAsync(ct);
             }
             catch (Exception rollbackEx)
@@ -398,10 +400,11 @@ public sealed class BackgroundJobService(
         if (activity == null) return;
 
         activity.SetStatus(ActivityStatusCode.Error, ex.Message);
-        activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
-        {
-            { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
-            { "exception.message", ex.Message },
-        }));
+        activity.AddEvent(new ActivityEvent("exception",
+            tags: new ActivityTagsCollection
+            {
+                { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
+                { "exception.message", ex.Message },
+            }));
     }
 }

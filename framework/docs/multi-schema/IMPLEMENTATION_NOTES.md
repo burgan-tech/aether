@@ -1,6 +1,6 @@
 # Multi-Schema Implementation Notes
 
-> These notes describe the **current** shared-connection / `SET LOCAL search_path`
+> These notes describe the **current** shared-connection / mode-aware `search_path`
 > implementation. Earlier revisions described a session-level `SET search_path` applied by an
 > `NpgsqlSchemaConnectionInterceptor`, plus an `ICurrentSchema.Set()` / `IsResolved` accessor.
 > Those are gone. See the corrected design below.
@@ -16,12 +16,18 @@
                                    ▼
    active UnitOfWork (CompositeUnitOfWork)
         ├── ONE NpgsqlConnection
-        ├── ONE NpgsqlTransaction
+        ├── ONE NpgsqlTransaction  (only when IsTransactional = true)
+        ├── SchemaScopeState       (shared; tracks Current schema + optional Cleanup delegate)
         └── DbContext cache keyed by (DbContextType, Schema)
                                    │  each context enlists on the shared tx (UseTransactionAsync)
                                    ▼
-   SearchPathCommandInterceptor  ──►  SET LOCAL search_path TO "<schema>", public
-        (runs before EVERY command; skips when SearchPathState already == schema)
+   SearchPathCommandInterceptor  ──►  mode-aware search_path command
+        SchemaSwitchingMode.TransactionLocal:  SET LOCAL search_path TO "<schema>", public
+                                               (per command; skips via SchemaScopeState.Current)
+        SchemaSwitchingMode.SessionSearchPath: SET search_path TO "<schema>", public
+                                               (once per UoW; skips if same schema)
+                                               + RESET search_path on UoW dispose (via Cleanup)
+        SchemaSwitchingMode.QualifiedNames:    NotSupportedException (not yet implemented)
                                    ▼
                               PostgreSQL
 ```
@@ -39,12 +45,24 @@
    opened on the first `GetDbContextAsync`.
    (`BBT.Aether.Infrastructure/BBT/Aether/Uow/CompositeUnitOfWork.cs`)
 
-3. **Per-command `SET LOCAL search_path`.** Schema isolation is enforced by
-   `SearchPathCommandInterceptor`, which prefixes `SET LOCAL search_path TO "<schema>", public`
-   before each command. `SET LOCAL` is transaction-scoped, so a one-time set would be clobbered
-   by sibling contexts on the same transaction. A `SearchPathState` skips the redundant `SET`
-   when the connection already has the right schema.
-   (`.../Uow/EntityFrameworkCore/SearchPathCommandInterceptor.cs`, `SearchPathState.cs`)
+3. **Mode-aware `search_path` via `SchemaSwitchingMode`.** Schema isolation is enforced by a
+   mode-aware `SearchPathCommandInterceptor` configured at registration time via
+   `AddAetherNpgsql(connectionString, mode)` (default `TransactionLocal`).
+
+   - `TransactionLocal`: Prefixes `SET LOCAL search_path TO "<schema>", public` before each
+     command. `SET LOCAL` is transaction-scoped — requires `IsTransactional = true`. A
+     `SchemaScopeState.Current` field skips the redundant `SET` when the connection already
+     has the right schema. Throws `InvalidOperationException` if no transaction is open
+     (guard against misconfiguration).
+   - `SessionSearchPath`: Issues `SET search_path` once per UoW, skipping repeats via
+     `SchemaScopeState.Current`. Registers a `SchemaScopeState.Cleanup` delegate
+     (`RESET search_path`) that `CompositeUnitOfWork.DisposeAsync` invokes before the
+     connection is returned to the pool, preventing session-state leakage. Does not require
+     a transaction (`IsTransactional = false`).
+   - `QualifiedNames`: Not yet implemented — throws `NotSupportedException`.
+
+   (`.../Uow/EntityFrameworkCore/SearchPathCommandInterceptor.cs`, `SchemaScopeState.cs`,
+   `SchemaSwitchingMode.cs`)
 
 4. **Schema-agnostic mappings.** Entities use `ToTable("name")` with no schema, so EF Core
    compiles one model per context type that serves every schema; `search_path` selects the
@@ -63,29 +81,35 @@
 ## Wiring
 
 ```csharp
-// PostgreSQL (full multi-schema), from BBT.Aether.Npgsql
+// PostgreSQL — TransactionLocal (default, PgBouncer-safe)
 services.AddAetherNpgsql<MyDbContext>(connectionString);
+// or explicitly:
+services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.TransactionLocal);
 
-// SQL Server (single-schema), from BBT.Aether.SqlServer
+// PostgreSQL — SessionSearchPath (non-transactional, native pool only)
+services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.SessionSearchPath);
+
+// SQL Server (single-schema)
 // services.AddAetherSqlServer<MyDbContext>(connectionString);
 
 // Custom provider / advanced
-// services.AddAetherDbContext<MyDbContext>(provider, connectionString, configure?);
+// services.AddAetherDbContext<MyDbContext>(new NpgsqlAetherProvider(mode), connectionString, configure?);
 ```
 
 `AddAetherNpgsql` (built on `AddAetherDbContext`) registers:
 
 - `IAetherDbContextConfigurator<TDbContext>` (`AetherDbContextConfigurator<>`) — captures the
-  connection string and the configure delegate; `BuildOptions(sharedConnection)` re-applies the
-  configuration then binds to the shared connection via `UseNpgsql(connection)` (this overrides
-  the connection-string-based provider call but keeps interceptors such as `AuditInterceptor`).
+  connection string and the configure delegate; `BuildOptions(sharedConnection, schema, state)`
+  re-applies the configuration, binds to the shared connection via `UseNpgsql(connection)`, and
+  adds a `SearchPathCommandInterceptor(schema, state, mode)` per context.
 - The design-time/migrations `DbContext` registration (`AddDbContext`).
 - `AddAetherUnitOfWork<TDbContext>()` — ambient accessor (`IAmbientUnitOfWorkAccessor`,
   AsyncLocal singleton), `IUnitOfWorkManager` (scoped), the domain-event sink, and
   `IAetherDbContextProvider<>` (scoped).
 
-The `CompositeUnitOfWork` builds each schema-bound context's options from the configurator and
-adds a fresh `SearchPathCommandInterceptor(schema, sharedState)` per context.
+`NpgsqlAetherProvider.ApplyShared` also registers `SchemaScopeState.Cleanup` when mode is
+`SessionSearchPath`: the cleanup delegate issues `RESET search_path` and is invoked once by
+`CompositeUnitOfWork.DisposeAsync` before releasing the connection to the pool.
 
 ## Validation and formatting
 
@@ -120,7 +144,11 @@ for behavior:
 
 - `MultiSchemaUnitOfWorkTests` — atomic cross-schema commit/rollback, isolation via search_path,
   the SET-skip optimization, and the `MaxDbContextCount` guardrail.
-- `PgBouncerSearchPathTests` — `SET LOCAL` does not leak to a fresh/pooled connection.
+- `PgBouncerSearchPathTests` — `SET LOCAL` (`TransactionLocal` mode) does not leak to a
+  fresh/pooled connection.
+- `UnitOfWorkDisposalTests` — `SessionSearchPath` mode: connection without transaction, shared
+  context caching, `RESET search_path` at dispose (pool leakage prevention); `TransactionLocal`
+  mode: transaction is opened, throws correctly when used without `IsTransactional = true`.
 - `OutboxWithinSharedTransactionTests` — a domain event is written to the outbox inside the same
   shared transaction as the business data (default `AlwaysUseOutbox`).
 - `DbContextConfiguratorTests` — `BuildOptions` binds the shared connection and preserves
