@@ -10,6 +10,7 @@ using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using Shouldly;
 using Xunit;
 
@@ -116,35 +117,60 @@ public class BackgroundJobServiceTransactionalEnqueueTests
     }
 
     [Fact]
-    public async Task EnqueueAsync_Directly_NoAmbient_ArmsImmediatelyAfterCommit()
+    public async Task EnqueueAsync_Directly_NoAmbient_SavesAsScheduledAndArmsSchedulerWithoutCasTransition()
     {
-        // Arrange — no ambient; directly arms the scheduler inline after the commit and CASes
-        // the row Pending → Scheduled in its own UoW.
+        // Arrange
         _uowManager.Current.Returns((IUnitOfWork?)null);
         _uowManager.Begin(Arg.Any<UnitOfWorkOptions>()).Returns(_ => Substitute.For<IUnitOfWork>());
+        BackgroundJobInfo? saved = null;
+        await _jobStore.SaveAsync(Arg.Do<BackgroundJobInfo>(j => saved = j), Arg.Any<CancellationToken>());
 
         // Act
         var id = await _sut.EnqueueAsync(
             "handler", "job-direct", new { X = 1 }, "@every 5s",
             directly: true, cancellationToken: CancellationToken.None);
 
-        // Assert — scheduler armed once, and the CAS transition Pending → Scheduled was attempted.
+        // Assert — row persisted as Scheduled (not Pending) so arming poller cannot race.
+        saved.ShouldNotBeNull();
+        saved!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
         await _jobScheduler.Received(1).ScheduleAsync(
             "handler", "job-direct", "@every 5s", Arg.Any<ReadOnlyMemory<byte>>(),
             Arg.Any<JobScheduleFailurePolicy?>(), Arg.Any<CancellationToken>());
-        await _jobStore.Received(1).TryTransitionStatusAsync(
+        // No CAS Pending→Scheduled — row was already Scheduled at save time
+        await _jobStore.DidNotReceive().TryTransitionStatusAsync(
             id, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled, Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task EnqueueAsync_Ambient_Directly_DefersArmToOnCompleted()
+    public async Task EnqueueAsync_Directly_SchedulerFails_RollsBackToScheduledPending()
+    {
+        // Arrange — scheduler throws; ArmNowAsync should CAS Scheduled→Pending for the arming poller.
+        _uowManager.Current.Returns((IUnitOfWork?)null);
+        _uowManager.Begin(Arg.Any<UnitOfWorkOptions>()).Returns(_ => Substitute.For<IUnitOfWork>());
+        _jobScheduler.ScheduleAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<ReadOnlyMemory<byte>>(), Arg.Any<JobScheduleFailurePolicy?>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("scheduler offline"));
+
+        // Act — must NOT throw (ArmNowAsync swallows the error and logs)
+        var id = await _sut.EnqueueAsync(
+            "handler", "job-direct-fail", new { X = 1 }, "@every 5s",
+            directly: true, cancellationToken: CancellationToken.None);
+
+        // Assert — rollback CAS Scheduled→Pending attempted so arming poller picks it up
+        await _jobStore.Received(1).TryTransitionStatusAsync(
+            id, BackgroundJobStatus.Scheduled, BackgroundJobStatus.Pending, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task EnqueueAsync_Ambient_Directly_SavesAsScheduledAndDefersArmToOnCompleted()
     {
         // Arrange — ambient UoW active; directly:true must register an OnCompleted callback and NOT arm
-        // the scheduler synchronously. Capture the callback and invoke it to simulate commit.
+        // the scheduler synchronously. Saved row must be Scheduled (not Pending).
         var ambientUow = Substitute.For<IUnitOfWork>();
         _uowManager.Current.Returns(ambientUow);
-        // The ArmNowAsync CAS opens its own UoW.
         _uowManager.Begin(Arg.Any<UnitOfWorkOptions>()).Returns(_ => Substitute.For<IUnitOfWork>());
+        BackgroundJobInfo? saved = null;
+        await _jobStore.SaveAsync(Arg.Do<BackgroundJobInfo>(j => saved = j), Arg.Any<CancellationToken>());
 
         Func<IUnitOfWork, Task>? onCompleted = null;
         ambientUow.OnCompleted(Arg.Do<Func<IUnitOfWork, Task>>(cb => onCompleted = cb))
@@ -155,19 +181,20 @@ public class BackgroundJobServiceTransactionalEnqueueTests
             "handler", "job-amb-direct", new { X = 1 }, "@every 5s",
             directly: true, cancellationToken: CancellationToken.None);
 
-        // Assert — saved into ambient; an OnCompleted callback was registered; nothing armed yet.
-        await _jobStore.Received(1).SaveAsync(Arg.Any<BackgroundJobInfo>(), Arg.Any<CancellationToken>());
+        // Assert — saved as Scheduled; callback registered; scheduler not yet called
+        saved.ShouldNotBeNull();
+        saved!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
         ambientUow.Received(1).OnCompleted(Arg.Any<Func<IUnitOfWork, Task>>());
         await _jobScheduler.DidNotReceiveWithAnyArgs().ScheduleAsync(default!, default!, default!, default);
         onCompleted.ShouldNotBeNull();
 
-        // Simulate the caller's commit → the callback arms the scheduler and CASes the row.
+        // Simulate the caller's commit → callback fires and arms the scheduler (no CAS transition)
         await onCompleted!(ambientUow);
 
         await _jobScheduler.Received(1).ScheduleAsync(
             "handler", "job-amb-direct", "@every 5s", Arg.Any<ReadOnlyMemory<byte>>(),
             Arg.Any<JobScheduleFailurePolicy?>(), Arg.Any<CancellationToken>());
-        await _jobStore.Received(1).TryTransitionStatusAsync(
+        await _jobStore.DidNotReceive().TryTransitionStatusAsync(
             id, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled, Arg.Any<CancellationToken>());
     }
 }

@@ -132,15 +132,15 @@ public sealed class BackgroundJobService(
         var effectiveKind = kind ?? InferKind(schedule);
         activity?.SetTag("job.kind", effectiveKind.ToString());
 
-        // Build the row in the Pending state. The arming poller (BackgroundJobArmingProcessor) arms it
-        // in the scheduler AFTER the caller's transaction commits and flips it to Scheduled — so enqueue
-        // performs NO scheduler call inside the transaction. This makes enqueue atomic with the caller's
-        // business work: on rollback the row never exists, so there is no orphaned scheduled job.
+        // Build the row. When directly:true, save as Scheduled so the arming poller cannot race and
+        // double-schedule. ArmNowAsync calls the scheduler; on failure it rolls Scheduled→Pending for
+        // the poller to retry. When directly:false (default), save as Pending and let the arming poller
+        // arm it after the caller's transaction commits — no orphaned scheduled job on rollback.
         var jobInfo = new BackgroundJobInfo(effectiveJobId, handlerName, jobName)
         {
             ExpressionValue = schedule,
             Payload = eventSerializer.SerializeToElement(envelope),
-            Status = BackgroundJobStatus.Pending,
+            Status = directly ? BackgroundJobStatus.Scheduled : BackgroundJobStatus.Pending,
             Kind = effectiveKind,
             MaxRetryCount = options.MaxRetryCount,
             NextRetryAt = clock.UtcNow,
@@ -197,26 +197,34 @@ public sealed class BackgroundJobService(
     }
 
     /// <summary>
-    /// Arms the scheduler inline and flips the row Pending → Scheduled in its own transaction (so the
-    /// arming poller skips it). Never throws: on failure it logs a warning and leaves the row Pending for
-    /// the poller to arm on its next pass (the poller is the backstop).
+    /// Calls the scheduler inline and, on failure, rolls the row back from Scheduled to Pending so the
+    /// arming poller acts as the backstop. Never throws — failure is logged as a warning.
     /// </summary>
     private async Task ArmNowAsync(string handlerName, string jobName, string schedule,
         ReadOnlyMemory<byte> payloadBytes, JobScheduleFailurePolicy? failurePolicy, Guid jobId, CancellationToken ct)
     {
         try
         {
-            await jobScheduler.ScheduleAsync(handlerName, jobName, schedule, payloadBytes, failurePolicy, ct);   // idempotent (overwrite)
-            await using var uow = uowManager.Begin(
-                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-            await jobStore.TryTransitionStatusAsync(jobId, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled, ct);
-            await uow.CommitAsync(ct);
+            await jobScheduler.ScheduleAsync(handlerName, jobName, schedule, payloadBytes, failurePolicy, ct);
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex,
-                "Immediate (directly) arm failed for job '{JobName}'; the arming poller will arm it on its next pass",
+                "Immediate (directly) arm failed for job '{JobName}'; rolling back to Pending for arming poller",
                 jobName);
+            try
+            {
+                await using var uow = uowManager.Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                await jobStore.TryTransitionStatusAsync(jobId, BackgroundJobStatus.Scheduled, BackgroundJobStatus.Pending, ct);
+                await uow.CommitAsync(ct);
+            }
+            catch (Exception rollbackEx)
+            {
+                logger.LogError(rollbackEx,
+                    "Failed to roll back job '{JobName}' to Pending; arming poller will arm it on next visibility-timeout pass",
+                    jobName);
+            }
         }
     }
 
