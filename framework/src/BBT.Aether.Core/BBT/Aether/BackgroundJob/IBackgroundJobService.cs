@@ -14,6 +14,9 @@ public interface IBackgroundJobService
     /// <summary>
     /// Enqueues a background job with the specified parameters and schedule.
     /// Creates a new job entity, persists it, and schedules it with the underlying scheduler.
+    /// The job row is persisted atomically with the caller's ambient unit of work when one is active
+    /// (a rollback discards it); otherwise a short transaction is opened and committed. The arming poller
+    /// arms it after commit, or — when <paramref name="directly"/> is true — it is armed immediately.
     /// </summary>
     /// <typeparam name="TPayload">The type of the job payload.</typeparam>
     /// <param name="handlerName">The name of the handler type to execute (e.g., "SendEmail", "GenerateReport").</param>
@@ -22,14 +25,13 @@ public interface IBackgroundJobService
     /// <param name="schedule">The schedule expression defining when the job should be executed (e.g., cron expression).</param>
     /// <param name="metadata">Additional metadata associated with the job (optional).</param>
     /// <param name="failurePolicyOptions">Retry/failure policy for the scheduled job (optional).</param>
-    /// <param name="useAmbientUnitOfWork">
-    /// When <c>true</c> AND an ambient unit of work is active, the job record is persisted into the
-    /// AMBIENT unit of work (no own RequiresNew UoW, no self-commit) and the actual scheduler call is
-    /// deferred to the ambient UoW's <c>OnCompleted</c> — so the job row commits atomically with the
-    /// caller's business transaction and the scheduler only fires after a successful commit. This
-    /// prevents nested-UoW / shared-DbContext collisions ("A second operation was started on this
-    /// context instance") and orphaned scheduled jobs on rollback. When <c>false</c> (default) or when
-    /// no ambient unit of work exists, the legacy self-contained RequiresNew behavior is used.
+    /// <param name="directly">
+    /// When <c>true</c>, the scheduler is armed inline immediately after the job row is durably committed
+    /// (and the row is flipped Pending → Scheduled), instead of waiting for the arming poller. In the
+    /// ambient case arming is deferred to the ambient UoW's <c>OnCompleted</c> so it only fires after the
+    /// caller's commit. The arming poller remains the backstop: if the inline arm fails it is logged and
+    /// the poller arms the row on its next pass. When <c>false</c> (default), arming is left entirely to
+    /// the poller.
     /// </param>
     /// <param name="jobId">
     /// Optional caller-supplied entity id for the created job. When provided, <c>BackgroundJobInfo.Id</c>
@@ -37,6 +39,12 @@ public interface IBackgroundJobService
     /// up front and reuse it for its own tracking row — avoiding a placeholder/mismatch and keeping
     /// cancellation-by-id reliable. When <c>null</c> (default) an id is generated internally. Ignored
     /// when a job with the same name already exists (the existing id is kept).
+    /// </param>
+    /// <param name="kind">
+    /// Optional job kind (<see cref="BBT.Aether.Domain.Entities.JobKind.OneShot"/> vs
+    /// <see cref="BBT.Aether.Domain.Entities.JobKind.Recurring"/>). When <c>null</c> (default) the kind is
+    /// inferred from <paramref name="schedule"/>: a cron expression or an <c>@</c>-prefixed period
+    /// (<c>@every</c>, <c>@daily</c>, ...) ⇒ Recurring; anything else (e.g. an ISO-8601 instant) ⇒ OneShot.
     /// </param>
     /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
     /// <returns>
@@ -52,8 +60,9 @@ public interface IBackgroundJobService
         string schedule,
         Dictionary<string, object>? metadata = null,
         JobScheduleFailurePolicy? failurePolicyOptions = null,
-        bool useAmbientUnitOfWork = false,
+        bool directly = true,
         Guid? jobId = null,
+        BBT.Aether.Domain.Entities.JobKind? kind = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>

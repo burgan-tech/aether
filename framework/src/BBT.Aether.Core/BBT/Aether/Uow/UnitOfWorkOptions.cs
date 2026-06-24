@@ -7,7 +7,6 @@ namespace BBT.Aether.Uow;
 /// </summary>
 public class UnitOfWorkOptions
 {
-    public const string PrepareName = "AetherUow";
     /// <summary>
     /// Gets or sets whether this unit of work should use transactions.
     /// Default is false (reserve pattern - transaction can be escalated later).
@@ -25,5 +24,8 @@ public class UnitOfWorkOptions
     /// Default is Required.
     /// </summary>
     public UnitOfWorkScopeOption Scope { get; set; } = UnitOfWorkScopeOption.Required;
+
+    /// <summary>Upper bound on distinct (DbContextType, Schema) contexts in one UnitOfWork. Guardrail.</summary>
+    public int MaxDbContextCount { get; set; } = 16;
 }
 

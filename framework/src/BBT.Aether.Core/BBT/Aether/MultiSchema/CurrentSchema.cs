@@ -1,42 +1,56 @@
 using System;
+using System.Collections.Immutable;
+using System.Threading;
 
 namespace BBT.Aether.MultiSchema;
 
 /// <summary>
-/// Default implementation of <see cref="ICurrentSchema"/>.
+/// Default <see cref="ICurrentSchema"/> backed by an AsyncLocal of an IMMUTABLE stack so nested
+/// schema scopes flow across async calls and restore the previous schema on dispose.
 /// </summary>
-public class CurrentSchema : ICurrentSchema
+/// <remarks>
+/// Every <see cref="Change"/>/dispose REASSIGNS <c>Current.Value</c> with a new immutable stack
+/// (copy-on-write). This is what makes scopes isolated across async boundaries: AsyncLocal copies
+/// the reference into child flows, so mutating a shared mutable stack in place would leak pushes/pops
+/// between parallel branches and the parent. Reassigning a new immutable value keeps each flow's view
+/// private.
+/// </remarks>
+public sealed class CurrentSchema(ISchemaNameFormatter formatter) : ICurrentSchema
 {
-    private readonly ISchemaAccessor _accessor;
-    private readonly ISchemaNameFormatter _formatter;
+    private static readonly AsyncLocal<ImmutableStack<string>?> Current = new();
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="CurrentSchema"/> class.
-    /// </summary>
-    /// <param name="accessor">The schema accessor.</param>
-    /// <param name="formatter">The schema name formatter.</param>
-    public CurrentSchema(ISchemaAccessor accessor, ISchemaNameFormatter formatter)
-    {
-        _accessor = accessor;
-        _formatter = formatter;
-    }
+    public string? Name => Current.Value is { IsEmpty: false } s ? s.Peek() : null;
 
-    /// <inheritdoc />
-    public string? Name => _accessor.Schema;
-
-    /// <inheritdoc />
-    public bool IsResolved => !string.IsNullOrWhiteSpace(_accessor.Schema);
-
-    /// <inheritdoc />
-    public void Set(string schema)
+    public IDisposable Change(string schema)
     {
         if (string.IsNullOrWhiteSpace(schema))
-            throw new ArgumentException("Schema cannot be null or whitespace.", nameof(schema));
+        {
+            throw new ArgumentException("Schema cannot be empty.", nameof(schema));
+        }
 
-        // Format the schema name according to database naming conventions
-        var formattedSchema = _formatter.Format(schema);
-        
-        _accessor.Schema = formattedSchema;
+        var formatted = formatter.Format(schema);
+        var previous = Current.Value ?? ImmutableStack<string>.Empty;
+        Current.Value = previous.Push(formatted);
+
+        return new RestoreOnDispose(previous, formatted);
+    }
+
+    private sealed class RestoreOnDispose(ImmutableStack<string> previous, string expected) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+
+            var current = Current.Value;
+            if (current is null || current.IsEmpty || !string.Equals(current.Peek(), expected, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Schema scope corrupted: out-of-order disposal detected.");
+            }
+
+            Current.Value = previous;
+        }
     }
 }
-

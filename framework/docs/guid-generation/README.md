@@ -383,12 +383,12 @@ services.AddSingleton<IGuidGenerator, CustomGuidGenerator>();
 
 ### Issue: IDs not being generated
 
-**Cause:** Not using `AddAetherDbContext` or `AuditInterceptor`.
+**Cause:** Not using `AddAetherNpgsql` (or another Aether DbContext registration) or `AuditInterceptor`.
 
 **Solution:** Ensure proper configuration:
 
 ```csharp
-services.AddAetherDbContext<MyDbContext>(options => { });
+services.AddAetherNpgsql<MyDbContext>(connectionString);
 ```
 
 ### Issue: Random GUIDs causing performance issues

@@ -49,48 +49,34 @@ public class UnitOfWorkAttribute : AetherMethodInterceptionAspect
     /// </summary>
     public async override Task OnInvokeAsync(MethodInterceptionArgs args)
     {
-        // Call extensibility point before starting UoW
         await OnBeforeAsync(args);
 
-        // Get dependencies from ambient service provider
         var serviceProvider = GetServiceProvider();
         var cancellationToken = ExtractCancellationToken(args);
         var uowManager = serviceProvider.GetRequiredService<IUnitOfWorkManager>();
-
         var options = CreateOptions();
 
-        if (await uowManager.TryBeginPreparedAsync(UnitOfWorkOptions.PrepareName, options, cancellationToken))
+        // Participate in an existing ambient UnitOfWork (e.g. the request UoW the middleware owns, or an
+        // outer aspect). The OWNER commits/rolls back; we only run the method and let exceptions propagate.
+        if (options.Scope == UnitOfWorkScopeOption.Required && uowManager.Current is not null)
         {
-            // Prepared UoW was found and initialized
-            // Just save changes - middleware will handle commit
             try
             {
                 await args.ProceedAsync();
-
-                if (uowManager.Current != null)
-                {
-                    await uowManager.Current.SaveChangesAsync(cancellationToken);
-                    // await uowManager.Current.CommitAsync(cancellationToken);
-                }
-
                 await OnAfterAsync(args);
             }
             catch (Exception ex)
             {
-                if (uowManager.Current != null)
-                {
-                    await uowManager.Current.RollbackAsync(cancellationToken);
-                }
-
                 await OnExceptionAsync(args, ex);
-                throw;
+                throw; // owner rolls back
             }
 
             return;
         }
 
-        // No prepared UoW, create a new one
-        await using var uow = await uowManager.BeginAsync(options, cancellationToken);
+        // Own a UnitOfWork (RequiresNew, Suppress, or Required with no ambient — e.g. non-HTTP paths). Use the
+        // synchronous Begin so the unit of work is ambient in this frame and flows into ProceedAsync.
+        await using var uow = uowManager.Begin(options);
         try
         {
             await args.ProceedAsync();

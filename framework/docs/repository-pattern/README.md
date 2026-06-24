@@ -9,8 +9,7 @@ Clean data access abstraction supporting EF Core with generic repository interfa
 ### Service Registration
 
 ```csharp
-services.AddAetherDbContext<MyDbContext>(options =>
-    options.UseNpgsql(configuration.GetConnectionString("Default")));
+services.AddAetherNpgsql<MyDbContext>(configuration.GetConnectionString("Default"));
 
 // This registers:
 // - IRepository<TEntity, TKey> for each entity

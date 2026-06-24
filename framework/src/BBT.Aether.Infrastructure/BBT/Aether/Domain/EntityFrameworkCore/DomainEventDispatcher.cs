@@ -102,10 +102,10 @@ public class DomainEventDispatcher(
         var scopedEventBus = scope.ServiceProvider.GetRequiredService<IDistributedEventBus>();
         var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
 
-        // Begin a new unit of work with Suppress to avoid ambient
-        await using var uow = await uowManager.BeginAsync(
-            new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew },
-            cancellationToken);
+        // Begin (synchronous) so the ambient UoW is established in this caller's flow; the scoped
+        // event bus's provider-backed outbox store resolves its DbContext via the ambient UoW.
+        await using var uow = uowManager.Begin(
+            new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew });
 
         foreach (var envelope in eventEnvelopes)
         {

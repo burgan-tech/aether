@@ -37,7 +37,7 @@ Comprehensive documentation is available in the [docs](docs/) directory:
 ### Infrastructure Services
 - **[Distributed Cache](docs/distributed-cache/README.md)** - Multi-provider caching (Redis, Dapr, .NET Core)
 - **[Distributed Lock](docs/distributed-lock/README.md)** - Distributed locking with Redis and Dapr
-- **[Background Jobs](docs/background-job/README.md)** - Scheduled job execution with Dapr
+- **[Background Jobs](docs/background-jobs/README.md)** - Scheduled job execution with Dapr
 
 ### Cross-Cutting Concerns
 - **[Object Mapping](docs/mapper/README.md)** - AutoMapper integration

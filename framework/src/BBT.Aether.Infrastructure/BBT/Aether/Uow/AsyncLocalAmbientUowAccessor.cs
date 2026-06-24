@@ -22,8 +22,8 @@ public sealed class AsyncLocalAmbientUowAccessor : IAmbientUnitOfWorkAccessor
     {
         var uow = Current;
 
-        // Walk the outer chain and skip prepared, completed, or disposed UoWs
-        while (uow != null && (uow.IsPrepared || uow.IsCompleted || uow.IsDisposed))
+        // Walk the outer chain and skip completed or disposed UoWs
+        while (uow != null && (uow.IsCompleted || uow.IsDisposed))
         {
             uow = uow.Outer;
         }

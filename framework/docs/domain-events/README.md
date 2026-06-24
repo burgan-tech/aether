@@ -94,6 +94,11 @@ DomainEventDispatcher.DispatchEventsAsync()
 EventBus.PublishAsync() or OutboxStore.StoreAsync()
 ```
 
+> **Event flow (v2):** Domain events are collected during `SaveChanges` and enqueued onto the
+> owning UnitOfWork's transaction buffer. A `DbContext` must be obtained through the UnitOfWork
+> for its events to be captured. The legacy `IDomainEventSink` ambient-fallback path was removed —
+> raising domain events from a `DbContext` created outside a UnitOfWork is unsupported.
+
 ## Event Naming
 
 ```csharp

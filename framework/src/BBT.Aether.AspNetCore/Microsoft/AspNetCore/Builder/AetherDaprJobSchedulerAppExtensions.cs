@@ -35,6 +35,11 @@ public static class AetherDaprJobSchedulerAppExtensions
             }
             catch (Exception ex)
             {
+                // Error semantics contract: handler failures do NOT reach here. The dispatcher records the
+                // outcome (Completed / Retrying / Failed for one-shot, back-to-Scheduled for recurring) and
+                // returns normally, so Dapr sees a 200 and does NOT retry — framework retry owns handler retries.
+                // Only infrastructure faults (the bridge or dispatcher itself threw) propagate here; rethrowing
+                // makes Dapr observe a non-200 and trigger its own delivery retry. Do not swallow.
                 logger.LogError(ex, "Error processing Dapr job '{JobName}'", jobName);
                 throw;
             }

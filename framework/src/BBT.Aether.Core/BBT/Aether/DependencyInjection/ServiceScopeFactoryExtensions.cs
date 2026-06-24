@@ -37,12 +37,13 @@ public static class ServiceScopeFactoryExtensions
         {
             var uowManager = sp.GetRequiredService<IUnitOfWorkManager>();
 
-            // Begin UnitOfWork
-            await using var uow = await uowManager.BeginAsync(options, cancellationToken);
-            
+            // Begin UnitOfWork synchronously so it is ambient in this frame for the action,
+            // which resolves repositories/providers that depend on the ambient UoW.
+            await using var uow = uowManager.Begin(options);
+
             // Execute action
             await action(sp);
-            
+
             // Commit UnitOfWork
             await uow.CommitAsync(cancellationToken);
         }
@@ -80,12 +81,13 @@ public static class ServiceScopeFactoryExtensions
         {
             var uowManager = sp.GetRequiredService<IUnitOfWorkManager>();
 
-            // Begin UnitOfWork
-            await using var uow = await uowManager.BeginAsync(options, cancellationToken);
-            
+            // Begin UnitOfWork synchronously so it is ambient in this frame for the function,
+            // which resolves repositories/providers that depend on the ambient UoW.
+            await using var uow = uowManager.Begin(options);
+
             // Execute function
             var result = await func(sp);
-            
+
             // Commit UnitOfWork
             await uow.CommitAsync(cancellationToken);
 

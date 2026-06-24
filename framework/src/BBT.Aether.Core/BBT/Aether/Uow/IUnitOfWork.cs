@@ -6,7 +6,7 @@ namespace BBT.Aether.Uow;
 
 /// <summary>
 /// Represents a unit of work that coordinates changes across multiple transaction sources.
-/// Supports prepare/initialize pattern, commit, rollback, and automatic disposal with rollback semantics.
+/// Supports commit, rollback, and automatic disposal with rollback semantics.
 /// </summary>
 public interface IUnitOfWork : IAsyncDisposable
 {
@@ -18,7 +18,6 @@ public interface IUnitOfWork : IAsyncDisposable
 
     /// <summary>
     /// Gets the configuration options for this unit of work.
-    /// Null if the UoW is prepared but not yet initialized.
     /// </summary>
     UnitOfWorkOptions? Options { get; }
 
@@ -26,18 +25,6 @@ public interface IUnitOfWork : IAsyncDisposable
     /// Gets the outer (parent) unit of work in the scope chain, if any.
     /// </summary>
     IUnitOfWork? Outer { get; }
-
-    /// <summary>
-    /// Gets whether this unit of work is in prepared state (not yet initialized).
-    /// Prepared UoWs act as placeholders and don't perform actual work until initialized.
-    /// </summary>
-    bool IsPrepared { get; }
-
-    /// <summary>
-    /// Gets the preparation name that identifies this prepared unit of work.
-    /// Used to match and initialize prepared UoWs from aspects or services.
-    /// </summary>
-    string? PreparationName { get; }
 
     /// <summary>
     /// Gets whether this unit of work has been aborted by a nested scope.
@@ -55,27 +42,6 @@ public interface IUnitOfWork : IAsyncDisposable
     bool IsDisposed { get; }
 
     /// <summary>
-    /// Prepares this unit of work without initializing it.
-    /// Creates a placeholder that can be initialized later with specific options.
-    /// </summary>
-    /// <param name="preparationName">Name to identify this preparation</param>
-    void Prepare(string preparationName);
-
-    /// <summary>
-    /// Initializes a prepared unit of work with specific options.
-    /// Converts a prepared placeholder into an active unit of work.
-    /// </summary>
-    /// <param name="options">Options to configure the unit of work</param>
-    void Initialize(UnitOfWorkOptions options);
-
-    /// <summary>
-    /// Checks if this unit of work was prepared with a specific name.
-    /// </summary>
-    /// <param name="preparationName">Name to check</param>
-    /// <returns>True if prepared with the given name</returns>
-    bool IsPreparedFor(string preparationName);
-
-    /// <summary>
     /// Sets the outer (parent) unit of work in the scope chain.
     /// </summary>
     /// <param name="outer">The outer unit of work</param>
@@ -84,7 +50,6 @@ public interface IUnitOfWork : IAsyncDisposable
     /// <summary>
     /// Saves changes to all transaction sources without committing.
     /// Useful for intermediate persistence before final commit.
-    /// No-op if the unit of work is still in prepared state.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token</param>
     Task SaveChangesAsync(CancellationToken cancellationToken = default);
@@ -92,14 +57,12 @@ public interface IUnitOfWork : IAsyncDisposable
     /// <summary>
     /// Commits all changes made within this unit of work.
     /// Throws if the unit of work has been aborted.
-    /// No-op if the unit of work is still in prepared state.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token</param>
     Task CommitAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Rolls back all changes made within this unit of work.
-    /// No-op if the unit of work is still in prepared state.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token</param>
     Task RollbackAsync(CancellationToken cancellationToken = default);
