@@ -255,11 +255,15 @@ public sealed class BackgroundJobService(
 
         logger.LogInformation("Updating job with entity id '{Id}' to new schedule '{NewSchedule}'", id, newSchedule);
 
-        if (uowManager.Current is { } ambient)
+        if (uowManager.Current is { })
         {
             var jobInfo = await jobStore.GetAsync(id, cancellationToken);
             if (jobInfo == null)
-                throw new InvalidOperationException($"Job with id '{id}' not found.");
+            {
+                var notFoundEx = new InvalidOperationException($"Job with id '{id}' not found.");
+                RecordException(activity, notFoundEx);
+                throw notFoundEx;
+            }
 
             activity?.SetTag("job.handler_name", jobInfo.HandlerName);
             activity?.SetTag("job.name", jobInfo.JobName);

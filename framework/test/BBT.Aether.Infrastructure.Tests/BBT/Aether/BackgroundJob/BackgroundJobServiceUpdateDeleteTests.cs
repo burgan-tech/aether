@@ -77,6 +77,8 @@ public class BackgroundJobServiceUpdateDeleteTests
         var existing = new BackgroundJobInfo(jobId, "handler", "job-1")
             { ExpressionValue = "@every 5s", Status = BackgroundJobStatus.Scheduled };
         _jobStore.GetAsync(jobId, Arg.Any<CancellationToken>()).Returns(existing);
+        BackgroundJobInfo? saved = null;
+        await _jobStore.SaveAsync(Arg.Do<BackgroundJobInfo>(j => saved = j), Arg.Any<CancellationToken>());
 
         // Act
         await _sut.UpdateAsync(jobId, "@every 10s");
@@ -86,6 +88,10 @@ public class BackgroundJobServiceUpdateDeleteTests
             o.Scope == UnitOfWorkScopeOption.RequiresNew && o.IsTransactional));
         await _jobStore.Received(1).SaveAsync(Arg.Any<BackgroundJobInfo>(), Arg.Any<CancellationToken>());
         await ownUow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
+        saved.ShouldNotBeNull();
+        saved!.ExpressionValue.ShouldBe("@every 10s");
+        saved!.Status.ShouldBe(BackgroundJobStatus.Pending);
+        saved!.Kind.ShouldBe(JobKind.Recurring);
     }
 
     [Fact]
@@ -149,6 +155,21 @@ public class BackgroundJobServiceUpdateDeleteTests
             jobId, BackgroundJobStatus.Cancelled, Arg.Any<DateTime>(),
             cancellationToken: Arg.Any<CancellationToken>());
         await ownUow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task DeleteAsync_NoAmbient_JobNotFound_ReturnsFalse()
+    {
+        _uowManager.Current.Returns((IUnitOfWork?)null);
+        var ownUow = Substitute.For<IUnitOfWork>();
+        _uowManager.Begin(Arg.Any<UnitOfWorkOptions>()).Returns(ownUow);
+        var jobId = Guid.NewGuid();
+        _jobStore.GetAsync(jobId, Arg.Any<CancellationToken>()).Returns((BackgroundJobInfo?)null);
+
+        var result = await _sut.DeleteAsync(jobId);
+
+        result.ShouldBeFalse();
+        await _jobScheduler.DidNotReceiveWithAnyArgs().DeleteAsync(default!, default!, default);
     }
 
     [Fact]
