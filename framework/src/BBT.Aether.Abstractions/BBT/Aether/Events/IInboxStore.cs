@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -10,6 +9,13 @@ namespace BBT.Aether.Events;
 /// </summary>
 public interface IInboxStore
 {
+    /// <summary>
+    /// Stores a new event as pending for background processing.
+    /// </summary>
+    /// <param name="envelope">The CloudEventEnvelope to store</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    Task StorePendingAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default);
+
     /// <summary>
     /// Checks if an event with the specified ID has already been processed.
     /// </summary>
@@ -24,36 +30,15 @@ public interface IInboxStore
     /// <param name="eventId">The unique event ID</param>
     /// <param name="cancellationToken">Cancellation token</param>
     Task MarkAsProcessedAsync(string eventId, CancellationToken cancellationToken = default);
-    
+
     /// <summary>
-    /// Stores a new event as pending for background processing.
-    /// </summary>
-    /// <param name="envelope">The CloudEventEnvelope to store</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    Task StorePendingAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default);
-    
-    /// <summary>
-    /// Gets a batch of pending events ready for processing.
-    /// </summary>
-    /// <param name="batchSize">Maximum number of events to retrieve</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>List of inbox messages with Pending status</returns>
-    Task<List<InboxMessage>> GetPendingEventsAsync(int batchSize, CancellationToken cancellationToken = default);
-    
-    /// <summary>
-    /// Marks an event as currently being processed.
-    /// </summary>
-    /// <param name="eventId">The unique event ID</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    Task MarkAsProcessingAsync(string eventId, CancellationToken cancellationToken = default);
-    
-    /// <summary>
-    /// Marks an event as failed/discarded.
+    /// Marks an event as failed. Increments retry count and sets status back to Pending for retry,
+    /// or sets status to DeadLetter if the maximum retry count has been reached.
     /// </summary>
     /// <param name="eventId">The unique event ID</param>
     /// <param name="cancellationToken">Cancellation token</param>
     Task MarkAsFailedAsync(string eventId, CancellationToken cancellationToken = default);
-    
+
     /// <summary>
     /// Cleans up old processed messages.
     /// </summary>
@@ -62,19 +47,5 @@ public interface IInboxStore
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>Number of messages deleted</returns>
     Task<int> CleanupOldMessagesAsync(int batchSize, TimeSpan retentionPeriod, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Leases a batch of inbox messages for processing with database-level locking.
-    /// </summary>
-    /// <param name="batchSize">Maximum number of messages to lease</param>
-    /// <param name="workerId">Unique identifier for the worker acquiring the lease</param>
-    /// <param name="leaseDuration">How long the lease should be held</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>List of leased inbox messages</returns>
-    Task<IReadOnlyList<InboxMessage>> LeaseBatchAsync(
-        int batchSize,
-        string workerId,
-        TimeSpan leaseDuration,
-        CancellationToken cancellationToken = default);
 }
 

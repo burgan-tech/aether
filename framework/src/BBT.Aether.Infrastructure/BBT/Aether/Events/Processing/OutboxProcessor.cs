@@ -5,9 +5,11 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
+using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using BBT.Aether.Telemetry;
+using BBT.Aether.Uow;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -15,146 +17,208 @@ using Microsoft.Extensions.Logging;
 namespace BBT.Aether.Events.Processing;
 
 /// <summary>
-/// Processor that processes outbox messages.
-/// Retries failed messages with exponential backoff and cleans up old processed messages.
+/// Processor that processes outbox messages using a lease-based 3-phase approach.
+/// Phase 1: lease messages (short transaction). Phase 2: publish (no transaction). Phase 3: write outcomes (short transaction).
 /// </summary>
 public class OutboxProcessor<TDbContext>(
     IServiceScopeFactory scopeFactory,
+    WorkerIdentity workerIdentity,
     IClock clock,
     ILogger<OutboxProcessor<TDbContext>> logger,
     AetherOutboxOptions options) : IOutboxProcessor
     where TDbContext : DbContext, IHasEfCoreOutbox
 {
-    private readonly string _workerId = $"{Environment.MachineName}-{Environment.ProcessId}-{Guid.NewGuid():N}";
-
     /// <inheritdoc />
-    public virtual async Task RunAsync(CancellationToken cancellationToken = default)
+    public virtual async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
         try
         {
-            await ProcessOutboxMessagesAsync(cancellationToken);
+            var processed = await ProcessOutboxMessagesAsync(cancellationToken);
             await CleanupProcessedMessagesAsync(cancellationToken);
+            return processed;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error processing outbox messages");
+            return 0;
         }
     }
 
-    protected virtual async Task ProcessOutboxMessagesAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Leases a batch, publishes each message, then persists outcomes.
+    /// </summary>
+    protected virtual async Task<int> ProcessOutboxMessagesAsync(CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(options.Schema))
+        {
+            logger.LogWarning("Outbox processor has no Schema configured; skipping run.");
+            return 0;
+        }
+
         await using var scope = scopeFactory.CreateAsyncScope();
-        var outboxStore = scope.ServiceProvider.GetRequiredService<IOutboxStore>();
-        var eventBus = scope.ServiceProvider.GetRequiredService<IDistributedEventBus>();
-        var eventBusOptions = scope.ServiceProvider.GetRequiredService<AetherEventBusOptions>();
-        var dbContext = scope.ServiceProvider.GetRequiredService<TDbContext>();
-        var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+        var sp = scope.ServiceProvider;
+        var currentSchema = sp.GetRequiredService<ICurrentSchema>();
+        var uowManager = sp.GetRequiredService<IUnitOfWorkManager>();
+        var eventBus = sp.GetRequiredService<IDistributedEventBus>();
+        var eventBusOptions = sp.GetRequiredService<AetherEventBusOptions>();
+        var leaseStore = sp.GetRequiredService<IOutboxLeaseStore>();
+        var dbContextProvider = sp.GetRequiredService<IAetherDbContextProvider<TDbContext>>();
 
-        // Lease messages with database-level locking
-        var messages = await outboxStore.LeaseBatchAsync(
-            options.BatchSize,
-            _workerId,
-            options.LeaseDuration,
-            cancellationToken);
+        var workerId = $"{workerIdentity.Value}/outbox";
 
-        if (!messages.Any())
+        using (currentSchema.Change(options.Schema))
         {
-            return;
-        }
-
-        logger.LogInformation("Leased {Count} outbox messages for processing by worker {WorkerId}", 
-            messages.Count, _workerId);
-
-        foreach (var message in messages)
-        {
-            if (cancellationToken.IsCancellationRequested)
+            // PHASE 1: lease — kısa transaction
+            List<OutboxMessage> messages;
+            await using (var leaseUow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
             {
-                break;
+                messages = (await leaseStore.LeaseBatchAsync(
+                    options.BatchSize, workerId, options.LeaseDuration, cancellationToken)).ToList();
+                await leaseUow.CommitAsync(cancellationToken);
             }
 
-            using var activity = InfrastructureActivitySource.Source.StartActivity(
-                "Outbox.Process",
-                ActivityKind.Producer,
-                Activity.Current?.Context ?? default);
+            if (messages.Count == 0) return 0;
 
-            // Get topicName and pubSubName from ExtraProperties
-            var topicName = message.ExtraProperties.TryGetValue("TopicName", out var topicObj) 
-                ? topicObj?.ToString() ?? message.EventName 
-                : message.EventName;
-            var pubSubName = message.ExtraProperties.TryGetValue("PubSubName", out var pubSubObj)
-                ? pubSubObj?.ToString() ?? eventBusOptions.PubSubName
-                : eventBusOptions.PubSubName;
+            logger.LogInformation("Leased {Count} outbox messages for worker {WorkerId}", messages.Count, workerId);
 
-            activity?.SetTag("event.name", message.EventName);
-            activity?.SetTag("event.topic", topicName);
-            activity?.SetTag("event.pubsub_name", pubSubName);
-            activity?.SetTag("outbox.message_id", message.Id.ToString());
-            activity?.SetTag("outbox.retry_count", message.RetryCount);
-
-            try
+            // PHASE 2: publish — transaction açık değil
+            var outcomes = new List<OutboxPublishOutcome>(messages.Count);
+            foreach (var message in messages)
             {
-                var serializedEnvelope = message.EventData;
-                await eventBus.PublishEnvelopeAsync(serializedEnvelope, topicName, pubSubName, cancellationToken);
+                if (cancellationToken.IsCancellationRequested) break;
 
-                var domainMessage = await dbContext.OutboxMessages.FindAsync(new object[] { message.Id }, cancellationToken);
-                if (domainMessage != null)
+                using var activity = InfrastructureActivitySource.Source.StartActivity(
+                    "Outbox.Process", ActivityKind.Producer, Activity.Current?.Context ?? default);
+
+                var topicName = message.ExtraProperties.TryGetValue("TopicName", out var topicObj)
+                    ? topicObj?.ToString() ?? message.EventName : message.EventName;
+                var pubSubName = message.ExtraProperties.TryGetValue("PubSubName", out var pubSubObj)
+                    ? pubSubObj?.ToString() ?? eventBusOptions.PubSubName : eventBusOptions.PubSubName;
+
+                activity?.SetTag("event.name", message.EventName);
+                activity?.SetTag("event.topic", topicName);
+                activity?.SetTag("outbox.message_id", message.Id.ToString());
+                activity?.SetTag("outbox.retry_count", message.RetryCount);
+
+                try
                 {
-                    domainMessage.Status = OutboxMessageStatus.Processed;
-                    domainMessage.ProcessedAt = clock.UtcNow;
-                    domainMessage.LastError = null;
-                    domainMessage.LockedBy = null;
-                    domainMessage.LockedUntil = null;
+                    await eventBus.PublishEnvelopeAsync(message.EventData, topicName, pubSubName, cancellationToken);
+                    outcomes.Add(new OutboxPublishOutcome(message.Id, true, null));
+                    activity?.SetStatus(ActivityStatusCode.Ok);
+                    logger.LogInformation("Published outbox message {MessageId}", message.Id);
                 }
-
-                activity?.SetStatus(ActivityStatusCode.Ok);
-                logger.LogInformation("Successfully published outbox message {MessageId}", message.Id);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to publish outbox message {MessageId}", message.Id);
-                RecordException(activity, ex);
-
-                var domainMessage = await dbContext.OutboxMessages.FindAsync(new object[] { message.Id }, cancellationToken);
-                if (domainMessage != null)
+                catch (Exception ex)
                 {
-                    domainMessage.RetryCount++;
-                    domainMessage.LastError = ex.Message.Length > 4000
-                        ? ex.Message.Substring(0, 4000)
-                        : ex.Message;
-                    domainMessage.NextRetryAt = CalculateNextRetryTime(domainMessage.RetryCount);
-                    domainMessage.Status = OutboxMessageStatus.Pending;
-                    domainMessage.LockedBy = null;
-                    domainMessage.LockedUntil = null;
+                    logger.LogError(ex, "Failed to publish outbox message {MessageId}", message.Id);
+                    RecordException(activity, ex);
+                    outcomes.Add(new OutboxPublishOutcome(message.Id, false, ex.Message));
                 }
             }
-        }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
+            if (outcomes.Count == 0) return 0;
+
+            // PHASE 3: outcome yaz — kısa transaction, locked_by guard
+            await using (var updateUow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+            {
+                var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
+                var now = clock.UtcNow;
+
+                foreach (var outcome in outcomes)
+                {
+                    if (outcome.Success)
+                    {
+                        // LockedBy guard: sadece bu worker'ın hâlâ sahip olduğu mesajları güncelle
+                        var affected = await dbContext.OutboxMessages
+                            .Where(m => m.Id == outcome.MessageId
+                                     && m.LockedBy == workerId
+                                     && m.LockedUntil > now)
+                            .ExecuteUpdateAsync(s => s
+                                .SetProperty(m => m.Status, OutboxMessageStatus.Processed)
+                                .SetProperty(m => m.ProcessedAt, now)
+                                .SetProperty(m => m.LockedBy, (string?)null)
+                                .SetProperty(m => m.LockedUntil, (DateTime?)null),
+                                cancellationToken);
+
+                        if (affected == 0)
+                            logger.LogWarning("Outbox message {MessageId} lease expired or taken by another worker; skipping outcome write", outcome.MessageId);
+                    }
+                    else
+                    {
+                        var domainMessage = await dbContext.OutboxMessages
+                            .Where(m => m.Id == outcome.MessageId && m.LockedBy == workerId)
+                            .FirstOrDefaultAsync(cancellationToken);
+
+                        if (domainMessage == null) continue;
+
+                        if (domainMessage.RetryCount + 1 >= options.MaxRetryCount)
+                        {
+                            domainMessage.Status = OutboxMessageStatus.DeadLetter;
+                        }
+                        else
+                        {
+                            domainMessage.RetryCount++;
+                            domainMessage.LastError = outcome.Error?.Length > 4000
+                                ? outcome.Error[..4000] : outcome.Error;
+                            domainMessage.NextRetryAt = CalculateNextRetryTime(domainMessage.RetryCount);
+                            domainMessage.Status = OutboxMessageStatus.Pending;
+                        }
+
+                        domainMessage.LockedBy = null;
+                        domainMessage.LockedUntil = null;
+                    }
+                }
+
+                await updateUow.CommitAsync(cancellationToken);
+            }
+
+            return outcomes.Count;
+        }
     }
 
+    private readonly record struct OutboxPublishOutcome(Guid MessageId, bool Success, string? Error);
+
+    /// <summary>
+    /// Deletes processed messages older than the configured retention period.
+    /// </summary>
     protected virtual async Task CleanupProcessedMessagesAsync(CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(options.Schema)) return;
+
         await using var scope = scopeFactory.CreateAsyncScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<TDbContext>();
+        var sp = scope.ServiceProvider;
+        var currentSchema = sp.GetRequiredService<ICurrentSchema>();
+        var uowManager = sp.GetRequiredService<IUnitOfWorkManager>();
+        var dbContextProvider = sp.GetRequiredService<IAetherDbContextProvider<TDbContext>>();
 
-        var cutoffDate = clock.UtcNow - options.RetentionPeriod;
-
-        var processedMessages = await dbContext.OutboxMessages
-            .Where(m => m.Status == OutboxMessageStatus.Processed && m.ProcessedAt != null && m.ProcessedAt < cutoffDate)
-            .Take(options.BatchSize)
-            .ToListAsync(cancellationToken);
-
-        if (processedMessages.Any())
+        using (currentSchema.Change(options.Schema))
         {
-            logger.LogInformation("Cleaning up {Count} processed outbox messages", processedMessages.Count);
-            dbContext.OutboxMessages.RemoveRange(processedMessages);
-            await dbContext.SaveChangesAsync(cancellationToken);
+            await using var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+
+            var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
+            var cutoffDate = clock.UtcNow - options.RetentionPeriod;
+
+            var processed = await dbContext.OutboxMessages
+                .Where(m => m.Status == OutboxMessageStatus.Processed
+                         && m.ProcessedAt != null
+                         && m.ProcessedAt < cutoffDate)
+                .Take(options.BatchSize)
+                .ToListAsync(cancellationToken);
+
+            if (processed.Count > 0)
+            {
+                logger.LogInformation("Cleaning up {Count} processed outbox messages", processed.Count);
+                dbContext.OutboxMessages.RemoveRange(processed);
+            }
+
+            await uow.CommitAsync(cancellationToken);
         }
     }
 
     private DateTime CalculateNextRetryTime(int retryCount)
     {
-        // Exponential backoff: baseDelay * 2^(retryCount - 1)
         var delay = options.RetryBaseDelay * Math.Pow(2, retryCount - 1);
         return clock.UtcNow.Add(TimeSpan.FromMilliseconds(delay.TotalMilliseconds));
     }
@@ -162,7 +226,6 @@ public class OutboxProcessor<TDbContext>(
     private static void RecordException(Activity? activity, Exception ex)
     {
         if (activity == null) return;
-
         activity.SetStatus(ActivityStatusCode.Error, ex.Message);
         activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
         {

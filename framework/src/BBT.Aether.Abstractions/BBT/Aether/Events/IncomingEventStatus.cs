@@ -21,8 +21,13 @@ public enum IncomingEventStatus
     Processed = 2,
 
     /// <summary>
-    /// Event has been discarded (e.g., exceeded max retry count).
+    /// Intentionally discarded — no handler found or deserialization failed; no retry performed.
     /// </summary>
-    Discarded = 3
+    Discarded = 3,
+
+    /// <summary>
+    /// Maximum retry count exceeded; dead letter. Manual intervention required.
+    /// </summary>
+    DeadLetter = 4
 }
 

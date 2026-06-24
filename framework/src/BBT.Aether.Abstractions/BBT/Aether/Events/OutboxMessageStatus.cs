@@ -18,6 +18,11 @@ public enum OutboxMessageStatus
     /// <summary>
     /// Event has been successfully processed.
     /// </summary>
-    Processed = 2
+    Processed = 2,
+
+    /// <summary>
+    /// Event has exceeded the maximum retry count and will not be retried.
+    /// </summary>
+    DeadLetter = 3
 }
 

@@ -258,5 +258,5 @@ Example trace hierarchy:
 ## Related Features
 
 - [Distributed Cache](../distributed-cache/README.md) - Cache stampede prevention
-- [Background Jobs](../background-job/README.md) - Coordinate job execution
+- [Background Jobs](../background-jobs/README.md) - Coordinate job execution
 - [OpenTelemetry](../telemetry/README.md) - Tracing configuration

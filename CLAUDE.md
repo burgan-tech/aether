@@ -31,7 +31,7 @@ Packages are published automatically via GitHub Actions on `release-v*` branches
 
 ## Architecture
 
-Aether is a .NET 10 SDK/framework targeting enterprise cloud-native applications, published as 11 NuGet packages. The solution file is `framework/BBT.Aether.slnx` (modern `.slnx` format).
+Aether is a .NET 10 SDK/framework targeting enterprise cloud-native applications, published as 13 NuGet packages. The solution file is `framework/BBT.Aether.slnx` (modern `.slnx` format).
 
 ### Layer Dependencies
 
@@ -39,7 +39,9 @@ Aether is a .NET 10 SDK/framework targeting enterprise cloud-native applications
 BBT.Aether.Core           ← no framework dependencies
 BBT.Aether.Abstractions   ← no framework dependencies
 BBT.Aether.Domain         ← Core
-BBT.Aether.Infrastructure ← Domain, Abstractions (+ EF Core, Dapr, Redis)
+BBT.Aether.Infrastructure ← Domain, Abstractions (+ EF Core, Dapr, Redis) — provider-agnostic (no specific DB provider; comes from BBT.Aether.Npgsql/BBT.Aether.SqlServer)
+BBT.Aether.Npgsql         ← Infrastructure (+ Npgsql.EntityFrameworkCore.PostgreSQL) — PostgreSQL provider (full multi-schema)
+BBT.Aether.SqlServer      ← Infrastructure (+ Microsoft.EntityFrameworkCore.SqlServer) — SQL Server provider (single-schema)
 BBT.Aether.Mapperly       ← Core (+ Riok.Mapperly source generator) — default mapper
 BBT.Aether.AutoMapper     ← Core (+ AutoMapper) — opt-in, requires commercial license
 BBT.Aether.Application    ← Domain, Infrastructure

@@ -12,8 +12,13 @@ public static class BackgroundJobModelBuilderExtensions
     /// Configures the BackgroundJobInfo entity with appropriate table name, indexes, and constraints.
     /// </summary>
     /// <param name="builder">The ModelBuilder instance</param>
-    /// <param name="schema">Schema name</param>
     /// <returns>The ModelBuilder for method chaining</returns>
+    /// <remarks>
+    /// By default the table is mapped without an explicit schema and is resolved at runtime via
+    /// <c>SET LOCAL search_path</c> by the UnitOfWork. Pass a non-null <paramref name="schema"/> to bake a
+    /// fixed (system) schema into the model instead — e.g. to keep job/queue infrastructure tables in a
+    /// dedicated schema separate from per-tenant business data.
+    /// </remarks>
     public static ModelBuilder ConfigureBackgroundJob(this ModelBuilder builder, string? schema = null)
     {
         builder.Entity<BackgroundJobInfo>(entity =>
@@ -49,6 +54,27 @@ public static class BackgroundJobModelBuilderExtensions
 
             entity.Property(e => e.LastError)
                 .HasMaxLength(4000);
+
+            entity.Property(e => e.Kind)
+                .HasConversion<int>();
+
+            entity.Property(e => e.MaxRetryCount);
+
+            entity.Property(e => e.NextRetryAt);
+
+            entity.Property(e => e.LastRunAt);
+
+            entity.Property(e => e.RunningSince);
+
+            entity.Property(e => e.RunningToken);
+
+            // Index for the arming poller (query by status + next due time)
+            entity.HasIndex(e => new { e.Status, e.NextRetryAt })
+                .HasDatabaseName("IX_BackgroundJobs_Arming");
+
+            // Index for the visibility-timeout reaper (query Running jobs by claim time)
+            entity.HasIndex(e => new { e.Status, e.RunningSince })
+                .HasDatabaseName("IX_BackgroundJobs_Running");
 
             // Index for processing jobs (query by status)
             entity.HasIndex(e => new { e.Status, e.HandledTime })

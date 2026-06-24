@@ -11,19 +11,17 @@ namespace BBT.Aether.BackgroundJob;
 public interface IJobDispatcher
 {
     /// <summary>
-    /// Dispatches a background job to the appropriate handler based on the handler name.
-    /// Updates job status before and after execution.
+    /// Dispatches a background job to the appropriate handler. The dispatcher resolves the job by its
+    /// name (single read), atomically claims it (Scheduled→Running), runs the handler with no
+    /// dispatcher-owned transaction, and records the outcome in a short unit of work.
     /// </summary>
-    /// <param name="jobId">The unique entity identifier of the job being dispatched.</param>
-    /// <param name="handlerName">The name of the handler that should process this job (e.g., "SendEmail", "GenerateReport").</param>
+    /// <param name="jobName">The unique job name (the scheduler's job identifier) used to resolve the job entity.</param>
     /// <param name="jobPayload">The serialized job payload data to be processed by the handler.</param>
     /// <param name="cancellationToken">Token to monitor for cancellation requests during job processing.</param>
     /// <returns>A task representing the asynchronous job dispatching and processing operation.</returns>
-    /// <exception cref="ArgumentNullException">Thrown when handlerName is null or empty.</exception>
-    /// <exception cref="InvalidOperationException">Thrown when no handler is found for the handler name.</exception>
+    /// <exception cref="ArgumentNullException">Thrown when jobName is null or empty.</exception>
     Task DispatchAsync(
-        Guid jobId,
-        string handlerName,
+        string jobName,
         ReadOnlyMemory<byte> jobPayload,
         CancellationToken cancellationToken = default);
 }

@@ -1,9 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using BBT.Aether.DistributedLock;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using BBT.Aether.Telemetry;
 using BBT.Aether.Uow;
@@ -13,74 +14,70 @@ using Microsoft.Extensions.Logging;
 
 namespace BBT.Aether.Events.Processing;
 
-/// <summary>
-/// Processor that handles pending inbox messages with distributed lock coordination.
-/// Polls for pending events, processes them using registered handlers, and cleans up old processed messages.
-/// </summary>
 public class InboxProcessor<TDbContext>(
     IServiceScopeFactory scopeFactory,
-    IDistributedLockService distributedLockService,
+    WorkerIdentity workerIdentity,
     ILogger<InboxProcessor<TDbContext>> logger,
     AetherInboxOptions options) : IInboxProcessor
     where TDbContext : DbContext, IHasEfCoreInbox
 {
-    private readonly string _workerId = $"{Environment.MachineName}-{Environment.ProcessId}-{Guid.NewGuid():N}";
-
-    /// <inheritdoc />
-    public virtual async Task RunAsync(CancellationToken cancellationToken = default)
+    public virtual async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
         try
         {
-            await ProcessWithLockAsync(cancellationToken);
+            var processed = await ProcessPendingEventsAsync(cancellationToken);
+            await CleanupOldMessagesAsync(cancellationToken);
+            return processed;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error in inbox processing cycle");
+            return 0;
         }
     }
 
-    protected virtual async Task ProcessWithLockAsync(CancellationToken cancellationToken)
+    protected virtual async Task<int> ProcessPendingEventsAsync(CancellationToken cancellationToken)
     {
-        // Process pending events using database-level locking (no distributed lock needed)
-        await ProcessPendingEventsAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(options.Schema))
+        {
+            logger.LogWarning("Inbox processor has no Schema configured; skipping run.");
+            return 0;
+        }
 
-        // Cleanup uses distributed lock to ensure only one processor cleans at a time
-        await CleanupOldMessagesWithLockAsync(cancellationToken);
-    }
+        var totalProcessed = 0;
+        var workerId = $"{workerIdentity.Value}/inbox";
 
-    protected virtual async Task ProcessPendingEventsAsync(CancellationToken cancellationToken)
-    {
         while (!cancellationToken.IsCancellationRequested)
         {
-            // Create a new scope for each batch
             await using var scope = scopeFactory.CreateAsyncScope();
-            var inboxStore = scope.ServiceProvider.GetRequiredService<IInboxStore>();
+            var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+            var unitOfWorkManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+            var leaseStore = scope.ServiceProvider.GetRequiredService<IInboxLeaseStore>();
 
-            // Lease pending events with database-level locking
-            var pendingEvents = await inboxStore.LeaseBatchAsync(
-                options.ProcessingBatchSize,
-                _workerId,
-                options.LeaseDuration,
-                cancellationToken);
-
-            if (!pendingEvents.Any())
+            using (currentSchema.Change(options.Schema!))
             {
-                break;
-            }
-
-            logger.LogInformation("Leased {Count} pending events in the inbox for worker {WorkerId}", 
-                pendingEvents.Count, _workerId);
-
-            foreach (var inboxMessage in pendingEvents)
-            {
-                if (cancellationToken.IsCancellationRequested)
+                IReadOnlyList<InboxMessage> pendingEvents;
+                await using (var leaseUow = unitOfWorkManager.BeginRequiresNew())
                 {
-                    break;
+                    pendingEvents = await leaseStore.LeaseBatchAsync(
+                        options.ProcessingBatchSize, workerId, options.LeaseDuration, cancellationToken);
+                    await leaseUow.CommitAsync(cancellationToken);
                 }
 
-                await ProcessSingleEventAsync(inboxMessage, scope.ServiceProvider, cancellationToken);
+                if (!pendingEvents.Any()) break;
+
+                logger.LogInformation("Leased {Count} inbox events for worker {WorkerId}", pendingEvents.Count, workerId);
+
+                foreach (var inboxMessage in pendingEvents)
+                {
+                    if (cancellationToken.IsCancellationRequested) break;
+                    await ProcessSingleEventAsync(inboxMessage, scope.ServiceProvider, cancellationToken);
+                    totalProcessed++;
+                }
             }
         }
+
+        return totalProcessed;
     }
 
     private async Task ProcessSingleEventAsync(
@@ -89,131 +86,96 @@ public class InboxProcessor<TDbContext>(
         CancellationToken cancellationToken)
     {
         using var activity = InfrastructureActivitySource.Source.StartActivity(
-            "Inbox.Process",
-            ActivityKind.Consumer,
-            Activity.Current?.Context ?? default);
+            "Inbox.Process", ActivityKind.Consumer, Activity.Current?.Context ?? default);
 
         activity?.SetTag("event.id", inboxMessage.Id);
-
-        logger.LogInformation("Start processing incoming event with id = {EventId}", inboxMessage.Id);
+        logger.LogInformation("Processing inbox event {EventId}", inboxMessage.Id);
 
         try
         {
             var unitOfWorkManager = scopedServiceProvider.GetRequiredService<IUnitOfWorkManager>();
-            await using var uow = await unitOfWorkManager.BeginRequiresNew(cancellationToken);
-
             var inboxStore = scopedServiceProvider.GetRequiredService<IInboxStore>();
             var invokerRegistry = scopedServiceProvider.GetRequiredService<IDistributedEventInvokerRegistry>();
             var eventSerializer = scopedServiceProvider.GetRequiredService<IEventSerializer>();
 
-            // Mark as processing
-            await inboxStore.MarkAsProcessingAsync(inboxMessage.Id, cancellationToken);
-            await uow.CommitAsync(cancellationToken);
-
-            // Deserialize envelope to get event name
             var envelope = eventSerializer.Deserialize<CloudEventEnvelope>(inboxMessage.EventData);
             if (envelope == null)
             {
-                logger.LogWarning("Failed to deserialize event {EventId}, marking as failed", inboxMessage.Id);
-                await MarkEventAsFailedAsync(inboxMessage.Id, scopedServiceProvider, cancellationToken);
-                activity?.SetStatus(ActivityStatusCode.Error, "Failed to deserialize event envelope");
+                logger.LogWarning("Failed to deserialize event {EventId}", inboxMessage.Id);
+                await MarkFailedAsync(inboxMessage.Id, inboxStore, unitOfWorkManager, cancellationToken);
+                activity?.SetStatus(ActivityStatusCode.Error, "Deserialization failed");
                 return;
             }
 
             var eventName = envelope.Type;
             var version = envelope.Version ?? 1;
-
             activity?.SetTag("event.name", eventName);
             activity?.SetTag("event.version", version);
 
-            // Lookup invoker from registry
             if (!invokerRegistry.TryGet(eventName, version, out var invoker))
             {
-                logger.LogWarning("No handler registered for event {EventName} v{Version}, marking as failed",
-                    eventName, version);
-                await MarkEventAsFailedAsync(inboxMessage.Id, scopedServiceProvider, cancellationToken);
-                activity?.SetStatus(ActivityStatusCode.Error, $"No handler registered for {eventName} v{version}");
+                logger.LogWarning("No handler for {EventName} v{Version}", eventName, version);
+                await MarkFailedAsync(inboxMessage.Id, inboxStore, unitOfWorkManager, cancellationToken);
+                activity?.SetStatus(ActivityStatusCode.Error, $"No handler for {eventName} v{version}");
                 return;
             }
 
-            // Begin a new UoW for handler execution + marking as processed
-            await using var handlerUow = await unitOfWorkManager.BeginRequiresNew(cancellationToken);
-            
-            // Invoke the handler
+            await using var handlerUow = unitOfWorkManager.BeginRequiresNew();
             await invoker.InvokeAsync(scopedServiceProvider, inboxMessage.EventData, cancellationToken);
-
-            // Mark as processed
             await inboxStore.MarkAsProcessedAsync(inboxMessage.Id, cancellationToken);
-            // Commit handler changes + processed status
             await handlerUow.CommitAsync(cancellationToken);
 
             activity?.SetStatus(ActivityStatusCode.Ok);
-            logger.LogInformation("Successfully processed event {EventId} ({EventName} v{Version})",
-                inboxMessage.Id, eventName, version);
+            logger.LogInformation("Processed event {EventId} ({EventName} v{Version})", inboxMessage.Id, eventName, version);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to process event {EventId}", inboxMessage.Id);
             RecordException(activity, ex);
-            await MarkEventAsFailedAsync(inboxMessage.Id, scopedServiceProvider, cancellationToken);
+            var uowManager = scopedServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+            var store = scopedServiceProvider.GetRequiredService<IInboxStore>();
+            await MarkFailedAsync(inboxMessage.Id, store, uowManager, cancellationToken);
         }
     }
 
-    private async Task MarkEventAsFailedAsync(
+    private static async Task MarkFailedAsync(
         string eventId,
-        IServiceProvider scopedServiceProvider,
+        IInboxStore inboxStore,
+        IUnitOfWorkManager uowManager,
         CancellationToken cancellationToken)
     {
         try
         {
-            var unitOfWorkManager = scopedServiceProvider.GetRequiredService<IUnitOfWorkManager>();
-            await using var uow = await unitOfWorkManager.BeginRequiresNew(cancellationToken);
-
-            var inboxStore = scopedServiceProvider.GetRequiredService<IInboxStore>();
+            await using var uow = uowManager.BeginRequiresNew();
             await inboxStore.MarkAsFailedAsync(eventId, cancellationToken);
-
             await uow.CommitAsync(cancellationToken);
-
-            logger.LogInformation("Event {EventId} marked as discarded", eventId);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to mark event {EventId} as failed", eventId);
+            _ = ex; // batch devam etmeli
         }
-    }
-
-    protected virtual async Task CleanupOldMessagesWithLockAsync(CancellationToken cancellationToken)
-    {
-        // Use distributed lock for cleanup to avoid concurrent cleanup operations
-        await using var lockHandle = await distributedLockService.TryAcquireLockAsync(
-            options.DistributedLockName + ":cleanup",
-            options.LockExpirySeconds,
-            cancellationToken);
-
-        if (lockHandle == null)
-        {
-            logger.LogDebug("Could not acquire distributed lock for cleanup");
-            return;
-        }
-
-        await CleanupOldMessagesAsync(cancellationToken);
     }
 
     protected virtual async Task CleanupOldMessagesAsync(CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(options.Schema)) return;
+
         try
         {
             await using var scope = scopeFactory.CreateAsyncScope();
+            var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+            var unitOfWorkManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
             var inboxStore = scope.ServiceProvider.GetRequiredService<IInboxStore>();
 
-            var deletedCount = await inboxStore.CleanupOldMessagesAsync(
-                options.CleanupBatchSize,
-                options.RetentionPeriod,
-                cancellationToken);
-
-            if (deletedCount > 0)
+            using (currentSchema.Change(options.Schema!))
             {
-                logger.LogInformation("Cleaned up {Count} old inbox messages", deletedCount);
+                await using var uow = unitOfWorkManager.BeginRequiresNew();
+                var deletedCount = await inboxStore.CleanupOldMessagesAsync(
+                    options.CleanupBatchSize, options.RetentionPeriod, cancellationToken);
+                await uow.CommitAsync(cancellationToken);
+
+                if (deletedCount > 0)
+                    logger.LogInformation("Cleaned up {Count} old inbox messages", deletedCount);
             }
         }
         catch (Exception ex)
@@ -225,7 +187,6 @@ public class InboxProcessor<TDbContext>(
     private static void RecordException(Activity? activity, Exception ex)
     {
         if (activity == null) return;
-
         activity.SetStatus(ActivityStatusCode.Error, ex.Message);
         activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
         {

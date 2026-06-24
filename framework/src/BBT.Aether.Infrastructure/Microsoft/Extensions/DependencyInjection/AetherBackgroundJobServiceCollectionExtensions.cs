@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using BBT.Aether.BackgroundJob;
 using BBT.Aether.BackgroundJob.Dapr;
+using BBT.Aether.BackgroundJob.Processing;
 using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.Persistence;
@@ -33,7 +34,8 @@ public static class AetherBackgroundJobServiceCollectionExtensions
     /// </example>
     public static IServiceCollection AddAetherBackgroundJob<TDbContext>(
         this IServiceCollection services,
-        Action<BackgroundJobOptions>? configure = null)
+        Action<BackgroundJobOptions>? configure = null,
+        bool withHostedService = false)
         where TDbContext : DbContext, IHasEfCoreBackgroundJobs
     {
         // Validate that TDbContext implements IHasEfCoreBackgroundJobs
@@ -83,6 +85,17 @@ public static class AetherBackgroundJobServiceCollectionExtensions
             options.Invokers[handlerReg.HandlerName] = invoker;
         }
 
+        // Register the arming poller. It resolves everything per-run via IServiceScopeFactory and only
+        // depends on factory + clock + serializer + options + logger, so a singleton is safe. Mirrors the
+        // outbox processor's singleton lifetime.
+        services.TryAddSingleton<BackgroundJobArmingProcessor>();
+
+        if (withHostedService)
+        {
+            // Drive the poller as a hosted service. Hosted services only run inside a built Host, so unit /
+            // integration tests that construct services directly never auto-start the loop.
+            services.AddHostedService<BackgroundJobArmingHostedService>();    
+        }
         return services;
     }
 

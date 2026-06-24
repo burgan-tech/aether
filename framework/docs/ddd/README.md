@@ -133,9 +133,8 @@ public class Order : AuditedAggregateRoot<Guid>
 ### Automatic Auditing
 
 ```csharp
-// Automatic with AddAetherDbContext
-services.AddAetherDbContext<MyDbContext>(options =>
-    options.UseNpgsql(connectionString));
+// Automatic with AddAetherNpgsql
+services.AddAetherNpgsql<MyDbContext>(connectionString);
 
 // AuditInterceptor automatically:
 // - Sets CreatedAt/CreatedBy on insert

@@ -20,12 +20,12 @@ public class EfCoreRepository<TDbContext, TEntity> : RepositoryBase<TEntity>, IE
     where TDbContext : AetherDbContext<TDbContext>
     where TEntity : class, IEntity
 {
-    private readonly IDbContextProvider<TDbContext> _dbContextProvider;
+    private readonly IAetherDbContextProvider<TDbContext> _dbContextProvider;
     /// <summary>
     /// Initializes a new instance with explicit service provider (recommended).
     /// </summary>
     public EfCoreRepository(
-        IDbContextProvider<TDbContext> dbContextProvider,
+        IAetherDbContextProvider<TDbContext> dbContextProvider,
         IServiceProvider serviceProvider)
         : base(serviceProvider)
     {
@@ -35,7 +35,7 @@ public class EfCoreRepository<TDbContext, TEntity> : RepositoryBase<TEntity>, IE
     /// <summary>
     /// Initializes a new instance relying on AmbientServiceProvider.
     /// </summary>
-    public EfCoreRepository(IDbContextProvider<TDbContext> dbContextProvider)
+    public EfCoreRepository(IAetherDbContextProvider<TDbContext> dbContextProvider)
         : base()
     {
         _dbContextProvider = dbContextProvider;
@@ -60,7 +60,7 @@ public class EfCoreRepository<TDbContext, TEntity> : RepositoryBase<TEntity>, IE
 
     protected virtual Task<TDbContext> GetDbContextAsync()
     {
-        return Task.FromResult(_dbContextProvider.GetDbContext());
+        return _dbContextProvider.GetDbContextAsync();
     }
 
     Task<DbSet<TEntity>> IEfCoreRepository<TEntity>.GetDbSetAsync()
@@ -317,7 +317,7 @@ public class EfCoreRepository<TDbContext, TEntity, TKey> : EfCoreRepository<TDbC
     /// Initializes a new instance with explicit service provider (recommended).
     /// </summary>
     public EfCoreRepository(
-        IDbContextProvider<TDbContext> dbContextProvider,
+        IAetherDbContextProvider<TDbContext> dbContextProvider,
         IServiceProvider serviceProvider)
         : base(dbContextProvider, serviceProvider)
     {
@@ -326,7 +326,7 @@ public class EfCoreRepository<TDbContext, TEntity, TKey> : EfCoreRepository<TDbC
     /// <summary>
     /// Initializes a new instance relying on AmbientServiceProvider.
     /// </summary>
-    public EfCoreRepository(IDbContextProvider<TDbContext> dbContextProvider)
+    public EfCoreRepository(IAetherDbContextProvider<TDbContext> dbContextProvider)
         : base(dbContextProvider)
     {
     }

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
+using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -18,15 +19,15 @@ namespace BBT.Aether.BackgroundJob;
 public class EfCoreJobStore<TDbContext> : IJobStore
     where TDbContext : DbContext, IHasEfCoreBackgroundJobs
 {
-    private readonly TDbContext _dbContext;
+    private readonly IAetherDbContextProvider<TDbContext> _dbContextProvider;
 
     /// <summary>
     /// Initializes a new instance of the EfCoreJobStore class.
     /// </summary>
-    /// <param name="dbContext">The database context for job persistence.</param>
-    public EfCoreJobStore(TDbContext dbContext)
+    /// <param name="dbContextProvider">Provider resolving the schema-bound database context for job persistence.</param>
+    public EfCoreJobStore(IAetherDbContextProvider<TDbContext> dbContextProvider)
     {
-        _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
+        _dbContextProvider = dbContextProvider ?? throw new ArgumentNullException(nameof(dbContextProvider));
     }
 
     /// <inheritdoc/>
@@ -35,28 +36,37 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (jobInfo == null)
             throw new ArgumentNullException(nameof(jobInfo));
 
-        // Check if job already exists
-        var existingJob = await GetByJobNameAsync(jobInfo.JobName, cancellationToken);
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
 
-        if (existingJob != null)
-        {
-            // Update mutable fields only — never touch the key (Id) or creation audit.
-            // Copying Id via SetValues onto a tracked entity throws:
-            // "The property 'BackgroundJobInfo.Id' is part of a key and so cannot be modified".
-            existingJob.ExpressionValue = jobInfo.ExpressionValue;
-            existingJob.Payload = jobInfo.Payload;
-            existingJob.Status = jobInfo.Status;
-            existingJob.HandledTime = jobInfo.HandledTime;
-            existingJob.RetryCount = jobInfo.RetryCount;
-            existingJob.LastError = jobInfo.LastError;
-            existingJob.ExtraProperties = jobInfo.ExtraProperties;
-            existingJob.ModifiedAt = DateTime.UtcNow;
-        }
-        else
+        // Id-based upsert: look up by the entity primary key so the operation works for a job in ANY
+        // status (not just Scheduled/Running) and so every persistent field is preserved on update.
+        var existingJob = await dbContext.BackgroundJobs
+            .FirstOrDefaultAsync(j => j.Id == jobInfo.Id, cancellationToken);
+
+        if (existingJob == null)
         {
             // Insert new job
-            await _dbContext.BackgroundJobs.AddAsync(jobInfo, cancellationToken);
+            await dbContext.BackgroundJobs.AddAsync(jobInfo, cancellationToken);
+            return;
         }
+
+        // Already the tracked instance (mutated in place) — nothing to copy.
+        if (ReferenceEquals(existingJob, jobInfo))
+            return;
+
+        // Update mutable fields only — never touch the key (Id) or creation audit.
+        existingJob.ExpressionValue = jobInfo.ExpressionValue;
+        existingJob.Payload = jobInfo.Payload;
+        existingJob.Status = jobInfo.Status;
+        existingJob.Kind = jobInfo.Kind;
+        existingJob.MaxRetryCount = jobInfo.MaxRetryCount;
+        existingJob.NextRetryAt = jobInfo.NextRetryAt;
+        existingJob.LastRunAt = jobInfo.LastRunAt;
+        existingJob.HandledTime = jobInfo.HandledTime;
+        existingJob.RetryCount = jobInfo.RetryCount;
+        existingJob.LastError = jobInfo.LastError;
+        existingJob.ExtraProperties = jobInfo.ExtraProperties;
+        existingJob.ModifiedAt = DateTime.UtcNow;
 
         // SaveChanges removed - will be flushed by UoW Commit or calling code
     }
@@ -67,7 +77,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
-        return await _dbContext.BackgroundJobs
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
             .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
     }
 
@@ -78,7 +89,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (string.IsNullOrWhiteSpace(jobName))
             throw new ArgumentNullException(nameof(jobName));
 
-        return await _dbContext.BackgroundJobs
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
             .FirstOrDefaultAsync(j => j.JobName == jobName
                     && (j.Status == BackgroundJobStatus.Scheduled || j.Status == BackgroundJobStatus.Running),
                 cancellationToken);
@@ -91,7 +103,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (string.IsNullOrWhiteSpace(handlerName))
             throw new ArgumentNullException(nameof(handlerName));
 
-        return await _dbContext.BackgroundJobs
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
             .Where(j => j.HandlerName == handlerName)
             .ToListAsync(cancellationToken);
     }
@@ -99,7 +112,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     /// <inheritdoc/>
     public async Task<IEnumerable<BackgroundJobInfo>> GetActiveAsync(CancellationToken cancellationToken = default)
     {
-        return await _dbContext.BackgroundJobs
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
             .Where(j => j.Status == BackgroundJobStatus.Scheduled || j.Status == BackgroundJobStatus.Running)
             .ToListAsync(cancellationToken);
     }
@@ -115,7 +129,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
-        var job = await _dbContext.BackgroundJobs
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var job = await dbContext.BackgroundJobs
             .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
 
         if (job == null)
@@ -123,6 +138,9 @@ public class EfCoreJobStore<TDbContext> : IJobStore
 
         job.Status = status;
         job.ModifiedAt = DateTime.UtcNow;
+        // Leaving Running: clear the claim stamp so the visibility-timeout reaper won't re-pick it.
+        job.RunningSince = null;
+        job.RunningToken = null;
         if (handledTime.HasValue)
         {
             job.HandledTime = handledTime.Value;
@@ -134,5 +152,200 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         }
 
         // SaveChanges removed - will be flushed by UoW Commit or calling code
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryTransitionStatusAsync(Guid id, BackgroundJobStatus from, BackgroundJobStatus to,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+
+        // Conditional UPDATE: provider-agnostic optimistic-concurrency guard. The WHERE clause pins
+        // the current status, so concurrent claims race on a single atomic row update — exactly one
+        // wins. Flows through the UoW's shared connection (search_path interceptor sets schema first).
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.Status == from)
+            .ExecuteUpdateAsync(s => s.SetProperty(j => j.Status, to), cancellationToken);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<IReadOnlyList<BackgroundJobInfo>> GetDueForArmingAsync(DateTime nowUtc, int batchSize,
+        CancellationToken cancellationToken = default)
+    {
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
+            .Where(j => j.Status == BackgroundJobStatus.Pending
+                        || (j.Status == BackgroundJobStatus.Retrying && j.NextRetryAt != null && j.NextRetryAt <= nowUtc))
+            .OrderBy(j => j.NextRetryAt)
+            .Take(batchSize)
+            .ToListAsync(cancellationToken);
+    }
+
+    /// <inheritdoc/>
+    public async Task MarkRetryingAsync(Guid id, DateTime nextRetryAtUtc, string? error,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var job = await dbContext.BackgroundJobs
+            .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
+
+        if (job == null)
+            throw new InvalidOperationException($"Job with id '{id}' not found.");
+
+        job.Status = BackgroundJobStatus.Retrying;
+        job.RetryCount++;
+        job.NextRetryAt = nextRetryAtUtc;
+        job.LastError = error;
+        // Leaving Running: clear the claim stamp so the visibility-timeout reaper won't re-pick it.
+        job.RunningSince = null;
+        job.RunningToken = null;
+        // HandledTime intentionally left untouched: a retrying job has not been "handled". It is set
+        // only on a terminal Completed/Failed transition via UpdateStatusAsync.
+        job.ModifiedAt = DateTime.UtcNow;
+
+        // SaveChanges removed - will be flushed by UoW Commit or calling code
+    }
+
+    /// <inheritdoc/>
+    public async Task MarkRecurringRanAsync(Guid id, DateTime ranAtUtc, string? error,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var job = await dbContext.BackgroundJobs
+            .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
+
+        if (job == null)
+            throw new InvalidOperationException($"Job with id '{id}' not found.");
+
+        job.Status = BackgroundJobStatus.Scheduled;
+        job.LastRunAt = ranAtUtc;
+        // Leaving Running: clear the claim stamp so the visibility-timeout reaper won't re-pick it.
+        job.RunningSince = null;
+        job.RunningToken = null;
+        if (error != null)
+        {
+            job.LastError = error;
+            job.RetryCount++;
+        }
+        job.ModifiedAt = DateTime.UtcNow;
+
+        // SaveChanges removed - will be flushed by UoW Commit or calling code
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryClaimAsync(Guid id, DateTime nowUtc, Guid runningToken,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+
+        // Conditional UPDATE: provider-agnostic optimistic-concurrency claim. The WHERE clause pins
+        // Status=Scheduled, so concurrent claims race on a single atomic row update — exactly one wins,
+        // and that winner also stamps RunningSince + RunningToken for the visibility-timeout reaper and
+        // for token-guarded outcome recording.
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.Status == BackgroundJobStatus.Scheduled)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, BackgroundJobStatus.Running)
+                .SetProperty(j => j.RunningSince, nowUtc)
+                .SetProperty(j => j.RunningToken, runningToken), cancellationToken);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryRecordTerminalAsync(Guid id, Guid runningToken,
+        BackgroundJobStatus terminalStatus, DateTime handledTimeUtc, string? error,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.Status == BackgroundJobStatus.Running && j.RunningToken == runningToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, terminalStatus)
+                .SetProperty(j => j.HandledTime, handledTimeUtc)
+                .SetProperty(j => j.LastError, j => error ?? j.LastError)
+                .SetProperty(j => j.RunningSince, (DateTime?)null)
+                .SetProperty(j => j.RunningToken, (Guid?)null)
+                .SetProperty(j => j.ModifiedAt, now), cancellationToken);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryReturnToScheduledAsync(Guid id, Guid runningToken, DateTime ranAtUtc,
+        string? error, CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.Status == BackgroundJobStatus.Running && j.RunningToken == runningToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, BackgroundJobStatus.Scheduled)
+                .SetProperty(j => j.LastRunAt, ranAtUtc)
+                .SetProperty(j => j.LastError, j => error ?? j.LastError)
+                .SetProperty(j => j.RunningSince, (DateTime?)null)
+                .SetProperty(j => j.RunningToken, (Guid?)null)
+                .SetProperty(j => j.ModifiedAt, now), cancellationToken);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryMarkRetryingAsync(Guid id, Guid runningToken, DateTime nextRetryAtUtc,
+        string? error, CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.Status == BackgroundJobStatus.Running && j.RunningToken == runningToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, BackgroundJobStatus.Retrying)
+                .SetProperty(j => j.RetryCount, j => j.RetryCount + 1)
+                .SetProperty(j => j.NextRetryAt, nextRetryAtUtc)
+                .SetProperty(j => j.LastError, error)
+                .SetProperty(j => j.RunningSince, (DateTime?)null)
+                .SetProperty(j => j.RunningToken, (Guid?)null)
+                .SetProperty(j => j.ModifiedAt, now), cancellationToken);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<IReadOnlyList<BackgroundJobInfo>> GetStaleRunningAsync(DateTime cutoffUtc, int batchSize,
+        CancellationToken cancellationToken = default)
+    {
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
+            .Where(j => j.Status == BackgroundJobStatus.Running && j.RunningSince != null && j.RunningSince < cutoffUtc)
+            .OrderBy(j => j.RunningSince)
+            .Take(batchSize)
+            .ToListAsync(cancellationToken);
     }
 }

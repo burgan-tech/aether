@@ -10,8 +10,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Core services
 builder.Services.AddAetherCore(options => options.ApplicationName = "MyApp");
-builder.Services.AddAetherDbContext<MyDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+builder.Services.AddAetherNpgsql<MyDbContext>(builder.Configuration.GetConnectionString("Default"));
 
 // Event bus
 builder.Services.AddAetherEventBus(options =>
@@ -70,7 +69,7 @@ app.Run();
 |---------|-------------|
 | [Distributed Cache](distributed-cache/README.md) | Redis, Dapr state store abstraction |
 | [Distributed Lock](distributed-lock/README.md) | Coordinated locking across instances |
-| [Background Jobs](background-job/README.md) | Scheduled jobs with Dapr integration |
+| [Background Jobs](background-jobs/README.md) | Scheduled jobs with Dapr integration |
 
 ### Cross-Cutting
 

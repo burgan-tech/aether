@@ -27,6 +27,8 @@ public class BackgroundJobInfo : FullAuditedEntity<Guid>, IHasExtraProperties
         JobName = jobName;
         ExtraProperties = new ExtraPropertyDictionary();
         CreatedAt =  DateTime.UtcNow;
+        Status = BackgroundJobStatus.Pending;
+        NextRetryAt = CreatedAt;
     }
 
     /// <summary>
@@ -58,7 +60,8 @@ public class BackgroundJobInfo : FullAuditedEntity<Guid>, IHasExtraProperties
     /// </summary>
     public BackgroundJobStatus Status { get; set; } = BackgroundJobStatus.Scheduled;
 
-    public bool IsActive => Status == BackgroundJobStatus.Scheduled || Status == BackgroundJobStatus.Running;
+    public bool IsActive => Status is BackgroundJobStatus.Pending or BackgroundJobStatus.Scheduled
+        or BackgroundJobStatus.Running or BackgroundJobStatus.Retrying;
 
     /// <summary>
     /// Gets or sets when the job was handled (completed or failed).
@@ -74,6 +77,29 @@ public class BackgroundJobInfo : FullAuditedEntity<Guid>, IHasExtraProperties
     /// Gets or sets the last error message if the job failed.
     /// </summary>
     public string? LastError { get; set; }
+
+    /// <summary>Whether this job fires once or repeats on a schedule.</summary>
+    public JobKind Kind { get; set; } = JobKind.OneShot;
+
+    /// <summary>Maximum framework retry attempts for one-shot jobs before the job becomes terminally Failed.</summary>
+    public int MaxRetryCount { get; set; }
+
+    /// <summary>UTC time at which the job is next due to be armed in the scheduler (initial arming or retry). Null when not awaiting arming.</summary>
+    public DateTime? NextRetryAt { get; set; }
+
+    /// <summary>UTC time of the most recent successful run (primarily for recurring jobs). Informational.</summary>
+    public DateTime? LastRunAt { get; set; }
+
+    /// <summary>UTC time the job was last claimed into the Running state (stamped by the atomic claim).
+    /// Used by the visibility-timeout reaper to detect and recover crashed/stuck executions. Null when
+    /// the job is not Running.</summary>
+    public DateTime? RunningSince { get; set; }
+
+    /// <summary>Opaque token stamped by the atomic claim alongside <see cref="RunningSince"/>. Identifies
+    /// a specific Running lease so that outcome recording (by the dispatcher) and reaping (by the poller)
+    /// can be made conditional: only the holder of the current token may transition the job out of Running.
+    /// Null when the job is not Running.</summary>
+    public Guid? RunningToken { get; set; }
 
     /// <summary>
     /// Gets or sets additional metadata associated with the job.
