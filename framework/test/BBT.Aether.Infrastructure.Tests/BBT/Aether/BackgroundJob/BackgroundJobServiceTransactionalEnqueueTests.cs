@@ -17,9 +17,12 @@ using Xunit;
 namespace BBT.Aether.BackgroundJob;
 
 /// <summary>
-/// Tests the enqueue paths of <see cref="BackgroundJobService"/> after the arming-poller refactor:
-/// enqueue writes ONLY a <see cref="BackgroundJobStatus.Pending"/> row (atomically, inside the caller's
-/// UoW on the ambient path) and NEVER calls the scheduler — the arming poller arms the row after commit.
+/// Tests the enqueue paths of <see cref="BackgroundJobService"/> after the arming-poller refactor.
+/// Default path (directly:false): persists a <see cref="BackgroundJobStatus.Pending"/> row atomically
+/// inside the caller's UoW and NEVER calls the scheduler — the arming poller arms it after commit.
+/// Direct path (directly:true): persists a <see cref="BackgroundJobStatus.Scheduled"/> row so the
+/// arming poller cannot race, then calls the scheduler immediately (or on UoW commit for the ambient
+/// sub-path). On scheduler failure the row is rolled back to Pending for the arming poller to retry.
 /// </summary>
 public class BackgroundJobServiceTransactionalEnqueueTests
 {

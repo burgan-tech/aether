@@ -162,7 +162,7 @@ public sealed class BackgroundJobService(
             await jobStore.SaveAsync(jobInfo, cancellationToken);
             if (directly)
                 ambient.OnCompleted(_ => ArmNowAsync(handlerName, jobName, schedule, payloadBytes,
-                    failurePolicyOptions, effectiveJobId, cancellationToken));
+                    failurePolicyOptions, effectiveJobId, CancellationToken.None));
             logger.LogInformation(
                 "Enqueued Pending job '{HandlerName}'/'{JobName}' into ambient UoW. Id: {Id}",
                 handlerName, jobName, effectiveJobId);
@@ -190,8 +190,8 @@ public sealed class BackgroundJobService(
             await ArmNowAsync(handlerName, jobName, schedule, payloadBytes, failurePolicyOptions,
                 effectiveJobId, cancellationToken);
         logger.LogInformation(
-            "Enqueued Pending job '{HandlerName}'/'{JobName}'. Id: {Id}",
-            handlerName, jobName, effectiveJobId);
+            "Enqueued {Status} job '{HandlerName}'/'{JobName}'. Id: {Id}",
+            jobInfo.Status, handlerName, jobName, effectiveJobId);
         activity?.SetStatus(ActivityStatusCode.Ok);
         return effectiveJobId;
     }
@@ -212,18 +212,26 @@ public sealed class BackgroundJobService(
             logger.LogWarning(ex,
                 "Immediate (directly) arm failed for job '{JobName}'; rolling back to Pending for arming poller",
                 jobName);
+            IUnitOfWork? rollbackUow = null;
             try
             {
-                await using var uow = uowManager.Begin(
+                rollbackUow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
                 await jobStore.TryTransitionStatusAsync(jobId, BackgroundJobStatus.Scheduled, BackgroundJobStatus.Pending, ct);
-                await uow.CommitAsync(ct);
+                await rollbackUow.CommitAsync(ct);
             }
             catch (Exception rollbackEx)
             {
                 logger.LogError(rollbackEx,
                     "Failed to roll back job '{JobName}' to Pending; arming poller will arm it on next visibility-timeout pass",
                     jobName);
+                if (rollbackUow != null)
+                    await rollbackUow.RollbackAsync(ct);
+            }
+            finally
+            {
+                if (rollbackUow is IAsyncDisposable asyncDisposable)
+                    await asyncDisposable.DisposeAsync();
             }
         }
     }
