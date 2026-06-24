@@ -255,6 +255,24 @@ public sealed class BackgroundJobService(
 
         logger.LogInformation("Updating job with entity id '{Id}' to new schedule '{NewSchedule}'", id, newSchedule);
 
+        if (uowManager.Current is { } ambient)
+        {
+            var jobInfo = await jobStore.GetAsync(id, cancellationToken);
+            if (jobInfo == null)
+                throw new InvalidOperationException($"Job with id '{id}' not found.");
+
+            activity?.SetTag("job.handler_name", jobInfo.HandlerName);
+            activity?.SetTag("job.name", jobInfo.JobName);
+            jobInfo.ExpressionValue = newSchedule;
+            jobInfo.Kind = InferKind(newSchedule);
+            jobInfo.Status = BackgroundJobStatus.Pending;
+            jobInfo.NextRetryAt = clock.UtcNow;
+            await jobStore.SaveAsync(jobInfo, cancellationToken);
+            logger.LogInformation("Successfully updated job with entity id '{Id}'", id);
+            activity?.SetStatus(ActivityStatusCode.Ok);
+            return;
+        }
+
         await using var uow = uowManager.Begin(
             new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
         try
@@ -312,7 +330,28 @@ public sealed class BackgroundJobService(
 
         logger.LogInformation("Deleting job with entity id '{Id}'", id);
 
-        await using var uow = uowManager.Begin();
+        if (uowManager.Current is { })
+        {
+            var jobInfo = await jobStore.GetAsync(id, cancellationToken);
+            if (jobInfo == null)
+            {
+                logger.LogWarning("Job with entity id '{Id}' not found", id);
+                activity?.SetStatus(ActivityStatusCode.Ok);
+                return false;
+            }
+
+            activity?.SetTag("job.handler_name", jobInfo.HandlerName);
+            activity?.SetTag("job.name", jobInfo.JobName);
+            await jobScheduler.DeleteAsync(jobInfo.HandlerName, jobInfo.JobName, cancellationToken);
+            await jobStore.UpdateStatusAsync(id, BackgroundJobStatus.Cancelled, clock.UtcNow,
+                cancellationToken: cancellationToken);
+            logger.LogInformation("Successfully deleted job with entity id '{Id}'", id);
+            activity?.SetStatus(ActivityStatusCode.Ok);
+            return true;
+        }
+
+        await using var uow = uowManager.Begin(
+            new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
         try
         {
             // Load job from store
