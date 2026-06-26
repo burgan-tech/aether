@@ -179,8 +179,9 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     {
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         return await dbContext.BackgroundJobs
-            .Where(j => j.Status == BackgroundJobStatus.Pending
-                        || (j.Status == BackgroundJobStatus.Retrying && j.NextRetryAt != null && j.NextRetryAt <= nowUtc))
+            .Where(j => (j.Status == BackgroundJobStatus.Pending
+                         || (j.Status == BackgroundJobStatus.Retrying && j.NextRetryAt != null && j.NextRetryAt <= nowUtc))
+                        && (j.ArmingToken == null || j.ArmingUntil < nowUtc))
             .OrderBy(j => j.NextRetryAt)
             .Take(batchSize)
             .ToListAsync(cancellationToken);

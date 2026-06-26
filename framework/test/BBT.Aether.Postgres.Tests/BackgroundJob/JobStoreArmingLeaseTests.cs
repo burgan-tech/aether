@@ -298,4 +298,39 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
         reloadedFresh.ShouldNotBeNull();
         reloadedFresh!.ArmingToken.ShouldBe(freshToken);
     }
+
+    [Fact]
+    public async Task GetDueForArming_excludes_actively_claimed_rows()
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+
+        var claimedId = Guid.NewGuid();
+        var freeId = Guid.NewGuid();
+
+        // This job has a live arming claim (should be excluded)
+        var claimed = NewJob(claimedId, BackgroundJobStatus.Pending,
+            armingToken: Guid.NewGuid(), armingUntil: DateTime.UtcNow.AddSeconds(30));
+        claimed.NextRetryAt = DateTime.UtcNow.AddMinutes(-1);
+
+        // This job is free (should be returned)
+        var free = NewJob(freeId, BackgroundJobStatus.Pending);
+        free.NextRetryAt = DateTime.UtcNow.AddMinutes(-1);
+
+        await SeedAsync(sp, claimed, free);
+
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        using (ssp.GetRequiredService<ICurrentSchema>().Change(_schema))
+        {
+            await using var uow = ssp.GetRequiredService<IUnitOfWorkManager>().Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+            var due = await ssp.GetRequiredService<IJobStore>()
+                .GetDueForArmingAsync(DateTime.UtcNow, 100);
+            await uow.CommitAsync();
+
+            due.Count.ShouldBe(1);
+            due[0].Id.ShouldBe(freeId);
+        }
+    }
 }
