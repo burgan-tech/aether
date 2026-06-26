@@ -318,6 +318,11 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
 
         allScheduledJobNames.Count.ShouldBe(4, "all 4 jobs must be armed exactly once across both pods");
         allScheduledJobNames.Distinct().Count().ShouldBe(4, "no job must be armed by both pods");
+
+        // Verify every seeded job was armed (not just "4 unique jobs")
+        var expectedNames = ids.Select(id => "job-" + id.ToString("N")).ToHashSet();
+        var actualNames = allScheduledJobNames.ToHashSet();
+        actualNames.SetEquals(expectedNames).ShouldBeTrue("every seeded job must be armed exactly once");
     }
 
     [Fact]
