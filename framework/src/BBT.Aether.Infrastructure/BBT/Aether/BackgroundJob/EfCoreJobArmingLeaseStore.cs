@@ -45,6 +45,7 @@ public class EfCoreJobArmingLeaseStore<TDbContext>(
             .Take(batchSize)
             .ToListAsync(cancellationToken);
 
+        // workerId is not persisted to the row — it is available for logging/diagnostics only.
         var claims = new List<BackgroundJobArmingClaim>(candidates.Count);
         foreach (var job in candidates)
         {
@@ -54,7 +55,8 @@ public class EfCoreJobArmingLeaseStore<TDbContext>(
                             && (j.ArmingToken == null || j.ArmingUntil < now))
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(j => j.ArmingToken, armingToken)
-                    .SetProperty(j => j.ArmingUntil, armingUntil),
+                    .SetProperty(j => j.ArmingUntil, armingUntil)
+                    .SetProperty(j => j.ModifiedAt, now),
                     cancellationToken);
 
             if (affected > 0)

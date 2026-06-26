@@ -53,9 +53,9 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
 
         var dbTransaction = dbContext.Database.CurrentTransaction?.GetDbTransaction();
 
-        // When the entity has no baked-in schema (search_path mode), issue SET LOCAL search_path
-        // so that the raw ADO.NET command lands in the correct schema. EF's command interceptor
-        // normally does this for EF commands; we replicate it here for the raw UPDATE … RETURNING.
+        // SET LOCAL is transaction-scoped; Phase 1 always runs inside IsTransactional=true, so
+        // dbTransaction is guaranteed non-null here. If called outside a transaction SET LOCAL
+        // would silently widen to SET SESSION (connection pool leak) — callers must not do that.
         if (string.IsNullOrEmpty(schema) && !string.IsNullOrEmpty(currentSchema.Name))
         {
             await using var setCmd = connection.CreateCommand();
@@ -66,11 +66,13 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
 
         await using var command = connection.CreateCommand();
         command.Transaction = dbTransaction;
+        // workerId is not persisted to the row — it is available for logging/diagnostics only.
         command.CommandText = $"""
             UPDATE {fullTableName}
             SET
-                "ArmingToken" = @armingToken,
-                "ArmingUntil" = @armingUntil
+                "ArmingToken"  = @armingToken,
+                "ArmingUntil"  = @armingUntil,
+                "ModifiedAt"   = @now
             WHERE "Id" IN (
                 SELECT "Id"
                 FROM {fullTableName}

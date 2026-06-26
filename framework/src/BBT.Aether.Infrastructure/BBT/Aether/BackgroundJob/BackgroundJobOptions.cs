@@ -55,7 +55,8 @@ public class BackgroundJobOptions
     public TimeSpan VisibilityTimeout { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>How long an arming claim is held before the reaper treats the claiming pod as crashed
-    /// and resets the claim to Pending. Must be comfortably longer than one arming pass.</summary>
+    /// and clears its arming fields (ArmingToken/ArmingUntil) without changing Status.
+    /// Must be comfortably longer than one arming pass.</summary>
     public TimeSpan ArmingLeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
 }
 

@@ -183,6 +183,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
                          || (j.Status == BackgroundJobStatus.Retrying && j.NextRetryAt != null && j.NextRetryAt <= nowUtc))
                         && (j.ArmingToken == null || j.ArmingUntil < nowUtc))
             .OrderBy(j => j.NextRetryAt)
+            .ThenBy(j => j.Id)
             .Take(batchSize)
             .ToListAsync(cancellationToken);
     }
