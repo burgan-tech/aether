@@ -354,12 +354,14 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         BackgroundJobStatus to, CancellationToken cancellationToken = default)
     {
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var now = DateTime.UtcNow;
         var affected = await dbContext.BackgroundJobs
             .Where(j => j.Id == id && j.ArmingToken == armingToken)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(j => j.Status, to)
                 .SetProperty(j => j.ArmingToken, (Guid?)null)
-                .SetProperty(j => j.ArmingUntil, (DateTime?)null),
+                .SetProperty(j => j.ArmingUntil, (DateTime?)null)
+                .SetProperty(j => j.ModifiedAt, now),
                 cancellationToken);
         return affected > 0;
     }
@@ -379,12 +381,14 @@ public class EfCoreJobStore<TDbContext> : IJobStore
 
         if (expiredIds.Count == 0) return 0;
 
+        var utcNow = DateTime.UtcNow;
         return await dbContext.BackgroundJobs
             .Where(j => expiredIds.Contains(j.Id) && j.ArmingToken != null && j.ArmingUntil < now)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(j => j.Status, BackgroundJobStatus.Pending)
                 .SetProperty(j => j.ArmingToken, (Guid?)null)
-                .SetProperty(j => j.ArmingUntil, (DateTime?)null),
+                .SetProperty(j => j.ArmingUntil, (DateTime?)null)
+                .SetProperty(j => j.ModifiedAt, utcNow),
                 cancellationToken);
     }
 }

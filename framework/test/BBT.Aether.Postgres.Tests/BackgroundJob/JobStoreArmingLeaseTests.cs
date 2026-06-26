@@ -146,6 +146,7 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
         var armingUntil = DateTime.UtcNow.AddSeconds(30);
         await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Pending, armingToken: token, armingUntil: armingUntil));
 
+        var before = DateTime.UtcNow;
         bool result;
         await using (var scope = sp.CreateAsyncScope())
         {
@@ -162,6 +163,7 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
                 await uow.CommitAsync();
             }
         }
+        var after = DateTime.UtcNow;
 
         result.ShouldBeTrue();
 
@@ -170,6 +172,9 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
         reloaded.ArmingToken.ShouldBeNull();
         reloaded.ArmingUntil.ShouldBeNull();
+        reloaded.ModifiedAt.ShouldNotBeNull();
+        reloaded.ModifiedAt!.Value.ShouldBeGreaterThanOrEqualTo(before);
+        reloaded.ModifiedAt.Value.ShouldBeLessThanOrEqualTo(after.AddSeconds(2));
     }
 
     [Fact]
