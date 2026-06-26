@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.EntityFrameworkCore;
@@ -297,6 +298,61 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
         var reloadedFresh = await ReloadAsync(sp, freshId);
         reloadedFresh.ShouldNotBeNull();
         reloadedFresh!.ArmingToken.ShouldBe(freshToken);
+    }
+
+    private IServiceProvider BuildProviderWithLeaseStore()
+    {
+        var services = new ServiceCollection();
+        services.AddAetherCore(_ => { });
+        services.AddAetherNpgsql<TestJobDbContext>(fx.ConnectionString);
+        services.AddScoped<IJobStore, global::BBT.Aether.BackgroundJob.EfCoreJobStore<TestJobDbContext>>();
+        // Register EfCore fallback explicitly (Npgsql override added in Task 10)
+        services.AddScoped<IJobArmingLeaseStore,
+            global::BBT.Aether.BackgroundJob.EfCoreJobArmingLeaseStore<TestJobDbContext>>();
+        return services.BuildServiceProvider();
+    }
+
+    [Fact]
+    public async Task EfCoreLeaseStore_claims_due_jobs_and_sets_token()
+    {
+        var sp = BuildProviderWithLeaseStore();
+        await ArrangeSchemaAsync(sp);
+
+        var pendingId = Guid.NewGuid();
+        var futureId = Guid.NewGuid();
+
+        var pendingJob = NewJob(pendingId, BackgroundJobStatus.Pending);
+        pendingJob.NextRetryAt = DateTime.UtcNow.AddMinutes(-1);
+
+        var futureJob = NewJob(futureId, BackgroundJobStatus.Retrying);
+        futureJob.NextRetryAt = DateTime.UtcNow.AddMinutes(10);
+
+        await SeedAsync(sp, pendingJob);
+        await SeedAsync(sp, futureJob);
+
+        IReadOnlyList<BackgroundJobArmingClaim> claims;
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var ssp = scope.ServiceProvider;
+            using (ssp.GetRequiredService<ICurrentSchema>().Change(_schema))
+            {
+                await using var uow = ssp.GetRequiredService<IUnitOfWorkManager>().Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                claims = await ssp.GetRequiredService<IJobArmingLeaseStore>()
+                    .ClaimBatchAsync(100, "worker-1", TimeSpan.FromSeconds(30));
+                await uow.CommitAsync();
+            }
+        }
+
+        claims.Count.ShouldBe(1);
+        claims[0].Job.Id.ShouldBe(pendingId);
+        claims[0].OriginalStatus.ShouldBe(BackgroundJobStatus.Pending);
+        claims[0].ArmingToken.ShouldNotBe(Guid.Empty);
+
+        var reloaded = await ReloadAsync(sp, pendingId);
+        reloaded!.ArmingToken.ShouldNotBeNull();
+        reloaded.ArmingUntil.ShouldNotBeNull();
+        reloaded.ArmingUntil!.Value.ShouldBeGreaterThan(DateTime.UtcNow);
     }
 
     [Fact]
