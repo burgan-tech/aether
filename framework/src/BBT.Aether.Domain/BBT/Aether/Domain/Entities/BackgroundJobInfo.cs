@@ -101,6 +101,15 @@ public class BackgroundJobInfo : FullAuditedEntity<Guid>, IHasExtraProperties
     /// Null when the job is not Running.</summary>
     public Guid? RunningToken { get; set; }
 
+    /// <summary>Opaque token set by the arming lease store when this job is claimed for arming.
+    /// Null when the job is not currently being armed. Used by <see cref="IJobStore.TryTransitionFromArmingAsync"/>
+    /// to guard confirm/abort transitions.</summary>
+    public Guid? ArmingToken { get; set; }
+
+    /// <summary>UTC lease expiry for the arming claim. The arming-claim reaper resets rows whose
+    /// <see cref="ArmingToken"/> is non-null and this value is in the past.</summary>
+    public DateTime? ArmingUntil { get; set; }
+
     /// <summary>
     /// Gets or sets additional metadata associated with the job.
     /// Common metadata includes domain, flow name, and instance ID information.
