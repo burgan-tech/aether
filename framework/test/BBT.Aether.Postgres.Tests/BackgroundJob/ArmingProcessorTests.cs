@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -277,6 +278,46 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
         var reloaded = await ReloadAsync(sp, id);
         reloaded.ShouldNotBeNull();
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Pending);
+    }
+
+    [Fact]
+    public async Task Two_concurrent_pods_arm_each_job_exactly_once()
+    {
+        // Two BackgroundJobArmingProcessor instances sharing the same PostgreSQL DB + schema simulate
+        // two pods running concurrently. NpgsqlJobArmingLeaseStore uses FOR UPDATE SKIP LOCKED so each
+        // pod gets a disjoint batch: no job should be armed by both pods.
+        var schedulerA = new FakeJobScheduler();
+        var schedulerB = new FakeJobScheduler();
+        var spA = BuildProvider(schedulerA);
+        var spB = BuildProvider(schedulerB);
+
+        // ArrangeSchemaAsync creates the schema; spB uses the same connection string, so it sees the
+        // same schema. Only one call to ArrangeSchemaAsync is needed — CREATE SCHEMA would fail if
+        // called twice for the same name.
+        await ArrangeSchemaAsync(spA);
+
+        var ids = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+        foreach (var id in ids)
+        {
+            var job = NewJob(id, BackgroundJobStatus.Pending,
+                nextRetryAt: DateTime.UtcNow.AddMinutes(-1));
+            await SeedAsync(spA, job);
+        }
+
+        var processorA = BuildProcessor(spA, out _, _schema);
+        var processorB = BuildProcessor(spB, out _, _schema);
+
+        // Both pods run concurrently; SKIP LOCKED ensures disjoint claims.
+        await Task.WhenAll(processorA.RunAsync(), processorB.RunAsync());
+
+        var allScheduledJobNames = schedulerA.ScheduleCalls.Select(c => c.jobName)
+            .Concat(schedulerA.ScheduleOneShotCalls.Select(c => c.jobName))
+            .Concat(schedulerB.ScheduleCalls.Select(c => c.jobName))
+            .Concat(schedulerB.ScheduleOneShotCalls.Select(c => c.jobName))
+            .ToList();
+
+        allScheduledJobNames.Count.ShouldBe(4, "all 4 jobs must be armed exactly once across both pods");
+        allScheduledJobNames.Distinct().Count().ShouldBe(4, "no job must be armed by both pods");
     }
 
     [Fact]
