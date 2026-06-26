@@ -53,6 +53,10 @@ public static class AetherNpgsqlServiceCollectionExtensions
             services.TryAddScoped(typeof(IJobArmingLeaseStore),
                 typeof(EfCoreJobArmingLeaseStore<>).MakeGenericType(typeof(TDbContext)));
 
+        if (typeof(IHasEfCoreBackgroundJobs).IsAssignableFrom(typeof(TDbContext)))
+            services.AddScoped(typeof(IJobArmingLeaseStore),
+                typeof(NpgsqlJobArmingLeaseStore<>).MakeGenericType(typeof(TDbContext)));
+
         return services;
     }
 }
