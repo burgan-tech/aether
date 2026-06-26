@@ -386,7 +386,6 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         return await dbContext.BackgroundJobs
             .Where(j => expiredIds.Contains(j.Id) && j.ArmingToken != null && j.ArmingUntil < now)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(j => j.Status, BackgroundJobStatus.Pending)
                 .SetProperty(j => j.ArmingToken, (Guid?)null)
                 .SetProperty(j => j.ArmingUntil, (DateTime?)null)
                 .SetProperty(j => j.ModifiedAt, utcNow),

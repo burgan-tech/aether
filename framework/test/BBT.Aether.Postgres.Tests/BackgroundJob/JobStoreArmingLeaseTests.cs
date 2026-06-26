@@ -411,6 +411,48 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
     }
 
     [Fact]
+    public async Task ResetExpiredArmingClaims_preserves_retrying_status()
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        var expiredToken = Guid.NewGuid();
+
+        // Seed a Retrying job with an expired arming claim
+        var job = NewJob(id, BackgroundJobStatus.Retrying,
+            armingToken: expiredToken, armingUntil: DateTime.UtcNow.AddSeconds(-5));
+        job.NextRetryAt = DateTime.UtcNow.AddMinutes(-1);
+
+        await SeedAsync(sp, job);
+
+        // Act: reset expired claims
+        int reset;
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var ssp = scope.ServiceProvider;
+            using (ssp.GetRequiredService<ICurrentSchema>().Change(_schema))
+            {
+                await using var uow = ssp.GetRequiredService<IUnitOfWorkManager>().Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                reset = await ssp.GetRequiredService<IJobStore>()
+                    .ResetExpiredArmingClaimsAsync(DateTime.UtcNow, 100);
+                await uow.CommitAsync();
+            }
+        }
+
+        reset.ShouldBe(1);
+
+        // Assert: Status stays Retrying, arming fields cleared
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded.ShouldNotBeNull();
+        reloaded!.ArmingToken.ShouldBeNull();
+        reloaded.ArmingUntil.ShouldBeNull();
+        reloaded.Status.ShouldBe(BackgroundJobStatus.Retrying, "expired claim must not change status");
+        reloaded.NextRetryAt.ShouldNotBeNull("NextRetryAt must be preserved");
+    }
+
+    [Fact]
     public async Task GetDueForArming_excludes_actively_claimed_rows()
     {
         var sp = BuildProvider();

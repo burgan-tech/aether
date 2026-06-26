@@ -222,9 +222,11 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Bulk-resets rows whose <see cref="BackgroundJobInfo.ArmingToken"/> is non-null and
-    /// <see cref="BackgroundJobInfo.ArmingUntil"/> &lt; <paramref name="now"/> back to
-    /// <see cref="BackgroundJobStatus.Pending"/>. Called by the arming-claim reaper.
+    /// Clears the arming claim fields (<see cref="BackgroundJobInfo.ArmingToken"/> and
+    /// <see cref="BackgroundJobInfo.ArmingUntil"/>) for rows whose arming claim has expired
+    /// (<see cref="BackgroundJobInfo.ArmingUntil"/> &lt; <paramref name="now"/>), restoring the
+    /// row to its pre-claim state. <see cref="BackgroundJobInfo.Status"/> is intentionally left
+    /// unchanged — the claim never modified it. Called by the arming-claim reaper.
     /// </summary>
     /// <returns>Number of rows reset.</returns>
     Task<int> ResetExpiredArmingClaimsAsync(
