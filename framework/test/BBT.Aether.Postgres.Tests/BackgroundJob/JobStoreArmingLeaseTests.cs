@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.EntityFrameworkCore;
@@ -353,6 +354,60 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
         reloaded!.ArmingToken.ShouldNotBeNull();
         reloaded.ArmingUntil.ShouldNotBeNull();
         reloaded.ArmingUntil!.Value.ShouldBeGreaterThan(DateTime.UtcNow);
+    }
+
+    private IServiceProvider BuildProviderWithNpgsqlLeaseStore()
+    {
+        var services = new ServiceCollection();
+        services.AddAetherCore(_ => { });
+        services.AddAetherNpgsql<TestJobDbContext>(fx.ConnectionString);
+        services.AddScoped<IJobStore, global::BBT.Aether.BackgroundJob.EfCoreJobStore<TestJobDbContext>>();
+        // Explicitly register NpgsqlJobArmingLeaseStore to test the Npgsql implementation directly
+        services.AddScoped<IJobArmingLeaseStore,
+            global::BBT.Aether.BackgroundJob.NpgsqlJobArmingLeaseStore<TestJobDbContext>>();
+        return services.BuildServiceProvider();
+    }
+
+    private async Task<List<BackgroundJobArmingClaim>> ClaimBatchConcurrently(
+        IServiceProvider sp, string workerId, int batchSize)
+    {
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        using (ssp.GetRequiredService<ICurrentSchema>().Change(_schema))
+        {
+            await using var uow = ssp.GetRequiredService<IUnitOfWorkManager>().Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+            var claims = (await ssp.GetRequiredService<IJobArmingLeaseStore>()
+                .ClaimBatchAsync(batchSize, workerId, TimeSpan.FromSeconds(30))).ToList();
+            await uow.CommitAsync();
+            return claims;
+        }
+    }
+
+    [Fact]
+    public async Task NpgsqlLeaseStore_two_concurrent_pods_claim_disjoint_batches()
+    {
+        var sp = BuildProviderWithNpgsqlLeaseStore();
+        await ArrangeSchemaAsync(sp);
+
+        var ids = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+        foreach (var id in ids)
+        {
+            var job = NewJob(id, BackgroundJobStatus.Pending);
+            job.NextRetryAt = DateTime.UtcNow.AddMinutes(-1);
+            await SeedAsync(sp, job);
+        }
+
+        // Simulate two pods racing to claim from the pool of 4 jobs
+        var podATask = ClaimBatchConcurrently(sp, "pod-a", batchSize: 2);
+        var podBTask = ClaimBatchConcurrently(sp, "pod-b", batchSize: 2);
+        var claimsA = await podATask;
+        var claimsB = await podBTask;
+
+        // Together they must claim all 4 jobs with no overlap
+        var allClaimed = claimsA.Concat(claimsB).Select(c => c.Job.Id).ToList();
+        allClaimed.Count.ShouldBe(4);
+        allClaimed.Distinct().Count().ShouldBe(4, "no job claimed by both pods");
     }
 
     [Fact]
