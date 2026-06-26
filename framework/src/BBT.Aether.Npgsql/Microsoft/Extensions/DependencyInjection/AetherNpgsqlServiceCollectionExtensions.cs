@@ -1,5 +1,7 @@
 using System;
+using BBT.Aether.BackgroundJob;
 using BBT.Aether.Domain.EntityFrameworkCore;
+using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.Persistence;
 using BBT.Aether.Uow.EntityFrameworkCore;
@@ -45,6 +47,10 @@ public static class AetherNpgsqlServiceCollectionExtensions
         if (typeof(IHasEfCoreInbox).IsAssignableFrom(typeof(TDbContext)))
             services.AddScoped(typeof(IInboxLeaseStore),
                 typeof(NpgsqlInboxLeaseStore<>).MakeGenericType(typeof(TDbContext)));
+
+        if (typeof(IHasEfCoreBackgroundJobs).IsAssignableFrom(typeof(TDbContext)))
+            services.AddScoped(typeof(IJobArmingLeaseStore),
+                typeof(EfCoreJobArmingLeaseStore<>).MakeGenericType(typeof(TDbContext)));
 
         return services;
     }

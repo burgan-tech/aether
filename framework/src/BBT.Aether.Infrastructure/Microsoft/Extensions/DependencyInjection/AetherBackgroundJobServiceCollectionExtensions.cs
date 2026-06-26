@@ -54,6 +54,14 @@ public static class AetherBackgroundJobServiceCollectionExtensions
         // Register event serializer for CloudEventEnvelope wrapping (if not already registered)
         services.TryAddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
 
+        // WorkerIdentity provides a stable pod-level identity for lease workerId fields.
+        // TryAdd so it is shared with Outbox/Inbox if both are registered.
+        services.TryAddSingleton<WorkerIdentity>();
+
+        // EF Core fallback lease store — overridden by NpgsqlJobArmingLeaseStore when
+        // AddAetherNpgsql<TDbContext> detects IHasEfCoreBackgroundJobs.
+        services.TryAddScoped<IJobArmingLeaseStore, EfCoreJobArmingLeaseStore<TDbContext>>();
+
         // Register core services (scheduler-agnostic)
         services.TryAddScoped<IJobStore, EfCoreJobStore<TDbContext>>();
         services.TryAddScoped<IBackgroundJobService, BackgroundJobService>();
