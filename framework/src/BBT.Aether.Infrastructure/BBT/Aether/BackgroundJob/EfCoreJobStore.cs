@@ -348,4 +348,43 @@ public class EfCoreJobStore<TDbContext> : IJobStore
             .Take(batchSize)
             .ToListAsync(cancellationToken);
     }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryTransitionFromArmingAsync(Guid id, Guid armingToken,
+        BackgroundJobStatus to, CancellationToken cancellationToken = default)
+    {
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.ArmingToken == armingToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, to)
+                .SetProperty(j => j.ArmingToken, (Guid?)null)
+                .SetProperty(j => j.ArmingUntil, (DateTime?)null),
+                cancellationToken);
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<int> ResetExpiredArmingClaimsAsync(DateTime now, int batchSize,
+        CancellationToken cancellationToken = default)
+    {
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        // EF Core does not support LIMIT inside ExecuteUpdateAsync, so read IDs first.
+        var expiredIds = await dbContext.BackgroundJobs
+            .Where(j => j.ArmingToken != null && j.ArmingUntil < now)
+            .OrderBy(j => j.ArmingUntil)
+            .Take(batchSize)
+            .Select(j => j.Id)
+            .ToListAsync(cancellationToken);
+
+        if (expiredIds.Count == 0) return 0;
+
+        return await dbContext.BackgroundJobs
+            .Where(j => expiredIds.Contains(j.Id) && j.ArmingToken != null && j.ArmingUntil < now)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, BackgroundJobStatus.Pending)
+                .SetProperty(j => j.ArmingToken, (Guid?)null)
+                .SetProperty(j => j.ArmingUntil, (DateTime?)null),
+                cancellationToken);
+    }
 }

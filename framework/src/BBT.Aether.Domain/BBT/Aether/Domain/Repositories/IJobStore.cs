@@ -209,5 +209,27 @@ public interface IJobStore
     /// <returns>The stale running jobs, ordered by RunningSince ascending.</returns>
     Task<IReadOnlyList<BackgroundJobInfo>> GetStaleRunningAsync(DateTime cutoffUtc, int batchSize,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Clears <see cref="BackgroundJobInfo.ArmingToken"/>/<see cref="BackgroundJobInfo.ArmingUntil"/>
+    /// and transitions the job to <paramref name="to"/>, guarded on the arming token. Returns false if
+    /// the token no longer matches (another pod already acted on this row or the lease expired).
+    /// </summary>
+    Task<bool> TryTransitionFromArmingAsync(
+        Guid id,
+        Guid armingToken,
+        BackgroundJobStatus to,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Bulk-resets rows whose <see cref="BackgroundJobInfo.ArmingToken"/> is non-null and
+    /// <see cref="BackgroundJobInfo.ArmingUntil"/> &lt; <paramref name="now"/> back to
+    /// <see cref="BackgroundJobStatus.Pending"/>. Called by the arming-claim reaper.
+    /// </summary>
+    /// <returns>Number of rows reset.</returns>
+    Task<int> ResetExpiredArmingClaimsAsync(
+        DateTime now,
+        int batchSize,
+        CancellationToken cancellationToken = default);
 }
 
