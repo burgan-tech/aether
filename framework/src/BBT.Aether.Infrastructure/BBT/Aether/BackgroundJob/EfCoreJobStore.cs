@@ -179,9 +179,11 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     {
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         return await dbContext.BackgroundJobs
-            .Where(j => j.Status == BackgroundJobStatus.Pending
-                        || (j.Status == BackgroundJobStatus.Retrying && j.NextRetryAt != null && j.NextRetryAt <= nowUtc))
+            .Where(j => (j.Status == BackgroundJobStatus.Pending
+                         || (j.Status == BackgroundJobStatus.Retrying && j.NextRetryAt != null && j.NextRetryAt <= nowUtc))
+                        && (j.ArmingToken == null || j.ArmingUntil < nowUtc))
             .OrderBy(j => j.NextRetryAt)
+            .ThenBy(j => j.Id)
             .Take(batchSize)
             .ToListAsync(cancellationToken);
     }
@@ -347,5 +349,47 @@ public class EfCoreJobStore<TDbContext> : IJobStore
             .OrderBy(j => j.RunningSince)
             .Take(batchSize)
             .ToListAsync(cancellationToken);
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryTransitionFromArmingAsync(Guid id, Guid armingToken,
+        BackgroundJobStatus to, CancellationToken cancellationToken = default)
+    {
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.ArmingToken == armingToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, to)
+                .SetProperty(j => j.ArmingToken, (Guid?)null)
+                .SetProperty(j => j.ArmingUntil, (DateTime?)null)
+                .SetProperty(j => j.ModifiedAt, now),
+                cancellationToken);
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<int> ResetExpiredArmingClaimsAsync(DateTime now, int batchSize,
+        CancellationToken cancellationToken = default)
+    {
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        // EF Core does not support LIMIT inside ExecuteUpdateAsync, so read IDs first.
+        var expiredIds = await dbContext.BackgroundJobs
+            .Where(j => j.ArmingToken != null && j.ArmingUntil < now)
+            .OrderBy(j => j.ArmingUntil)
+            .Take(batchSize)
+            .Select(j => j.Id)
+            .ToListAsync(cancellationToken);
+
+        if (expiredIds.Count == 0) return 0;
+
+        var utcNow = DateTime.UtcNow;
+        return await dbContext.BackgroundJobs
+            .Where(j => expiredIds.Contains(j.Id) && j.ArmingToken != null && j.ArmingUntil < now)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.ArmingToken, (Guid?)null)
+                .SetProperty(j => j.ArmingUntil, (DateTime?)null)
+                .SetProperty(j => j.ModifiedAt, utcNow),
+                cancellationToken);
     }
 }
