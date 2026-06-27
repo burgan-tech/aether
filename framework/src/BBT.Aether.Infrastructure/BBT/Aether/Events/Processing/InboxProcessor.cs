@@ -47,6 +47,31 @@ public class InboxProcessor<TDbContext>(
         var totalProcessed = 0;
         var workerId = $"{workerIdentity.Value}/inbox";
 
+        // PARTITION LEASE: acquire or renew partition ownership once per processing cycle.
+        IReadOnlyList<int>? ownedPartitions = null;
+        if (options.PartitioningEnabled)
+        {
+            await using var partitionScope = scopeFactory.CreateAsyncScope();
+            var partitionLeaseStore = partitionScope.ServiceProvider.GetRequiredService<IPartitionLeaseStore>();
+            var partitionCurrentSchema = partitionScope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+            var partitionUowManager = partitionScope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+
+            using (partitionCurrentSchema.Change(options.Schema!))
+            {
+                await using var partitionUow = partitionUowManager.Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
+                ownedPartitions = await partitionLeaseStore.AcquireOrRenewAsync(
+                    "inbox", workerId, options.MaxOwnedPartitions, options.PartitionLeaseDuration, cancellationToken);
+                await partitionUow.CommitAsync(cancellationToken);
+            }
+
+            if (ownedPartitions.Count == 0)
+            {
+                logger.LogDebug("Inbox worker {WorkerId} owns no partitions; skipping run.", workerId);
+                return 0;
+            }
+        }
+
         while (!cancellationToken.IsCancellationRequested)
         {
             await using var scope = scopeFactory.CreateAsyncScope();
@@ -60,7 +85,7 @@ public class InboxProcessor<TDbContext>(
                 await using (var leaseUow = unitOfWorkManager.BeginRequiresNew())
                 {
                     pendingEvents = await leaseStore.LeaseBatchAsync(
-                        options.ProcessingBatchSize, workerId, options.LeaseDuration, cancellationToken);
+                        options.ProcessingBatchSize, workerId, options.LeaseDuration, ownedPartitions, cancellationToken);
                     await leaseUow.CommitAsync(cancellationToken);
                 }
 

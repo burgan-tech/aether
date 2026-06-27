@@ -8,6 +8,7 @@ using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.Repositories;
 using BBT.Aether.MultiSchema;
+using BBT.Aether.Partitioning;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -41,6 +42,9 @@ public class BackgroundJobArmingProcessor(
         $"{Environment.GetEnvironmentVariable("HOSTNAME") ?? Environment.MachineName}" +
         $"/{Environment.ProcessId}/{Guid.NewGuid():N}/arming";
 
+    private int? _currentSlotNo;
+    private IReadOnlyList<int>? _ownedPartitions;
+
     /// <summary>
     /// Runs a single arming pass for the configured schema.
     /// </summary>
@@ -59,6 +63,37 @@ public class BackgroundJobArmingProcessor(
         var jobStore = sp.GetRequiredService<IJobStore>();
         var leaseStore = sp.GetRequiredService<IJobArmingLeaseStore>();
         var scheduler = sp.GetRequiredService<IJobScheduler>();
+        var slotStore = sp.GetRequiredService<IWorkerSlotStore>();
+
+        // SLOT ACQUISITION: when partitioning is enabled only pods that hold a slot may process jobs.
+        if (options.PartitioningEnabled)
+        {
+            var slotNo = await slotStore.TryAcquireSlotAsync(
+                "background-job", _workerId, options.SlotLeaseDuration, ct);
+
+            if (slotNo == null)
+            {
+                _currentSlotNo = null;
+                _ownedPartitions = null;
+                logger.LogDebug(
+                    "No background-job slot available; this pod is in standby mode (worker {WorkerId}).",
+                    _workerId);
+                return;
+            }
+
+            if (_currentSlotNo != slotNo)
+            {
+                _currentSlotNo = slotNo;
+                _ownedPartitions = LogicalPartitioner.GetPartitionsForSlot(slotNo.Value, options.ActiveSlots);
+                logger.LogInformation(
+                    "Acquired background-job slot {SlotNo} (worker {WorkerId}); owns {PartitionCount} partitions.",
+                    slotNo.Value, _workerId, _ownedPartitions.Count);
+            }
+        }
+        else
+        {
+            _ownedPartitions = null;
+        }
 
         using (currentSchema.Change(options.Schema))
         {
@@ -69,7 +104,7 @@ public class BackgroundJobArmingProcessor(
                 await using var claimUow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
                 claims = await leaseStore.ClaimBatchAsync(
-                    options.ArmingBatchSize, _workerId, options.ArmingLeaseDuration, ct);
+                    options.ArmingBatchSize, _workerId, options.ArmingLeaseDuration, _ownedPartitions, ct);
                 await claimUow.CommitAsync(ct);
             }
             catch (Exception ex)

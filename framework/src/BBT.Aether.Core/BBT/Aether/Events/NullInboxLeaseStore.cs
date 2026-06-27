@@ -12,6 +12,7 @@ public class NullInboxLeaseStore : IInboxLeaseStore
         int batchSize,
         string workerId,
         TimeSpan leaseDuration,
+        IReadOnlyList<int>? partitionNos = null,
         CancellationToken cancellationToken = default)
         => Task.FromResult<IReadOnlyList<InboxMessage>>(Array.Empty<InboxMessage>());
 }

@@ -56,9 +56,17 @@ public static class InboxModelBuilderExtensions
 
             entity.Property(e => e.LockedUntil);
 
+            entity.Property(e => e.PartitionNo)
+                .IsRequired()
+                .HasDefaultValue(0);
+
             // Index for processing pending messages with lease support
             entity.HasIndex(e => new { e.Status, e.LockedUntil, e.NextRetryTime, e.CreatedAt })
                 .HasDatabaseName("IX_InboxMessages_Processing");
+
+            // Composite index for partition-aware lease queries (used when PartitioningEnabled = true)
+            entity.HasIndex(e => new { e.PartitionNo, e.Status, e.LockedUntil, e.NextRetryTime })
+                .HasDatabaseName("IX_InboxMessages_Claim");
 
             // Index for cleanup of old processed messages
             entity.HasIndex(e => new { e.Status, e.HandledTime })

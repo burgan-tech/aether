@@ -28,6 +28,7 @@ public class EfCoreJobArmingLeaseStore<TDbContext>(
         int batchSize,
         string workerId,
         TimeSpan leaseDuration,
+        IReadOnlyList<int>? partitionNos = null,
         CancellationToken cancellationToken = default)
     {
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
@@ -35,11 +36,16 @@ public class EfCoreJobArmingLeaseStore<TDbContext>(
         var armingUntil = now.Add(leaseDuration);
         var armingToken = Guid.NewGuid();
 
-        var candidates = await dbContext.BackgroundJobs
+        var query = dbContext.BackgroundJobs
             .Where(j => (j.Status == BackgroundJobStatus.Pending
                          || (j.Status == BackgroundJobStatus.Retrying
                              && j.NextRetryAt != null && j.NextRetryAt <= now))
-                        && (j.ArmingToken == null || j.ArmingUntil < now))
+                        && (j.ArmingToken == null || j.ArmingUntil < now));
+
+        if (partitionNos != null && partitionNos.Count > 0)
+            query = query.Where(j => partitionNos.Contains(j.PartitionNo));
+
+        var candidates = await query
             .OrderBy(j => j.NextRetryAt ?? DateTime.MinValue)
             .ThenBy(j => j.Id)
             .Take(batchSize)

@@ -1,5 +1,7 @@
 using System;
 using BBT.Aether.BackgroundJob;
+using BBT.Aether.Npgsql.BackgroundJob;
+using BBT.Aether.Npgsql.Events;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.Repositories;
@@ -52,6 +54,14 @@ public static class AetherNpgsqlServiceCollectionExtensions
         if (typeof(IHasEfCoreBackgroundJobs).IsAssignableFrom(typeof(TDbContext)))
             services.AddScoped(typeof(IJobArmingLeaseStore),
                 typeof(NpgsqlJobArmingLeaseStore<>).MakeGenericType(typeof(TDbContext)));
+
+        if (typeof(IHasEfCoreWorkerSlots).IsAssignableFrom(typeof(TDbContext)))
+            services.AddScoped(typeof(IWorkerSlotStore),
+                typeof(NpgsqlWorkerSlotStore<>).MakeGenericType(typeof(TDbContext)));
+
+        if (typeof(IHasEfCorePartitionLeases).IsAssignableFrom(typeof(TDbContext)))
+            services.AddScoped(typeof(IPartitionLeaseStore),
+                typeof(NpgsqlPartitionLeaseStore<>).MakeGenericType(typeof(TDbContext)));
 
         return services;
     }

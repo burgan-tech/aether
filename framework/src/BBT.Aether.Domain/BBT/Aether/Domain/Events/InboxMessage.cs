@@ -69,6 +69,12 @@ public class InboxMessage : Entity<string>, IHasExtraProperties, IHasCreatedAt
     public DateTime? LockedUntil { get; set; }
 
     /// <summary>
+    /// Gets or sets the logical partition number (0–63). Computed at store time from the message id
+    /// using XxHash32 % 64. Workers only process messages in their owned partitions when partitioning is enabled.
+    /// </summary>
+    public int PartitionNo { get; set; }
+
+    /// <summary>
     /// Gets or sets extra properties for storing metadata (pubSubName, version, etc.).
     /// </summary>
     public ExtraPropertyDictionary ExtraProperties { get; private set; } = new ExtraPropertyDictionary();

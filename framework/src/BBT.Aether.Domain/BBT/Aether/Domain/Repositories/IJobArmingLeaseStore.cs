@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
+#nullable enable
 
 namespace BBT.Aether.Domain.Repositories;
 
@@ -21,12 +22,17 @@ public interface IJobArmingLeaseStore
     /// <param name="batchSize">Maximum number of jobs to claim.</param>
     /// <param name="workerId">Stable identifier of this pod/worker (for diagnostics).</param>
     /// <param name="leaseDuration">How long the arming claim is held.</param>
+    /// <param name="partitionNos">
+    /// When non-null and non-empty, only jobs in these logical partitions are considered.
+    /// Pass <c>null</c> to claim from all partitions (backward-compatible behaviour).
+    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The claimed jobs. Empty when nothing is due or all due rows are held by other pods.</returns>
     Task<IReadOnlyList<BackgroundJobArmingClaim>> ClaimBatchAsync(
         int batchSize,
         string workerId,
         TimeSpan leaseDuration,
+        IReadOnlyList<int>? partitionNos = null,
         CancellationToken cancellationToken = default);
 }
 

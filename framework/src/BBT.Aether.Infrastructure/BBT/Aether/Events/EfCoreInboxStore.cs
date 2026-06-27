@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
 using BBT.Aether.Domain.EntityFrameworkCore;
+using BBT.Aether.Partitioning;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -48,7 +49,8 @@ public class EfCoreInboxStore<TDbContext>(
         var inboxMessage = new Domain.Events.InboxMessage(envelope.Id, envelope.Type, serializedBytes)
         {
             CreatedAt = now,
-            Status = IncomingEventStatus.Pending
+            Status = IncomingEventStatus.Pending,
+            PartitionNo = LogicalPartitioner.GetPartitionNo(envelope.Id)
         };
 
         if (envelope.Topic != null)

@@ -62,6 +62,10 @@ public static class AetherBackgroundJobServiceCollectionExtensions
         // AddAetherNpgsql<TDbContext> detects IHasEfCoreBackgroundJobs.
         services.TryAddScoped<IJobArmingLeaseStore, EfCoreJobArmingLeaseStore<TDbContext>>();
 
+        // Null fallback slot store — overridden by NpgsqlWorkerSlotStore when
+        // AddAetherNpgsql<TDbContext> detects IHasEfCoreWorkerSlots.
+        services.TryAddScoped<IWorkerSlotStore, NullWorkerSlotStore>();
+
         // Register core services (scheduler-agnostic)
         services.TryAddScoped<IJobStore, EfCoreJobStore<TDbContext>>();
         services.TryAddScoped<IBackgroundJobService, BackgroundJobService>();

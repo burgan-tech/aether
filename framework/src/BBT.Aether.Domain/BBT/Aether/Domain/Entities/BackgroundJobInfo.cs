@@ -111,6 +111,12 @@ public class BackgroundJobInfo : FullAuditedEntity<Guid>, IHasExtraProperties
     public DateTime? ArmingUntil { get; set; }
 
     /// <summary>
+    /// Gets or sets the logical partition number (0–63). Computed at enqueue time from the partition key
+    /// using XxHash32 % 64. Workers only process jobs in their owned partitions when partitioning is enabled.
+    /// </summary>
+    public int PartitionNo { get; set; }
+
+    /// <summary>
     /// Gets or sets additional metadata associated with the job.
     /// Common metadata includes domain, flow name, and instance ID information.
     /// </summary>

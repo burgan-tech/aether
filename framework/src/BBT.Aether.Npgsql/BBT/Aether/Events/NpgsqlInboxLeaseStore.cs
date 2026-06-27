@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,6 +12,7 @@ using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Npgsql;
 
 namespace BBT.Aether.Events;
 
@@ -29,6 +31,7 @@ public class NpgsqlInboxLeaseStore<TDbContext>(
         int batchSize,
         string workerId,
         TimeSpan leaseDuration,
+        IReadOnlyList<int>? partitionNos = null,
         CancellationToken cancellationToken = default)
     {
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
@@ -61,6 +64,11 @@ public class NpgsqlInboxLeaseStore<TDbContext>(
 
         await using var command = connection.CreateCommand();
         command.Transaction = dbTransaction;
+
+        var partitionFilter = partitionNos != null && partitionNos.Count > 0
+            ? "AND \"PartitionNo\" = ANY(@partitionNos)"
+            : string.Empty;
+
         command.CommandText = $"""
             UPDATE {fullTableName}
             SET
@@ -73,6 +81,7 @@ public class NpgsqlInboxLeaseStore<TDbContext>(
                 WHERE "Status" = @pending
                   AND ("LockedUntil" IS NULL OR "LockedUntil" < @now)
                   AND ("NextRetryTime" IS NULL OR "NextRetryTime" <= @now)
+                  {partitionFilter}
                 ORDER BY "CreatedAt"
                 LIMIT @batchSize
                 FOR UPDATE SKIP LOCKED
@@ -88,6 +97,9 @@ public class NpgsqlInboxLeaseStore<TDbContext>(
         AddParameter(command, "@lockedUntil", lockedUntil);
         AddParameter(command, "@now",        now);
         AddParameter(command, "@batchSize",  batchSize);
+
+        if (partitionNos != null && partitionNos.Count > 0)
+            command.Parameters.Add(new NpgsqlParameter<int[]>("partitionNos", partitionNos.ToArray()));
 
         var messages = new List<InboxMessage>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

@@ -25,6 +25,10 @@ public static class AetherOutboxServiceCollectionExtensions
         // Null fallback — provider (Npgsql/SqlServer) overrides with AddScoped
         services.TryAddScoped<IOutboxLeaseStore, NullOutboxLeaseStore>();
 
+        // Null fallback partition lease store — overridden by NpgsqlPartitionLeaseStore when
+        // AddAetherNpgsql<TDbContext> detects IHasEfCorePartitionLeases.
+        services.TryAddScoped<IPartitionLeaseStore, NullPartitionLeaseStore>();
+
         // WorkerIdentity singleton — guard against double registration
         services.TryAddSingleton<WorkerIdentity>();
 
@@ -49,6 +53,10 @@ public static class AetherOutboxServiceCollectionExtensions
         services.AddScoped<IInboxStore, EfCoreInboxStore<TDbContext>>();
 
         services.TryAddScoped<IInboxLeaseStore, NullInboxLeaseStore>();
+
+        // Null fallback partition lease store — overridden by NpgsqlPartitionLeaseStore when
+        // AddAetherNpgsql<TDbContext> detects IHasEfCorePartitionLeases.
+        services.TryAddScoped<IPartitionLeaseStore, NullPartitionLeaseStore>();
 
         services.TryAddSingleton<WorkerIdentity>();
 

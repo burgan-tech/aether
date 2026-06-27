@@ -58,6 +58,37 @@ public class BackgroundJobOptions
     /// and clears its arming fields (ArmingToken/ArmingUntil) without changing Status.
     /// Must be comfortably longer than one arming pass.</summary>
     public TimeSpan ArmingLeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
+
+    // ── Partitioning ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// When true, the worker must acquire a slot from the <c>worker_slots</c> table before processing
+    /// any jobs. Only <see cref="ActiveSlots"/> pods across the cluster may be active executors at once.
+    /// When false (default) all pods are active executors — the previous behaviour.
+    /// </summary>
+    public bool PartitioningEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Total number of pre-seeded rows in the <c>worker_slots</c> table.
+    /// Only this many pods may be active background job executors simultaneously.
+    /// Ignored when <see cref="PartitioningEnabled"/> is false.
+    /// </summary>
+    public int ActiveSlots { get; set; } = 2;
+
+    /// <summary>How long a worker slot lease is held before it expires.</summary>
+    public TimeSpan SlotLeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How often the active executor renews its slot lease (heartbeat).
+    /// Must be less than <see cref="SlotLeaseDuration"/>.
+    /// </summary>
+    public TimeSpan SlotHeartbeatInterval { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>Minimum jitter delay (seconds) when no owned partitions/slot could be acquired.</summary>
+    public int EmptyPollMinDelaySeconds { get; set; } = 20;
+
+    /// <summary>Maximum jitter delay (seconds) when no owned partitions/slot could be acquired.</summary>
+    public int EmptyPollMaxDelaySeconds { get; set; } = 60;
 }
 
 /// <summary>

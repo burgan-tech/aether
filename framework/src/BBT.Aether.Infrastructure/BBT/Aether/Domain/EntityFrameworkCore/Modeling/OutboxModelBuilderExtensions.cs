@@ -58,9 +58,17 @@ public static class OutboxModelBuilderExtensions
 
             entity.Property(e => e.LockedUntil);
 
+            entity.Property(e => e.PartitionNo)
+                .IsRequired()
+                .HasDefaultValue(0);
+
             // Index for processing pending messages with lease support
             entity.HasIndex(e => new { e.Status, e.LockedUntil, e.NextRetryAt, e.CreatedAt })
                 .HasDatabaseName("IX_OutboxMessages_Processing");
+
+            // Composite index for partition-aware lease queries (used when PartitioningEnabled = true)
+            entity.HasIndex(e => new { e.PartitionNo, e.Status, e.LockedUntil, e.NextRetryAt })
+                .HasDatabaseName("IX_OutboxMessages_Claim");
 
             // Index for cleanup of old processed messages
             entity.HasIndex(e => new { e.ProcessedAt, e.CreatedAt })

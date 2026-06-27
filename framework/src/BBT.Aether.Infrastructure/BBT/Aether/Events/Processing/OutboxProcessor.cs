@@ -65,6 +65,30 @@ public class OutboxProcessor<TDbContext>(
         var dbContextProvider = sp.GetRequiredService<IAetherDbContextProvider<TDbContext>>();
 
         var workerId = $"{workerIdentity.Value}/outbox";
+        var partitionLeaseStore = sp.GetRequiredService<IPartitionLeaseStore>();
+
+        // PARTITION LEASE: acquire or renew partition ownership when partitioning is enabled.
+        IReadOnlyList<int>? ownedPartitions = null;
+        if (options.PartitioningEnabled)
+        {
+            await using var partitionScope = scopeFactory.CreateAsyncScope();
+            var partitionUowManager = partitionScope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+            var partitionCurrentSchema = partitionScope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+            using (partitionCurrentSchema.Change(options.Schema))
+            {
+                await using var partitionUow = partitionUowManager.Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
+                ownedPartitions = await partitionLeaseStore.AcquireOrRenewAsync(
+                    "outbox", workerId, options.MaxOwnedPartitions, options.PartitionLeaseDuration, cancellationToken);
+                await partitionUow.CommitAsync(cancellationToken);
+            }
+
+            if (ownedPartitions.Count == 0)
+            {
+                logger.LogDebug("Outbox worker {WorkerId} owns no partitions; skipping run.", workerId);
+                return 0;
+            }
+        }
 
         using (currentSchema.Change(options.Schema))
         {
@@ -74,7 +98,7 @@ public class OutboxProcessor<TDbContext>(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
             {
                 messages = (await leaseStore.LeaseBatchAsync(
-                    options.BatchSize, workerId, options.LeaseDuration, cancellationToken)).ToList();
+                    options.BatchSize, workerId, options.LeaseDuration, ownedPartitions, cancellationToken)).ToList();
                 await leaseUow.CommitAsync(cancellationToken);
             }
 

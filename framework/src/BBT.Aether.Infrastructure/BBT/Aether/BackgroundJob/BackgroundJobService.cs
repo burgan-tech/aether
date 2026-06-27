@@ -10,6 +10,7 @@ using BBT.Aether.Domain.Repositories;
 using BBT.Aether.Events;
 using BBT.Aether.Guids;
 using BBT.Aether.MultiSchema;
+using BBT.Aether.Partitioning;
 using BBT.Aether.Telemetry;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.Logging;
@@ -136,6 +137,7 @@ public sealed class BackgroundJobService(
         // double-schedule. ArmNowAsync calls the scheduler; on failure it rolls Scheduled→Pending for
         // the poller to retry. When directly:false (default), save as Pending and let the arming poller
         // arm it after the caller's transaction commits — no orphaned scheduled job on rollback.
+        var partitionKey = $"{handlerName}:{jobName}";
         var jobInfo = new BackgroundJobInfo(effectiveJobId, handlerName, jobName)
         {
             ExpressionValue = schedule,
@@ -144,7 +146,8 @@ public sealed class BackgroundJobService(
             Kind = effectiveKind,
             MaxRetryCount = options.MaxRetryCount,
             NextRetryAt = clock.UtcNow,
-            ExtraProperties = extraProperties
+            ExtraProperties = extraProperties,
+            PartitionNo = LogicalPartitioner.GetPartitionNo(partitionKey)
         };
 
         // TODO(jobs): thread failurePolicyOptions through the arming poller. The poller currently arms

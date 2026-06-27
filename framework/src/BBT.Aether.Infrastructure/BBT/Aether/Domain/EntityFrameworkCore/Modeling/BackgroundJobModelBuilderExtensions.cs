@@ -72,6 +72,10 @@ public static class BackgroundJobModelBuilderExtensions
 
             entity.Property(e => e.ArmingUntil);
 
+            entity.Property(e => e.PartitionNo)
+                .IsRequired()
+                .HasDefaultValue(0);
+
             // Partial index for the arming-claim reaper: only covers rows being actively armed.
             entity.HasIndex(e => e.ArmingUntil)
                 .HasFilter("\"ArmingToken\" IS NOT NULL")
@@ -96,6 +100,11 @@ public static class BackgroundJobModelBuilderExtensions
             // Index for finding jobs by HandlerName and Status
             entity.HasIndex(e => new { e.HandlerName, e.Status })
                 .HasDatabaseName("IX_BackgroundJobs_HandlerName_Status");
+
+            // Composite index for partition-aware claim queries (used when PartitioningEnabled = true)
+            entity.HasIndex(e => new { e.PartitionNo, e.Status, e.NextRetryAt })
+                .HasFilter("\"Status\" IN (5, 6)")
+                .HasDatabaseName("IX_BackgroundJobs_Claim");
 
             // Apply convention-based configuration (handles IHasExtraProperties automatically)
             entity.ConfigureByConvention();

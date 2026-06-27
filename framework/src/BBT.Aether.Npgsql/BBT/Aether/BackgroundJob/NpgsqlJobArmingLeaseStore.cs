@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,6 +14,7 @@ using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Npgsql;
 
 namespace BBT.Aether.BackgroundJob;
 
@@ -33,6 +35,7 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
         int batchSize,
         string workerId,
         TimeSpan leaseDuration,
+        IReadOnlyList<int>? partitionNos = null,
         CancellationToken cancellationToken = default)
     {
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
@@ -66,6 +69,11 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
 
         await using var command = connection.CreateCommand();
         command.Transaction = dbTransaction;
+
+        var partitionFilter = partitionNos != null && partitionNos.Count > 0
+            ? $"AND \"PartitionNo\" = ANY(@partitionNos)"
+            : string.Empty;
+
         // workerId is not persisted to the row — it is available for logging/diagnostics only.
         command.CommandText = $"""
             UPDATE {fullTableName}
@@ -81,6 +89,7 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
                            AND "NextRetryAt" IS NOT NULL
                            AND "NextRetryAt" <= @now))
                   AND ("ArmingToken" IS NULL OR "ArmingUntil" < @now)
+                  {partitionFilter}
                 ORDER BY "NextRetryAt" NULLS FIRST, "Id"
                 LIMIT @batchSize
                 FOR UPDATE SKIP LOCKED
@@ -96,6 +105,13 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
         AddParameter(command, "@retrying",    (int)BackgroundJobStatus.Retrying);
         AddParameter(command, "@now",         now);
         AddParameter(command, "@batchSize",   batchSize);
+
+        if (partitionNos != null && partitionNos.Count > 0)
+        {
+            // Npgsql maps int[] to PostgreSQL integer[] natively; must use NpgsqlParameter.
+            var p = new NpgsqlParameter<int[]>("partitionNos", partitionNos.ToArray());
+            command.Parameters.Add(p);
+        }
 
         var claims = new List<BackgroundJobArmingClaim>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

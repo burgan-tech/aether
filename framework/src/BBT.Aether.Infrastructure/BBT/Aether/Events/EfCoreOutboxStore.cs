@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using BBT.Aether.Clock;
 using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Guids;
+using BBT.Aether.Partitioning;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -29,6 +30,7 @@ public class EfCoreOutboxStore<TDbContext>(
             CreatedAt = clock.UtcNow,
             RetryCount = 0,
             Status = OutboxMessageStatus.Pending,
+            PartitionNo = LogicalPartitioner.GetPartitionNo(envelope.Id.ToString()),
             ExtraProperties = { ["TopicName"] = envelope.Topic ?? envelope.Type }
         };
 
