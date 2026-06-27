@@ -42,7 +42,7 @@ public sealed class UnitOfWorkMiddlewareTests(PostgresFixture fx)
         services.AddSingleton<IAetherDbContextConfigurator<ProbeDbContext>>(
             new AetherDbContextConfigurator<ProbeDbContext>(
                 fx.ConnectionString,
-                new NpgsqlAetherProvider(),
+                new NpgsqlAetherProvider(SchemaSwitchingMode.SessionSearchPath),
                 configure: (_, _) => { },
                 serviceProvider: null!));
         var sp = services.BuildServiceProvider();

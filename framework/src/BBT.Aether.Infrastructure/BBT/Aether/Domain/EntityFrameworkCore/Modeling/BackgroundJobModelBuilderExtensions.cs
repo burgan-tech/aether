@@ -68,6 +68,15 @@ public static class BackgroundJobModelBuilderExtensions
 
             entity.Property(e => e.RunningToken);
 
+            entity.Property(e => e.ArmingToken);
+
+            entity.Property(e => e.ArmingUntil);
+
+            // Partial index for the arming-claim reaper: only covers rows being actively armed.
+            entity.HasIndex(e => e.ArmingUntil)
+                .HasFilter("\"ArmingToken\" IS NOT NULL")
+                .HasDatabaseName("IX_BackgroundJobs_ArmingUntil");
+
             // Index for the arming poller (query by status + next due time)
             entity.HasIndex(e => new { e.Status, e.NextRetryAt })
                 .HasDatabaseName("IX_BackgroundJobs_Arming");

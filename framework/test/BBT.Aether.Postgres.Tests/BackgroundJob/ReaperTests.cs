@@ -284,6 +284,50 @@ public sealed class ReaperTests(PostgresFixture fx)
     }
 
     [Fact]
+    public async Task Expired_arming_claim_is_reclaimable_and_armed_in_same_pass()
+    {
+        // A job with an expired ArmingToken (e.g. left by a crashed pod that completed Phase 1 but
+        // never reached Phase 3) must be visible to Phase 1 of the NEXT RunAsync call, because the
+        // SQL claim filter includes: "ArmingToken IS NULL OR ArmingUntil < now".
+        // Phase 1 will re-claim the row with a fresh token, Phase 2 arms it, Phase 3 confirms it →
+        // Status = Scheduled. Reaper A then finds 0 expired claims (the confirm already cleared it).
+        var scheduler = new FakeJobScheduler();
+        var sp = BuildProvider(scheduler);
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+
+        // Build a Pending job that already has an expired arming claim from a previous (crashed) pod.
+        var job = new BackgroundJobInfo(id, "TestHandler", "job-" + id.ToString("N"))
+        {
+            ExpressionValue = "@every 1m",
+            Payload = JsonDocument.Parse("{\"hello\":\"world\"}").RootElement.Clone(),
+            Status = BackgroundJobStatus.Pending,
+            Kind = JobKind.OneShot,
+            MaxRetryCount = 3,
+            NextRetryAt = DateTime.UtcNow.AddMinutes(-1),  // due for arming
+            ArmingToken = Guid.NewGuid(),                  // stale token from crashed pod
+            ArmingUntil = DateTime.UtcNow.AddSeconds(-5),  // lease has expired
+        };
+        await SeedAsync(sp, job);
+
+        var processor = BuildProcessor(sp, out _, _schema);
+
+        // Single pass: Phase 1 sees the job (ArmingUntil < now → claimable), re-claims with a new
+        // token, Phase 2 arms it, Phase 3 confirms → Scheduled. Reaper A finds 0 expired claims.
+        await processor.RunAsync();
+
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded.ShouldNotBeNull();
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Scheduled,
+            "Phase 1 reclaims the expired-token row; Phase 3 confirms it as Scheduled");
+        reloaded.ArmingToken.ShouldBeNull("Phase 3 clears the arming token on confirm");
+        reloaded.ArmingUntil.ShouldBeNull();
+        scheduler.ScheduleCalls.Count.ShouldBe(1, "the job must be armed exactly once");
+        scheduler.ScheduleCalls[0].jobName.ShouldBe("job-" + id.ToString("N"));
+    }
+
+    [Fact]
     public async Task Original_completion_after_reap_does_not_stomp_retry_state()
     {
         // Regression: a slow original execution must NOT overwrite the reaper's/retry's state.
