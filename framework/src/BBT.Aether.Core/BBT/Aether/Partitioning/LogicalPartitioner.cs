@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO.Hashing;
 using System.Linq;
 using System.Text;
 
@@ -17,7 +16,7 @@ public static class LogicalPartitioner
 
     /// <summary>
     /// Returns the logical partition number for the given key in the range [0, <see cref="PartitionCount"/>).
-    /// Uses XxHash32 for a fast, uniform distribution.
+    /// Uses FNV-1a 32-bit for a fast, uniform, dependency-free distribution.
     /// </summary>
     public static int GetPartitionNo(string key)
     {
@@ -25,8 +24,20 @@ public static class LogicalPartitioner
             throw new ArgumentException("Partition key cannot be empty.", nameof(key));
 
         var bytes = Encoding.UTF8.GetBytes(key);
-        var hash = XxHash32.HashToUInt32(bytes);
+        var hash = Fnv1a32(bytes);
         return (int)(hash % PartitionCount);
+    }
+
+    // FNV-1a 32-bit: http://www.isthe.com/chongo/tech/comp/fnv/
+    // Deterministic, zero-dependency, uniform distribution for short string keys.
+    private static uint Fnv1a32(byte[] data)
+    {
+        const uint offsetBasis = 2166136261u;
+        const uint prime       = 16777619u;
+        var hash = offsetBasis;
+        foreach (var b in data)
+            hash = (hash ^ b) * prime;
+        return hash;
     }
 
     /// <summary>
