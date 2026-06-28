@@ -16,7 +16,7 @@ namespace BBT.Aether.Partitioning;
 public class EfCorePartitionSeedService<TDbContext>(
     IAetherDbContextProvider<TDbContext> dbContextProvider)
     : IPartitionSeedService
-    where TDbContext : DbContext, IHasEfCoreWorkerSlots, IHasEfCorePartitionLeases
+    where TDbContext : DbContext, IHasEfCoreWorkerSlots, IHasEfCorePartitionLeases, IHasEfCoreWorkerSettings
 {
     /// <inheritdoc />
     public async Task SeedWorkerSlotsAsync(
@@ -39,6 +39,7 @@ public class EfCorePartitionSeedService<TDbContext>(
             {
                 WorkerName = workerName,
                 SlotNo = s,
+                IsEnabled = true,
                 UpdatedAt = DateTime.UtcNow
             })
             .ToList();
@@ -72,5 +73,29 @@ public class EfCorePartitionSeedService<TDbContext>(
 
         if (missing.Count > 0)
             await dbContext.PartitionLeases.AddRangeAsync(missing, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task SeedWorkerSettingsAsync(
+        string workerName,
+        int initialSlotCount,
+        int minSlotCount,
+        int maxSlotCount,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(workerName)) throw new ArgumentException("Worker name required.", nameof(workerName));
+
+        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
+        var existing = await dbContext.WorkerSettings.FindAsync([workerName], cancellationToken);
+        if (existing != null) return;
+
+        await dbContext.WorkerSettings.AddAsync(new WorkerSettings
+        {
+            WorkerName       = workerName,
+            DesiredSlotCount = initialSlotCount,
+            MinSlotCount     = minSlotCount,
+            MaxSlotCount     = maxSlotCount,
+            UpdatedAt        = DateTime.UtcNow
+        }, cancellationToken);
     }
 }

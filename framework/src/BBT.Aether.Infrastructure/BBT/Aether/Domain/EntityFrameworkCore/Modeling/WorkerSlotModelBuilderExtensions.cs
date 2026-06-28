@@ -31,6 +31,10 @@ public static class WorkerSlotModelBuilderExtensions
 
             entity.Property(e => e.LockedUntil);
 
+            entity.Property(e => e.IsEnabled)
+                .IsRequired()
+                .HasDefaultValue(true);
+
             entity.Property(e => e.UpdatedAt)
                 .IsRequired();
         });

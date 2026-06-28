@@ -21,6 +21,13 @@ public class WorkerSlot
     /// <summary>UTC time after which the slot is considered expired and may be claimed by another pod.</summary>
     public DateTime? LockedUntil { get; set; }
 
+    /// <summary>
+    /// Whether this slot is available for acquisition. Set to <c>false</c> when
+    /// <c>desired_slot_count</c> is reduced at runtime; the row is never deleted so that
+    /// an active owner can finish its current lease gracefully.
+    /// </summary>
+    public bool IsEnabled { get; set; } = true;
+
     /// <summary>UTC time of the last update (for observability).</summary>
     public DateTime UpdatedAt { get; set; }
 }

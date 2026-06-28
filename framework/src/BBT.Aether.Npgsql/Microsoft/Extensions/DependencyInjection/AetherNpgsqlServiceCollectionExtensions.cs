@@ -63,6 +63,10 @@ public static class AetherNpgsqlServiceCollectionExtensions
             services.AddScoped(typeof(IPartitionLeaseStore),
                 typeof(NpgsqlPartitionLeaseStore<>).MakeGenericType(typeof(TDbContext)));
 
+        if (typeof(IHasEfCoreWorkerSettings).IsAssignableFrom(typeof(TDbContext)))
+            services.AddScoped(typeof(IWorkerSettingsStore),
+                typeof(NpgsqlWorkerSettingsStore<>).MakeGenericType(typeof(TDbContext)));
+
         return services;
     }
 }

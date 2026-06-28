@@ -60,6 +60,7 @@ public class NpgsqlWorkerSlotStore<TDbContext>(
                 SELECT "WorkerName", "SlotNo"
                 FROM {fullTableName}
                 WHERE "WorkerName" = @workerName
+                  AND "IsEnabled"  = true
                   AND (
                       "OwnerId" = @ownerId
                       OR "LockedUntil" IS NULL

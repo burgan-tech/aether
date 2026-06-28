@@ -44,6 +44,7 @@ public class BackgroundJobArmingProcessor(
 
     private int? _currentSlotNo;
     private IReadOnlyList<int>? _ownedPartitions;
+    private int _currentDesiredSlotCount;
 
     /// <summary>
     /// Runs a single arming pass for the configured schema.
@@ -64,6 +65,29 @@ public class BackgroundJobArmingProcessor(
         var leaseStore = sp.GetRequiredService<IJobArmingLeaseStore>();
         var scheduler = sp.GetRequiredService<IJobScheduler>();
         var slotStore = sp.GetRequiredService<IWorkerSlotStore>();
+        var settingsStore = sp.GetRequiredService<IWorkerSettingsStore>();
+
+        // RECONCILIATION: read desired_slot_count from worker_settings and enable/disable slots accordingly.
+        // Runs on every poller tick so changes made via the Admin API take effect within one interval.
+        if (options.PartitioningEnabled)
+        {
+            try
+            {
+                var settings = await settingsStore.GetOrDefaultAsync(
+                    "background-job", options.InitialSlotCount, ct);
+                _currentDesiredSlotCount = settings.DesiredSlotCount > 0
+                    ? settings.DesiredSlotCount
+                    : options.InitialSlotCount;
+                await settingsStore.ReconcileSlotsAsync(
+                    "background-job", _currentDesiredSlotCount, settings.MaxSlotCount, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to reconcile worker slots; proceeding with current slot state.");
+                if (_currentDesiredSlotCount == 0)
+                    _currentDesiredSlotCount = options.InitialSlotCount;
+            }
+        }
 
         // SLOT ACQUISITION: when partitioning is enabled only pods that hold a slot may process jobs.
         if (options.PartitioningEnabled)
@@ -84,7 +108,8 @@ public class BackgroundJobArmingProcessor(
             if (_currentSlotNo != slotNo)
             {
                 _currentSlotNo = slotNo;
-                _ownedPartitions = LogicalPartitioner.GetPartitionsForSlot(slotNo.Value, options.ActiveSlots);
+                var slotCount = _currentDesiredSlotCount > 0 ? _currentDesiredSlotCount : options.InitialSlotCount;
+                _ownedPartitions = LogicalPartitioner.GetPartitionsForSlot(slotNo.Value, slotCount);
                 logger.LogInformation(
                     "Acquired background-job slot {SlotNo} (worker {WorkerId}); owns {PartitionCount} partitions.",
                     slotNo.Value, _workerId, _ownedPartitions.Count);

@@ -21,4 +21,15 @@ public interface IPartitionSeedService
     /// (partitions 0 … 63).
     /// </summary>
     Task SeedPartitionLeasesAsync(string workerName, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Ensures the <c>worker_settings</c> row exists for the given worker name.
+    /// If the row already exists it is left untouched (<c>ON CONFLICT DO NOTHING</c> semantics).
+    /// </summary>
+    Task SeedWorkerSettingsAsync(
+        string workerName,
+        int initialSlotCount,
+        int minSlotCount,
+        int maxSlotCount,
+        CancellationToken cancellationToken = default);
 }

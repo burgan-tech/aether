@@ -69,11 +69,27 @@ public class BackgroundJobOptions
     public bool PartitioningEnabled { get; set; } = false;
 
     /// <summary>
-    /// Total number of pre-seeded rows in the <c>worker_slots</c> table.
-    /// Only this many pods may be active background job executors simultaneously.
+    /// Initial desired slot count written to <c>worker_settings</c> on the first seed.
+    /// After the first seed the runtime value is controlled via the Admin API (stored in DB).
     /// Ignored when <see cref="PartitioningEnabled"/> is false.
     /// </summary>
-    public int ActiveSlots { get; set; } = 2;
+    public int InitialSlotCount { get; set; } = 2;
+
+    /// <summary>Hard lower bound enforced by the Admin API (desired cannot go below this).</summary>
+    public int MinSlotCount { get; set; } = 0;
+
+    /// <summary>Hard upper bound enforced by the Admin API (desired cannot exceed this).</summary>
+    public int MaxSlotCount { get; set; } = 20;
+
+    /// <summary>
+    /// Kept for backward compatibility. Use <see cref="InitialSlotCount"/> instead.
+    /// </summary>
+    [System.Obsolete("Use InitialSlotCount instead.")]
+    public int ActiveSlots
+    {
+        get => InitialSlotCount;
+        set => InitialSlotCount = value;
+    }
 
     /// <summary>How long a worker slot lease is held before it expires.</summary>
     public TimeSpan SlotLeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
