@@ -9,6 +9,8 @@ namespace BBT.Aether.Uow.EntityFrameworkCore;
 public sealed class NpgsqlAetherProvider(
     SchemaSwitchingMode mode = SchemaSwitchingMode.TransactionLocal) : IAetherDatabaseProvider
 {
+    public bool RequiresTransaction => mode == SchemaSwitchingMode.TransactionLocal;
+
     public DbConnection CreateConnection(string connectionString) => new NpgsqlConnection(connectionString);
 
     public void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,

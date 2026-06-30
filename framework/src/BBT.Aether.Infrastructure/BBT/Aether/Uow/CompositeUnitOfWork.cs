@@ -147,7 +147,7 @@ public sealed class CompositeUnitOfWork(
             // Reset schema state whenever a fresh connection is established.
             _schemaState.Current = null;
 
-            if (_options.IsTransactional)
+            if (_options.IsTransactional || configurator.RequiresTransaction)
             {
                 _transaction = await _connection.BeginTransactionAsync(
                     _options.IsolationLevel ?? IsolationLevel.ReadCommitted, cancellationToken);

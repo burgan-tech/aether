@@ -21,4 +21,6 @@ public sealed class AetherDbContextConfigurator<TDbContext>(
         provider.ApplyShared(builder, sharedConnection, schema, state);
         return builder.Options;
     }
+
+    public bool RequiresTransaction => provider.RequiresTransaction;
 }

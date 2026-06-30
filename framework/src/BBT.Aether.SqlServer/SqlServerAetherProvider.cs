@@ -19,6 +19,8 @@ namespace BBT.Aether.Uow.EntityFrameworkCore;
 /// </remarks>
 public sealed class SqlServerAetherProvider : IAetherDatabaseProvider
 {
+    public bool RequiresTransaction => false;
+
     public DbConnection CreateConnection(string connectionString) => new SqlConnection(connectionString);
 
     public void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,

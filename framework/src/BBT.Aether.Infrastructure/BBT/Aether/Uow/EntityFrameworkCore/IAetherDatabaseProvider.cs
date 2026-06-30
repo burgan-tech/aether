@@ -14,4 +14,13 @@ public interface IAetherDatabaseProvider
     void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,
         string schema, SchemaScopeState state);
     void ApplyConnectionString(DbContextOptionsBuilder builder, string connectionString);
+
+    /// <summary>
+    /// When <see langword="true"/>, the <see cref="CompositeUnitOfWork"/> must open a database
+    /// transaction on the shared connection regardless of <see cref="UnitOfWorkOptions.IsTransactional"/>.
+    /// Providers that rely on <c>SET LOCAL</c> (e.g. <see cref="SchemaSwitchingMode.TransactionLocal"/>)
+    /// return <see langword="true"/> here so that schema isolation is guaranteed even for
+    /// read-only units of work.
+    /// </summary>
+    bool RequiresTransaction { get; }
 }

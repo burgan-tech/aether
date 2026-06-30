@@ -256,6 +256,26 @@ public sealed class MultiSchemaUnitOfWorkTests(PostgresFixture fx)
     }
 
     [Fact]
+    public async Task TransactionLocal_read_without_IsTransactional_succeeds()
+    {
+        // Regression: TransactionLocal mode with IsTransactional = false used to throw
+        // "SchemaSwitchingMode.TransactionLocal requires a transaction, but none is active."
+        // for read-only operations. NpgsqlAetherProvider.RequiresTransaction now signals
+        // CompositeUnitOfWork to open a transaction automatically.
+        await ArrangeSchemasAsync();
+        var sp = BuildProvider(); // default NpgsqlAetherProvider → TransactionLocal
+
+        var uow = new CompositeUnitOfWork(sp);
+        await uow.InitializeAsync(new UnitOfWorkOptions { IsTransactional = false });
+
+        var a = await uow.GetDbContextAsync<ProbeDbContext>(_schemaA);
+        var count = await a.Set<Thing>().CountAsync();
+        count.ShouldBe(0);
+
+        await uow.DisposeAsync();
+    }
+
+    [Fact]
     public async Task Required_participant_work_is_committed_by_the_owner()
     {
         await ArrangeSchemasAsync();

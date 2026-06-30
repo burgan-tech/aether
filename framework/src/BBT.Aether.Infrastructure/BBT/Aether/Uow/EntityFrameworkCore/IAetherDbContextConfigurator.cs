@@ -17,4 +17,11 @@ public interface IAetherDbContextConfigurator<TDbContext>
 
     /// <summary>Builds options that use the given already-open shared connection, bound to the given schema.</summary>
     DbContextOptions<TDbContext> BuildOptions(DbConnection sharedConnection, string schema, SchemaScopeState state);
+
+    /// <summary>
+    /// Whether the underlying provider requires a database transaction on the shared connection.
+    /// When <see langword="true"/>, <see cref="CompositeUnitOfWork"/> opens a transaction even if
+    /// <see cref="UnitOfWorkOptions.IsTransactional"/> is <see langword="false"/>.
+    /// </summary>
+    bool RequiresTransaction { get; }
 }
