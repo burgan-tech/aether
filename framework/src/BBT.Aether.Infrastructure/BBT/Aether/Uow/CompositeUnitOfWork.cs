@@ -239,6 +239,12 @@ public sealed class CompositeUnitOfWork(
                     await CommitWithDirectPublishAsync(cancellationToken);
                 }
             }
+            else if ((domainEventOptions?.DispatchNonTransactionalEventsToOutbox ?? false)
+                     && _events.Count > 0
+                     && eventDispatcher is not null)
+            {
+                await CommitWithoutTransactionAsync(cancellationToken);
+            }
 
             IsCompleted = true;
             await InvokeCompletedHandlersAsync();
@@ -267,6 +273,30 @@ public sealed class CompositeUnitOfWork(
         }
 
         await _transaction!.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Dispatches buffered domain events for a non-transactional unit of work (no shared
+    /// transaction was opened). Enabled only via
+    /// <see cref="AetherDomainEventOptions.DispatchNonTransactionalEventsToOutbox"/>.
+    /// <para>
+    /// The business data has already been durably persisted by the earlier (auto-save) writes, so
+    /// there is nothing to co-commit here: the events are dispatched with the configured
+    /// <see cref="AetherDomainEventOptions.DispatchStrategy"/> (writing outbox rows under
+    /// AlwaysUseOutbox) and any resulting rows are persisted by a final <see cref="SaveChangesAsync"/>.
+    /// Delivery is at-least-once but NOT atomic with the business writes — a crash between the two
+    /// relies on the consumer's idempotent retry/recovery.
+    /// </para>
+    /// </summary>
+    private async Task CommitWithoutTransactionAsync(CancellationToken cancellationToken)
+    {
+        await eventDispatcher!.DispatchEventsAsync(_events, cancellationToken);
+
+        // Persist any outbox rows written by the dispatcher. Without a shared transaction each
+        // SaveChanges auto-commits; a single outbox INSERT is atomic on its own.
+        await SaveChangesAsync(cancellationToken);
+
+        _events.Clear();
     }
 
     /// <summary>
