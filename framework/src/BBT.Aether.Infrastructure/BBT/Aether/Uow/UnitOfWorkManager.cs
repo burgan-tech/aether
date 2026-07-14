@@ -45,6 +45,7 @@ public sealed class UnitOfWorkManager(
         // This scope does NOT own the shared root; the scope that created it disposes it.
         if (options.Scope == UnitOfWorkScopeOption.Required && existing != null)
         {
+            EnsureRequiredScopeIsCompatible(options, existing);
             return new UnitOfWorkScope(
                 existing.Root,
                 ambient,
@@ -76,6 +77,7 @@ public sealed class UnitOfWorkManager(
         // This scope does NOT own the shared root; the scope that created it disposes it.
         if (options.Scope == UnitOfWorkScopeOption.Required && existing != null)
         {
+            EnsureRequiredScopeIsCompatible(options, existing);
             return new UnitOfWorkScope(
                 existing.Root,
                 ambient,
@@ -91,5 +93,16 @@ public sealed class UnitOfWorkManager(
         root.InitializeCore(options);
         return new UnitOfWorkScope(root, ambient, ownsRoot: true);
     }
-}
 
+    private static void EnsureRequiredScopeIsCompatible(
+        UnitOfWorkOptions options,
+        UnitOfWorkScope existing)
+    {
+        if (options.IsTransactional && existing.Root.Options?.IsTransactional != true)
+        {
+            throw new InvalidOperationException(
+                "A transactional Required UnitOfWork cannot join a non-transactional outer UnitOfWork. " +
+                "Use UnitOfWorkScopeOption.RequiresNew.");
+        }
+    }
+}

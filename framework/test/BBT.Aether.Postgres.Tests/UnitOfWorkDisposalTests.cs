@@ -139,7 +139,7 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task Required_nested_scope_dispose_does_not_close_shared_connection()
+    public async Task Required_nested_scope_commit_and_dispose_do_not_complete_root_or_close_shared_connection()
     {
         await ArrangeSchemaAsync();
         var sp = BuildProvider();
@@ -165,6 +165,12 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
             // Inner Required scope participates in the SAME root (does NOT own it).
             var inner = mgr.Begin(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.Required, IsTransactional = true });
+
+            // Committing a participating scope is logical-only: the owning root and its connection stay active.
+            await inner.CommitAsync();
+            inner.IsCompleted.ShouldBeTrue();
+            outer.IsCompleted.ShouldBeFalse();
+            conn.State.ShouldBe(ConnectionState.Open);
 
             // Disposing the non-owner inner scope must only restore ambient, NOT close the shared connection.
             await inner.DisposeAsync();

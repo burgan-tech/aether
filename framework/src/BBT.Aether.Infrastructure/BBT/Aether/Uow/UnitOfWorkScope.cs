@@ -17,6 +17,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     private readonly IUnitOfWork? _previousAmbient;
     private readonly bool _ownsRoot;
     private IUnitOfWork? _outer;
+    private bool _participantCompleted;
     private bool _isDisposed;
 
     /// <param name="root">The composite unit of work this scope delegates to.</param>
@@ -36,6 +37,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
         _accessor = accessor;
         _ownsRoot = ownsRoot;
         _previousAmbient = accessor.Current;
+        _outer = _previousAmbient;
 
         // Set this scope as the ambient unit of work
         accessor.Current = this;
@@ -54,7 +56,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     public bool IsAborted => _root.IsAborted;
 
     /// <inheritdoc />
-    public bool IsCompleted => _root.IsCompleted;
+    public bool IsCompleted => _ownsRoot ? _root.IsCompleted : _participantCompleted;
 
     /// <inheritdoc />
     public bool IsDisposed => _isDisposed;
@@ -94,14 +96,28 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public async Task CommitAsync(CancellationToken cancellationToken = default)
     {
-        await _root.CommitAsync(cancellationToken);
+        if (_ownsRoot)
+        {
+            await _root.CommitAsync(cancellationToken);
+        }
+        else
+        {
+            _participantCompleted = true;
+        }
     }
 
     /// <inheritdoc />
     public async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
-        // Delegate to root
-        await _root.RollbackAsync(cancellationToken);
+        if (_ownsRoot)
+        {
+            await _root.RollbackAsync(cancellationToken);
+        }
+        else
+        {
+            _root.Abort();
+            _participantCompleted = true;
+        }
     }
 
     /// <inheritdoc />
@@ -148,4 +164,3 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
         return _root.OnDisposed(handler);
     }
 }
-
