@@ -82,7 +82,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public void Abort()
     {
-        if (!_ownsRoot && (_participantCompleted || _isDisposed))
+        if (!_ownsRoot && (_participantCompleted || _isDisposed || IsRootTerminal))
         {
             return;
         }
@@ -94,12 +94,15 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     public Task<TDbContext> GetDbContextAsync<TDbContext>(string schema, CancellationToken cancellationToken = default)
         where TDbContext : DbContext
     {
+        ThrowIfCannotWork();
         return _root.GetDbContextAsync<TDbContext>(schema, cancellationToken);
     }
 
     /// <inheritdoc />
     public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
     {
+        ThrowIfCannotWork();
+
         // Delegate to root
         await _root.SaveChangesAsync(cancellationToken);
     }
@@ -125,7 +128,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
-        if (!_ownsRoot && (_participantCompleted || _isDisposed))
+        if (!_ownsRoot && (_participantCompleted || _isDisposed || IsRootTerminal))
         {
             return;
         }
@@ -138,6 +141,15 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
         {
             _root.Abort();
             _participantCompleted = true;
+        }
+    }
+
+    private void ThrowIfCannotWork()
+    {
+        if (_isDisposed || IsRootTerminal || (!_ownsRoot && _participantCompleted))
+        {
+            throw new InvalidOperationException(
+                "Cannot perform work in a completed or disposed unit of work.");
         }
     }
 

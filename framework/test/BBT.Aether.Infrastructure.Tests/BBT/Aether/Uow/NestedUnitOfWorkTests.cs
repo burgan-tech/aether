@@ -1,6 +1,8 @@
 using System;
 using System.Threading.Tasks;
 using BBT.Aether.Uow;
+using BBT.Aether.Uow.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Xunit;
@@ -9,6 +11,9 @@ namespace BBT.Aether.Infrastructure.Tests.BBT.Aether.Uow;
 
 public sealed class NestedUnitOfWorkTests
 {
+    private sealed class TerminalProbeDbContext(DbContextOptions<TerminalProbeDbContext> options)
+        : DbContext(options);
+
     private static IServiceProvider BuildProvider()
     {
         var services = new ServiceCollection();
@@ -376,5 +381,135 @@ public sealed class NestedUnitOfWorkTests
 
         await outer.CommitAsync();
         outer.IsCompleted.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Completed_required_participant_rejects_work_operations()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        await using var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        await using var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await inner.CommitAsync();
+
+        await AssertWorkOperationsAreRejectedAsync(inner);
+        outer.IsAborted.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Rolled_back_required_participant_rejects_work_operations()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        await using var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        await using var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await inner.RollbackAsync();
+
+        await AssertWorkOperationsAreRejectedAsync(inner);
+        outer.IsAborted.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Disposed_required_participant_rejects_work_operations()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        await using var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await inner.DisposeAsync();
+
+        await AssertWorkOperationsAreRejectedAsync(inner);
+        outer.IsAborted.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Incomplete_required_participant_cannot_work_or_abort_after_root_commit()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await outer.CommitAsync();
+        await AssertWorkOperationsAreRejectedAsync(inner);
+        await inner.RollbackAsync();
+        inner.Abort();
+
+        outer.IsAborted.ShouldBeFalse();
+
+        await inner.DisposeAsync();
+        await outer.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Incomplete_required_participant_cannot_work_or_abort_after_root_disposal()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await outer.DisposeAsync();
+        await AssertWorkOperationsAreRejectedAsync(inner);
+        await inner.RollbackAsync();
+        inner.Abort();
+
+        outer.IsAborted.ShouldBeFalse();
+
+        await inner.DisposeAsync();
+    }
+
+    private static async Task AssertWorkOperationsAreRejectedAsync(IUnitOfWork unitOfWork)
+    {
+        var contextException = await Should.ThrowAsync<InvalidOperationException>(() =>
+            ((IEfCoreUnitOfWork)unitOfWork).GetDbContextAsync<TerminalProbeDbContext>("schema_a"));
+        contextException.Message.ShouldContain("completed or disposed");
+
+        var saveException = await Should.ThrowAsync<InvalidOperationException>(() =>
+            unitOfWork.SaveChangesAsync());
+        saveException.Message.ShouldContain("completed or disposed");
     }
 }
