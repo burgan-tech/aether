@@ -89,11 +89,9 @@ Repository methods remain convenient because they resolve a context for each ope
 
 The Npgsql outbox, inbox, and background-job lease stores create ADO.NET commands directly from the shared connection. Those commands do not pass through EF's command interceptor, so they must handle the selected mode explicitly.
 
-- In `TransactionLocal` and `SessionSearchPath`, stores retain the schema-agnostic table name and the applicable search-path behavior.
-- In `QualifiedNames`, stores build the full relation name from the context-bound/current schema and EF table metadata, using shared `PostgreSqlIdentifier` helpers for both schema and table identifiers.
-- QualifiedNames store paths never execute their search-path setup branches.
+All three stores build the full relation name from the context-bound/current schema and EF table metadata, using shared `PostgreSqlIdentifier` helpers for both schema and table identifiers. This is safe in every switching mode and avoids relying on EF interceptors for commands that bypass EF.
 
-The selected Npgsql schema mode is exposed through a shared immutable registration/options object so all three stores use the same mode as the DbContext configurator. Direct identifier interpolation is removed.
+The stores no longer issue their own `SET LOCAL` commands. In particular, this avoids a `SessionSearchPath` raw-command path setting session state without updating `SchemaScopeState`, which could otherwise bypass Unit of Work cleanup. Direct identifier interpolation is removed.
 
 ## Unit of Work and Domain Events
 
