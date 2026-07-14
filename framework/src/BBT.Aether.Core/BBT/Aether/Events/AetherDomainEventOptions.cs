@@ -6,9 +6,10 @@ namespace BBT.Aether.Events;
 public enum DomainEventDispatchStrategy
 {
     /// <summary>
-    /// Always write events to outbox within the transaction.
+    /// Always write events to outbox during the UnitOfWork commit pipeline.
     /// Events are dispatched by the OutboxProcessor.
-    /// This provides maximum reliability as events are persisted atomically with business data.
+    /// In a transactional UnitOfWork, events are persisted atomically with business data.
+    /// A non-transactional UnitOfWork provides commit-boundary dispatch but not atomicity.
     /// </summary>
     AlwaysUseOutbox,
     

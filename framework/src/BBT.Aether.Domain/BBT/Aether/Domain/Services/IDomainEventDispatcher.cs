@@ -12,9 +12,8 @@ public interface IDomainEventDispatcher
 {
     /// <summary>
     /// Dispatches a collection of domain event envelopes.
-    /// Events are published via the distributed event bus using their metadata.
-    /// If publishing fails and WriteToOutboxOnPublishError is enabled, events are stored in the outbox for retry.
-    /// Used by AlwaysUseOutbox strategy.
+    /// Used by the AlwaysUseOutbox strategy to persist events through the configured dispatcher.
+    /// Failures propagate to the owning UnitOfWork commit.
     /// </summary>
     /// <param name="eventEnvelopes">The domain event envelopes to dispatch</param>
     /// <param name="cancellationToken">Cancellation token</param>

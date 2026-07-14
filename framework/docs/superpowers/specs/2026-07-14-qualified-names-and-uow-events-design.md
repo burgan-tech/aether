@@ -71,7 +71,7 @@ context.Database.ExecuteSqlRaw(
     status);
 ```
 
-In QualifiedNames mode the interceptor replaces every `{{schema}}` occurrence with the same validated and quoted schema used for EF-generated SQL. Parameters and all other SQL text remain unchanged. Repeated tokens support joins, CTEs, and subqueries without parsing SQL.
+In QualifiedNames mode the interceptor replaces every `{{schema}}` occurrence in PostgreSQL SQL code with the same validated and quoted schema used for EF-generated SQL. Parameters and all other SQL text remain unchanged. The lightweight lexical scanner preserves token-shaped text inside normal and escape string literals, quoted identifiers, line comments, nested block comments, and dollar-quoted bodies. Repeated code-region tokens support joins, CTEs, and subqueries without parsing relation syntax.
 
 Schema-independent commands such as `SELECT 1` remain valid without a token. Aether does not attempt to infer whether arbitrary SQL is schema-dependent. Documentation requires `{{schema}}` for every schema-dependent raw SQL relation reference.
 
@@ -105,7 +105,7 @@ PendingDomainEvent
   Envelope: OrderCreated
 ```
 
-The context-specific `ILocalTransactionEventEnqueuer` captures the schema when `CompositeUnitOfWork` creates the context. Event dispatch groups pending events by schema and enters `ICurrentSchema.Change(schema)` for each group.
+The context-specific `ILocalTransactionEventEnqueuer` captures the schema when `CompositeUnitOfWork` creates the context. Event dispatch processes contiguous schema runs and enters `ICurrentSchema.Change(schema)` for each run. This preserves exact production order (for example, A1, B1, A2) while avoiding per-event scope churn where adjacent events share a schema.
 
 This ensures that:
 
@@ -139,7 +139,7 @@ For `PublishWithFallback`:
 
 ### Non-transactional commit
 
-`AetherDomainEventOptions.DispatchNonTransactionalEventsToOutbox` is removed. Buffered events in every non-transactional Unit of Work are handled by `CommitAsync` without configuration.
+The historical non-transactional dispatch opt-in is removed. Buffered events in every non-transactional Unit of Work are handled by `CommitAsync` without configuration.
 
 For `AlwaysUseOutbox`:
 
@@ -164,7 +164,7 @@ A participating `Required` scope does not own the shared root and therefore cann
 - A transactional inner `Required` scope cannot join a non-transactional outer root. It fails with guidance to use `RequiresNew`.
 - `RequiresNew` creates and owns an isolated root and retains independent commit/rollback behavior.
 
-`UnitOfWorkOptions.IsTransactional` documentation must no longer claim that a transaction can be escalated later. `EnsureTransactionAsync` is not a real escalation mechanism in the current shared-connection design.
+The root's effective transaction mode is fixed at initialization. `UnitOfWorkOptions.IsTransactional` documentation must not claim that a transaction can be escalated later; `EnsureTransactionAsync` is not an escalation mechanism in the current shared-connection design.
 
 ## Error Handling
 
