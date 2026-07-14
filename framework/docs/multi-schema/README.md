@@ -25,7 +25,8 @@ Applications requiring true multi-schema isolation must use PostgreSQL.
 ## Database providers
 
 `BBT.Aether.Infrastructure` is **provider-agnostic** — it has no `Npgsql` dependency. The Unit
-of Work owns a single shared `DbConnection` / `DbTransaction` and talks to an
+of Work owns a single shared `DbConnection` and, when `IsTransactional = true`, a single shared
+`DbTransaction`. It talks to an
 [`IAetherDatabaseProvider`](../../src/BBT.Aether.Infrastructure/BBT/Aether/Uow/EntityFrameworkCore/IAetherDatabaseProvider.cs)
 seam (connection creation, binding options to the shared connection, and the per-schema
 strategy). Pick a provider package:
@@ -76,9 +77,12 @@ using (currentSchema.Change("flow_a"))
 The scope flows across `await` boundaries (`AsyncLocal`) and restores the previous value on
 dispose. Out-of-order disposal throws `InvalidOperationException` ("Schema scope corrupted").
 
-> There is no `ICurrentSchema.Set()`, no `IsResolved` flag, no session-level
-> `SET search_path`, and no `NpgsqlSchemaConnectionInterceptor`. Earlier designs used those;
-> they have been removed. Schema is applied per command on the shared transaction (see below).
+> The obsolete `ICurrentSchema.Set()` / `IsResolved` API and
+> `NpgsqlSchemaConnectionInterceptor` have been removed. There is no single SQL mechanism shared
+> by every mode: `TransactionLocal` applies transaction-local state per command,
+> `SessionSearchPath` deliberately uses session-level `SET` / `RESET search_path`, and
+> `QualifiedNames` qualifies relations without changing `search_path`. See
+> [Schema switching modes](#schema-switching-modes) for the mode-specific contract.
 
 ### Schema-name formatting and validation
 

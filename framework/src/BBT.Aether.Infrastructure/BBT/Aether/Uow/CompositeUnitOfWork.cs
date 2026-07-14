@@ -16,12 +16,16 @@ using Microsoft.Extensions.DependencyInjection;
 namespace BBT.Aether.Uow;
 
 /// <summary>
-/// Root unit of work backed by a single shared <see cref="DbConnection"/> and a single
+/// Root unit of work backed by a single shared <see cref="DbConnection"/> and, when
+/// <see cref="UnitOfWorkOptions.IsTransactional"/> is <see langword="true"/>, a single shared
 /// <see cref="DbTransaction"/>. Hands out lazily-created schema-bound <see cref="DbContext"/>
-/// instances keyed by (DbContextType, Schema). Each created context enlists on the shared
-/// transaction via <c>UseTransactionAsync</c> and is bound to its schema by the configured
-/// database provider, so schema isolation is a provider concern.
-/// Dispatches domain events after successful commit, preserving the outbox / direct-publish pipeline.
+/// instances keyed by (DbContextType, Schema). Each created context enlists via
+/// <c>UseTransactionAsync</c> only when the shared transaction exists and is bound to its schema
+/// by the configured database provider, so schema isolation is a provider concern.
+/// Domain events remain buffered until <see cref="CommitAsync"/>. Transactional roots preserve
+/// the outbox / direct-publish commit ordering; non-transactional roots dispatch during
+/// <see cref="CommitAsync"/>, without atomicity between auto-committed business writes and event
+/// delivery.
 /// </summary>
 public sealed class CompositeUnitOfWork(
     IServiceProvider serviceProvider,
@@ -83,9 +87,10 @@ public sealed class CompositeUnitOfWork(
     public IUnitOfWork? Outer { get; private set; }
 
     /// <summary>
-    /// Initializes the unit of work. Does NOT open the connection here — the connection and
-    /// transaction are opened lazily on the first <see cref="GetDbContextAsync{TDbContext}"/>
-    /// call, so an empty unit of work costs nothing.
+    /// Initializes the unit of work. Does NOT open the connection here — the connection is opened
+    /// lazily on the first <see cref="GetDbContextAsync{TDbContext}"/> call. A transaction is opened
+    /// at that point only when <see cref="UnitOfWorkOptions.IsTransactional"/> is
+    /// <see langword="true"/>, so an empty unit of work costs nothing.
     /// </summary>
     public Task InitializeAsync(UnitOfWorkOptions options, CancellationToken cancellationToken = default)
     {
@@ -95,7 +100,8 @@ public sealed class CompositeUnitOfWork(
 
     /// <summary>
     /// Synchronously initializes the unit of work. Because initialization does no real async work
-    /// (it only sets fields; the connection/transaction open lazily on first DbContext creation),
+    /// (it only sets fields; the connection and optional transaction open lazily on first
+    /// DbContext creation),
     /// this lets a caller begin a unit of work in its own execution frame — which is required for
     /// ambient (AsyncLocal) propagation to flow into the caller's continuations.
     /// </summary>
@@ -133,7 +139,11 @@ public sealed class CompositeUnitOfWork(
         IsAborted = true;
     }
 
-    /// <inheritdoc />
+    /// <summary>
+    /// Gets or creates the context bound to <paramref name="schema"/>. The first context opens the
+    /// shared connection and, for a transactional root, the shared transaction. The context
+    /// enlists only when that transaction exists.
+    /// </summary>
     public async Task<TDbContext> GetDbContextAsync<TDbContext>(string schema, CancellationToken cancellationToken = default)
         where TDbContext : DbContext
     {
@@ -189,15 +199,15 @@ public sealed class CompositeUnitOfWork(
     }
 
     /// <summary>
-    /// Ensures that the shared transaction is started. In the new model the transaction is
-    /// always opened together with the connection on first DbContext creation, so this is a
-    /// no-op once a context has been created. No-op if not initialized.
+    /// Preserves the compatibility contract for callers that request a transaction. Transactional
+    /// roots open their shared transaction with the connection on first DbContext creation;
+    /// non-transactional roots are not escalated. This method is therefore a no-op.
     /// </summary>
     public Task EnsureTransactionAsync(IsolationLevel? isolationLevel = null,
         CancellationToken cancellationToken = default)
     {
-        // The connection and transaction are opened lazily and together on the first
-        // GetDbContextAsync call. There is nothing to escalate here.
+        // A transactional root opens its transaction lazily with the connection. A
+        // non-transactional root deliberately has nothing to escalate here.
         return Task.CompletedTask;
     }
 
@@ -224,8 +234,11 @@ public sealed class CompositeUnitOfWork(
     }
 
     /// <summary>
-    /// Commits the shared transaction, then dispatches domain events.
-    /// Throws if the unit of work has been aborted. No-op if not initialized.
+    /// Completes this root using its configured transaction and event-dispatch strategy. A
+    /// transactional root commits its shared transaction with the required outbox/direct-publish
+    /// ordering. A non-transactional root dispatches buffered events only from this method, after
+    /// pending business changes have auto-committed; those writes and event delivery are not
+    /// atomic. Throws if the unit of work has been aborted. No-op if not initialized.
     /// </summary>
     public async Task CommitAsync(CancellationToken cancellationToken = default)
     {
@@ -446,8 +459,8 @@ public sealed class CompositeUnitOfWork(
             "Cannot save or dispatch schema-bound data because ICurrentSchema is not registered.");
 
     /// <summary>
-    /// Rolls back the shared transaction. Exceptions during rollback are swallowed.
-    /// No-op if not initialized.
+    /// Rolls back the shared transaction when one exists. A non-transactional root has no database
+    /// transaction to roll back. Exceptions during rollback are swallowed. No-op if not initialized.
     /// </summary>
     public async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
@@ -475,8 +488,8 @@ public sealed class CompositeUnitOfWork(
     }
 
     /// <summary>
-    /// Disposes the unit of work, rolling back if not completed, then disposing all
-    /// materialized contexts, the transaction, and the connection.
+    /// Disposes the unit of work, rolling back an existing transaction if not completed, then
+    /// disposing all materialized contexts, the optional transaction, and the connection.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -567,7 +580,7 @@ public sealed class CompositeUnitOfWork(
     }
 
     /// <summary>
-    /// Registers a handler to be invoked after successful commit.
+    /// Registers a handler to be invoked after the unit of work completes successfully.
     /// </summary>
     public IDisposable OnCompleted(Func<IUnitOfWork, Task> handler)
     {
