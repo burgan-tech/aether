@@ -2,6 +2,7 @@ using System;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
@@ -24,15 +25,18 @@ namespace BBT.Aether.Infrastructure.Tests.BBT.Aether.Uow;
 public sealed class DomainEventFailureTests
 {
     [EventName("OrderCreated", version: 1)]
-    private sealed class OrderCreatedEvent : IDistributedEvent;
+    private sealed class OrderCreatedEvent(int sequence) : IDistributedEvent
+    {
+        public int Sequence { get; } = sequence;
+    }
 
     private sealed class Order : AggregateRoot<Guid>
     {
         private Order() { }
 
-        public Order(Guid id) : base(id)
+        public Order(Guid id, int sequence = 1) : base(id)
         {
-            AddDistributedEvent(new OrderCreatedEvent());
+            AddDistributedEvent(new OrderCreatedEvent(sequence));
         }
     }
 
@@ -131,5 +135,67 @@ public sealed class DomainEventFailureTests
 
         exception.ShouldBeSameAs(expected);
         uow.IsCompleted.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Publish_fallback_preserves_interleaved_schema_order_and_retries_from_failed_run()
+    {
+        await using var provider = BuildProvider();
+        var currentSchema = provider.GetRequiredService<ICurrentSchema>();
+        var dispatcher = Substitute.For<IDomainEventDispatcher>();
+        var observed = new System.Collections.Generic.List<(string Schema, int Sequence)>();
+        var failSchemaB = true;
+
+        dispatcher.PublishDirectlyAsync(
+                Arg.Any<System.Collections.Generic.IEnumerable<DomainEventEnvelope>>(),
+                Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                var events = callInfo.ArgAt<System.Collections.Generic.IEnumerable<DomainEventEnvelope>>(0);
+                observed.AddRange(events.Select(envelope =>
+                    (currentSchema.Name!, ((OrderCreatedEvent)envelope.Event).Sequence)));
+                return failSchemaB && currentSchema.Name == "schema_b"
+                    ? Task.FromException(new InvalidOperationException("broker unavailable"))
+                    : Task.CompletedTask;
+            });
+        dispatcher.WriteToOutboxInNewScopeAsync(
+                Arg.Any<string>(),
+                Arg.Any<System.Collections.Generic.IEnumerable<DomainEventEnvelope>>(),
+                Arg.Any<CancellationToken>())
+            .Returns(_ => Task.FromException(new InvalidOperationException("outbox unavailable")));
+
+        await using var uow = new CompositeUnitOfWork(
+            provider,
+            dispatcher,
+            new AetherDomainEventOptions { DispatchStrategy = DomainEventDispatchStrategy.PublishWithFallback });
+        await uow.InitializeAsync(new UnitOfWorkOptions { IsTransactional = false });
+
+        var contextA = await uow.GetDbContextAsync<TestDbContext>("schema_a");
+        contextA.Set<Order>().Add(new Order(Guid.NewGuid(), 1));
+        await uow.SaveChangesAsync();
+
+        var contextB = await uow.GetDbContextAsync<TestDbContext>("schema_b");
+        contextB.Set<Order>().Add(new Order(Guid.NewGuid(), 2));
+        await uow.SaveChangesAsync();
+
+        contextA.Set<Order>().Add(new Order(Guid.NewGuid(), 3));
+        await uow.SaveChangesAsync();
+
+        await Should.ThrowAsync<AggregateException>(() => uow.CommitAsync());
+
+        observed.ShouldBe(new[] { ("schema_a", 1), ("schema_b", 2) });
+        uow.IsCompleted.ShouldBeFalse();
+
+        failSchemaB = false;
+        await uow.CommitAsync();
+
+        observed.ShouldBe(new[]
+        {
+            ("schema_a", 1),
+            ("schema_b", 2),
+            ("schema_b", 2),
+            ("schema_a", 3)
+        });
+        uow.IsCompleted.ShouldBeTrue();
     }
 }

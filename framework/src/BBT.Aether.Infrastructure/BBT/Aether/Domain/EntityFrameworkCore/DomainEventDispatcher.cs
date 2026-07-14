@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.Services;
 using BBT.Aether.Events;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -68,7 +69,15 @@ public class DomainEventDispatcher(
         }
     }
 
-    public async Task WriteToOutboxInNewScopeAsync(IEnumerable<DomainEventEnvelope> eventEnvelopes,
+    public Task WriteToOutboxInNewScopeAsync(IEnumerable<DomainEventEnvelope> eventEnvelopes,
+        CancellationToken cancellationToken = default)
+    {
+        var schema = serviceProvider.GetRequiredService<ICurrentSchema>().Name
+            ?? throw new InvalidOperationException("Current schema is not set.");
+        return WriteToOutboxInNewScopeAsync(schema, eventEnvelopes, cancellationToken);
+    }
+
+    public async Task WriteToOutboxInNewScopeAsync(string schema, IEnumerable<DomainEventEnvelope> eventEnvelopes,
         CancellationToken cancellationToken = default)
     {
         var envelopes = eventEnvelopes.ToList();
@@ -76,6 +85,8 @@ public class DomainEventDispatcher(
 
         // Create new scope to avoid ambient UoW
         await using var scope = serviceProvider.CreateAsyncScope();
+        var scopedCurrentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+        using var schemaScope = scopedCurrentSchema.Change(schema);
         var scopedEventBus = scope.ServiceProvider.GetRequiredService<IDistributedEventBus>();
         var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
 

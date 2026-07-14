@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.EntityFrameworkCore;
@@ -33,19 +34,23 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
     private readonly string _schema = "flow_ntx_" + Guid.NewGuid().ToString("N");
 
     [EventName("OrderCreated", version: 1)]
-    private sealed class OrderCreatedEvent(Guid orderId) : IDistributedEvent
+    private sealed class OrderCreatedEvent(Guid orderId, int sequence) : IDistributedEvent
     {
         public Guid OrderId { get; } = orderId;
+        public int Sequence { get; } = sequence;
     }
 
     private sealed class Order : AggregateRoot<Guid>
     {
         private Order() { }
 
-        public Order(Guid id, string customer) : base(id)
+        public Order(Guid id, string customer, int eventCount = 1) : base(id)
         {
             Customer = customer;
-            AddDistributedEvent(new OrderCreatedEvent(id));
+            for (var sequence = 1; sequence <= eventCount; sequence++)
+            {
+                AddDistributedEvent(new OrderCreatedEvent(id, sequence));
+            }
         }
 
         public string Customer { get; private set; } = string.Empty;
@@ -84,6 +89,48 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
             => Task.CompletedTask;
     }
 
+    private sealed class FailSecondOutboxStageController
+    {
+        public bool Enabled { get; init; }
+        public int Calls { get; set; }
+    }
+
+    private sealed class FailSecondOutboxStageEventBus(
+        ITopicNameStrategy topicNameStrategy,
+        IEventSerializer eventSerializer,
+        IOutboxStore outboxStore,
+        AetherEventBusOptions eventBusOptions,
+        ICurrentSchema currentSchema,
+        FailSecondOutboxStageController controller) : IDistributedEventBus
+    {
+        private readonly NoopEventBus _inner = new(
+            topicNameStrategy, eventSerializer, outboxStore, eventBusOptions, currentSchema);
+
+        public Task PublishAsync<TEvent>(TEvent payload, string? subject = null,
+            CancellationToken cancellationToken = default) where TEvent : class =>
+            _inner.PublishAsync(payload, subject, cancellationToken);
+
+        public Task PublishAsync<TEvent>(TEvent payload, string? subject = null, bool useOutbox = true,
+            CancellationToken cancellationToken = default) where TEvent : class =>
+            _inner.PublishAsync(payload, subject, useOutbox, cancellationToken);
+
+        public Task PublishAsync(IDistributedEvent @event, EventMetadata metadata, string? subject = null,
+            bool useOutbox = true, CancellationToken cancellationToken = default)
+        {
+            controller.Calls++;
+            if (controller.Enabled && controller.Calls == 2)
+            {
+                return Task.FromException(new InvalidOperationException("second outbox stage failed"));
+            }
+
+            return _inner.PublishAsync(@event, metadata, subject, useOutbox, cancellationToken);
+        }
+
+        public Task PublishEnvelopeAsync(byte[] serializedEnvelope, string topicName, string pubSubName,
+            CancellationToken cancellationToken = default) =>
+            _inner.PublishEnvelopeAsync(serializedEnvelope, topicName, pubSubName, cancellationToken);
+    }
+
     private sealed class SimpleTopicNameStrategy : ITopicNameStrategy
     {
         public string GetTopicName(Type eventType)
@@ -93,7 +140,7 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
         }
     }
 
-    private IServiceProvider BuildProvider()
+    private IServiceProvider BuildProvider(bool failSecondOutboxStage = false)
     {
         var services = new ServiceCollection();
 
@@ -107,7 +154,8 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
         services.AddSingleton(new AetherEventBusOptions { DefaultSource = "urn:test:orders" });
         services.AddSingleton<ITopicNameStrategy, SimpleTopicNameStrategy>();
         services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
-        services.AddScoped<IDistributedEventBus, NoopEventBus>();
+        services.AddSingleton(new FailSecondOutboxStageController { Enabled = failSecondOutboxStage });
+        services.AddScoped<IDistributedEventBus, FailSecondOutboxStageEventBus>();
 
         return services.BuildServiceProvider();
     }
@@ -182,5 +230,37 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
 
             (await CountAsync("OutboxMessages")).ShouldBe(1);
         }
+    }
+
+    [Fact]
+    public async Task NonTransactional_failed_second_stage_retries_without_duplicate_outbox_rows()
+    {
+        await using var sp = (ServiceProvider)BuildProvider(failSecondOutboxStage: true);
+        await ArrangeSchemaAsync(sp);
+
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
+
+        using (currentSchema.Change(_schema))
+        {
+            await using var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
+
+            var ctx = await provider.GetDbContextAsync();
+            ctx.Set<Order>().Add(new Order(Guid.NewGuid(), "Alice", eventCount: 2));
+            await uow.SaveChangesAsync();
+
+            await Should.ThrowAsync<InvalidOperationException>(() => uow.CommitAsync());
+            uow.IsCompleted.ShouldBeFalse();
+            (await CountAsync("OutboxMessages")).ShouldBe(0);
+
+            await uow.CommitAsync();
+            uow.IsCompleted.ShouldBeTrue();
+        }
+
+        (await CountAsync("OutboxMessages")).ShouldBe(2);
     }
 }

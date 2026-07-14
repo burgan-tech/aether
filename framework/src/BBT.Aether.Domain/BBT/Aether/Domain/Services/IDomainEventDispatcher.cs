@@ -36,6 +36,17 @@ public interface IDomainEventDispatcher
     /// </summary>
     /// <param name="eventEnvelopes">The domain event envelopes to write to outbox</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    Task WriteToOutboxInNewScopeAsync(IEnumerable<DomainEventEnvelope> eventEnvelopes, CancellationToken cancellationToken = default);
-}
+    Task WriteToOutboxInNewScopeAsync(IEnumerable<DomainEventEnvelope> eventEnvelopes,
+        CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Writes events to outbox in a new scope under their producing schema.
+    /// The default preserves compatibility with custom dispatchers that implement the original overload.
+    /// </summary>
+    /// <param name="schema">The schema under which the events were produced</param>
+    /// <param name="eventEnvelopes">The domain event envelopes to write to outbox</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    Task WriteToOutboxInNewScopeAsync(string schema, IEnumerable<DomainEventEnvelope> eventEnvelopes,
+        CancellationToken cancellationToken = default) =>
+        WriteToOutboxInNewScopeAsync(eventEnvelopes, cancellationToken);
+}

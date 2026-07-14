@@ -277,10 +277,7 @@ public sealed class CompositeUnitOfWork(
     {
         if (_events.Count > 0)
         {
-            await ForEachEventGroupAsync(eventDispatcher!.DispatchEventsAsync, cancellationToken);
-
-            // Persist outbox rows written by the dispatcher into the shared transaction.
-            await SaveChangesAsync(cancellationToken);
+            await StageAndSaveOutboxEventsAsync(cancellationToken);
         }
 
         await _transaction!.CommitAsync(cancellationToken);
@@ -301,13 +298,53 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     private async Task CommitWithoutTransactionAsync(CancellationToken cancellationToken)
     {
-        await ForEachEventGroupAsync(eventDispatcher!.DispatchEventsAsync, cancellationToken);
-
-        // Persist any outbox rows written by the dispatcher. Without a shared transaction each
-        // SaveChanges auto-commits; a single outbox INSERT is atomic on its own.
-        await SaveChangesAsync(cancellationToken);
+        await StageAndSaveOutboxEventsAsync(cancellationToken);
 
         _events.Clear();
+    }
+
+    private async Task StageAndSaveOutboxEventsAsync(CancellationToken cancellationToken)
+    {
+        var trackedEntityStates = CaptureTrackedEntityStates();
+        try
+        {
+            await ForEachEventRunAsync(eventDispatcher!.DispatchEventsAsync, cancellationToken);
+
+            // Persist outbox rows written by the dispatcher. In a transactional UoW this remains
+            // part of the shared transaction; without one, the context save auto-commits.
+            await SaveChangesAsync(cancellationToken);
+        }
+        catch
+        {
+            DetachNewOutboxStagingEntities(trackedEntityStates);
+            throw;
+        }
+    }
+
+    private Dictionary<DbContext, List<(object Entity, EntityState State)>> CaptureTrackedEntityStates() =>
+        _contexts.Values.ToDictionary(
+            context => context,
+            context => context.ChangeTracker.Entries()
+                .Select(entry => (entry.Entity, entry.State))
+                .ToList());
+
+    private static void DetachNewOutboxStagingEntities(
+        IReadOnlyDictionary<DbContext, List<(object Entity, EntityState State)>> trackedEntityStates)
+    {
+        foreach (var (context, previousEntries) in trackedEntityStates)
+        {
+            var newOutboxEntries = context.ChangeTracker.Entries()
+                .Where(entry =>
+                    entry.State == EntityState.Added &&
+                    entry.Entity is Domain.Events.OutboxMessage &&
+                    previousEntries.All(previous => !ReferenceEquals(previous.Entity, entry.Entity)))
+                .ToList();
+
+            foreach (var entry in newOutboxEntries)
+            {
+                entry.State = EntityState.Detached;
+            }
+        }
     }
 
     /// <summary>
@@ -325,13 +362,13 @@ public sealed class CompositeUnitOfWork(
 
     private async Task PublishWithFallbackAsync(CancellationToken cancellationToken)
     {
-        foreach (var group in GetEventGroups())
+        foreach (var run in GetEventRuns())
         {
-            using var schemaScope = CurrentSchema.Change(group.Schema);
+            using var schemaScope = CurrentSchema.Change(run.Schema);
             try
             {
                 await eventDispatcher!.PublishDirectlyAsync(
-                    group.Events.Select(x => x.Envelope).ToList(), cancellationToken);
+                    run.Events.Select(x => x.Envelope).ToList(), cancellationToken);
             }
             catch (Exception ex)
             {
@@ -340,7 +377,8 @@ public sealed class CompositeUnitOfWork(
                 try
                 {
                     await eventDispatcher!.WriteToOutboxInNewScopeAsync(
-                        group.Events.Select(x => x.Envelope).ToList(), cancellationToken);
+                        run.Schema,
+                        run.Events.Select(x => x.Envelope).ToList(), cancellationToken);
                 }
                 catch (Exception outboxEx)
                 {
@@ -353,26 +391,38 @@ public sealed class CompositeUnitOfWork(
                 }
             }
 
-            foreach (var pendingEvent in group.Events)
+            foreach (var pendingEvent in run.Events)
                 _events.Remove(pendingEvent);
         }
     }
 
-    private async Task ForEachEventGroupAsync(
+    private async Task ForEachEventRunAsync(
         Func<IReadOnlyList<DomainEventEnvelope>, CancellationToken, Task> action,
         CancellationToken cancellationToken)
     {
-        foreach (var group in GetEventGroups())
+        foreach (var run in GetEventRuns())
         {
-            using (CurrentSchema.Change(group.Schema))
-                await action(group.Events.Select(x => x.Envelope).ToList(), cancellationToken);
+            using (CurrentSchema.Change(run.Schema))
+                await action(run.Events.Select(x => x.Envelope).ToList(), cancellationToken);
         }
     }
 
-    private List<(string Schema, List<PendingDomainEvent> Events)> GetEventGroups() => _events
-        .GroupBy(x => x.Schema, StringComparer.Ordinal)
-        .Select(group => (Schema: group.Key, Events: group.ToList()))
-        .ToList();
+    private List<(string Schema, List<PendingDomainEvent> Events)> GetEventRuns()
+    {
+        var runs = new List<(string Schema, List<PendingDomainEvent> Events)>();
+        foreach (var pendingEvent in _events)
+        {
+            if (runs.Count == 0 ||
+                !string.Equals(runs[^1].Schema, pendingEvent.Schema, StringComparison.Ordinal))
+            {
+                runs.Add((pendingEvent.Schema, new List<PendingDomainEvent>()));
+            }
+
+            runs[^1].Events.Add(pendingEvent);
+        }
+
+        return runs;
+    }
 
     private ICurrentSchema CurrentSchema => _currentSchema
         ?? throw new InvalidOperationException(
