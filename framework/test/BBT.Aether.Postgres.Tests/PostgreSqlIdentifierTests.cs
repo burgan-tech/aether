@@ -1,4 +1,7 @@
+using BBT.Aether.Domain.EntityFrameworkCore.Modeling;
+using BBT.Aether.Domain.Entities;
 using BBT.Aether.MultiSchema;
+using BBT.Aether.Persistence;
 using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -75,12 +78,35 @@ public sealed class PostgreSqlIdentifierTests
             PostgreSqlRelationName.For(entityType, "tenant"));
     }
 
+    [Fact]
+    public void RelationName_qualifies_inbox_and_background_job_mapped_entities()
+    {
+        using var db = CreateFrameworkRelationDbContext();
+
+        PostgreSqlRelationName.For(
+                db.Model.FindEntityType(typeof(BBT.Aether.Domain.Events.InboxMessage))!,
+                "tenant")
+            .ShouldBe("\"tenant\".\"InboxMessages\"");
+        PostgreSqlRelationName.For(
+                db.Model.FindEntityType(typeof(BackgroundJobInfo))!,
+                "tenant")
+            .ShouldBe("\"tenant\".\"BackgroundJobs\"");
+    }
+
     private static RelationDbContext CreateRelationDbContext()
     {
         var options = new DbContextOptionsBuilder<RelationDbContext>()
             .UseNpgsql("Host=localhost;Database=unused;Username=unused;Password=unused")
             .Options;
         return new RelationDbContext(options);
+    }
+
+    private static FrameworkRelationDbContext CreateFrameworkRelationDbContext()
+    {
+        var options = new DbContextOptionsBuilder<FrameworkRelationDbContext>()
+            .UseNpgsql("Host=localhost;Database=unused;Username=unused;Password=unused")
+            .Options;
+        return new FrameworkRelationDbContext(options);
     }
 
     private sealed class RelationDbContext(DbContextOptions<RelationDbContext> options)
@@ -91,6 +117,21 @@ public sealed class PostgreSqlIdentifierTests
             modelBuilder.Entity<RuntimeEntity>().ToTable("runtime_items", AetherSchemaModel.Placeholder);
             modelBuilder.Entity<ExplicitEntity>().ToTable("audit_items", "audit");
             modelBuilder.Entity<ViewEntity>().ToView("items_view");
+        }
+    }
+
+    private sealed class FrameworkRelationDbContext(DbContextOptions<FrameworkRelationDbContext> options)
+        : DbContext(options), IHasEfCoreInbox, IHasEfCoreBackgroundJobs
+    {
+        public DbSet<BBT.Aether.Domain.Events.InboxMessage> InboxMessages =>
+            Set<BBT.Aether.Domain.Events.InboxMessage>();
+
+        public DbSet<BackgroundJobInfo> BackgroundJobs { get; set; } = default!;
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.ConfigureInbox();
+            modelBuilder.ConfigureBackgroundJob();
         }
     }
 

@@ -49,9 +49,6 @@ public sealed class SearchPathCommandInterceptor(
     SchemaSwitchingMode mode,
     ICurrentSchema currentSchema) : DbCommandInterceptor
 {
-    // EF Core applies composite formatting before command interception, so the public
-    // {{schema}} token arrives as {schema} whenever the raw SQL call has parameters.
-    private const string FormattedRawSqlToken = "{schema}";
     private readonly string _schema = schema;
     private readonly string _quotedSchema = PostgreSqlIdentifier.QuoteSchema(schema);
     private readonly string _setLocal =
@@ -197,9 +194,10 @@ public sealed class SearchPathCommandInterceptor(
                 $"DbContext is bound to schema '{_schema}', but current schema is " +
                 $"'{currentSchema.Name ?? "<none>"}'. Resolve the DbContext again inside the new schema scope.");
 
-        command.CommandText = RewriteModelPlaceholder(command.CommandText)
-            .Replace(AetherSchemaModel.RawSqlToken, _quotedSchema, StringComparison.Ordinal)
-            .Replace(FormattedRawSqlToken, _quotedSchema, StringComparison.Ordinal);
+        var modelRewritten = RewriteModelPlaceholder(command.CommandText);
+        command.CommandText = PostgreSqlRawSchemaTokenRewriter
+            .Rewrite(modelRewritten, _quotedSchema)
+            .CommandText;
     }
 
     private string RewriteModelPlaceholder(string commandText)
@@ -242,8 +240,7 @@ public sealed class SearchPathCommandInterceptor(
     private void RejectRawSqlTokenOutsideQualifiedNames(string commandText)
     {
         if (mode != SchemaSwitchingMode.QualifiedNames &&
-            (commandText.Contains(AetherSchemaModel.RawSqlToken, StringComparison.Ordinal) ||
-             commandText.Contains(FormattedRawSqlToken, StringComparison.Ordinal)))
+            PostgreSqlRawSchemaTokenRewriter.Rewrite(commandText, replacement: null).FoundToken)
             throw new InvalidOperationException(
                 $"Raw SQL token '{AetherSchemaModel.RawSqlToken}' requires " +
                 $"SchemaSwitchingMode.QualifiedNames. In {mode} mode, omit the token and rely on " +

@@ -123,6 +123,63 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
     }
 
     [Fact]
+    public void Raw_SQL_tokens_are_rewritten_only_in_SQL_code_regions()
+    {
+        const string schema = "tenant";
+        var interceptor = new SearchPathCommandInterceptor(
+            schema,
+            new SchemaScopeState(),
+            SchemaSwitchingMode.QualifiedNames,
+            new StaticCurrentSchema(schema));
+        using var command = new NpgsqlCommand(
+            """
+            SELECT '{schema}', '{{schema}}', 'it''s {schema}', E'it\'s {{schema}}'
+            , "{schema}", "{{schema}}"
+            -- {schema} {{schema}}
+            /* {schema} /* nested {{schema}} */ {schema} */
+            , $$ BEGIN RAISE NOTICE '{schema}'; END $$
+            , $body$ SELECT '{{schema}}'; $body$
+            FROM {schema}."things" AS formatted
+            JOIN {{schema}}."things" AS public ON public."Id" = formatted."Id"
+            """);
+
+        interceptor.ReaderExecuting(command, null!, default);
+
+        command.CommandText.ShouldBe(
+            """
+            SELECT '{schema}', '{{schema}}', 'it''s {schema}', E'it\'s {{schema}}'
+            , "{schema}", "{{schema}}"
+            -- {schema} {{schema}}
+            /* {schema} /* nested {{schema}} */ {schema} */
+            , $$ BEGIN RAISE NOTICE '{schema}'; END $$
+            , $body$ SELECT '{{schema}}'; $body$
+            FROM "tenant"."things" AS formatted
+            JOIN "tenant"."things" AS public ON public."Id" = formatted."Id"
+            """);
+    }
+
+    [Fact]
+    public void Raw_SQL_tokens_in_protected_regions_are_not_rejected_outside_qualified_names_mode()
+    {
+        const string schema = "tenant";
+        var state = new SchemaScopeState { Current = schema };
+        var interceptor = new SearchPathCommandInterceptor(
+            schema,
+            state,
+            SchemaSwitchingMode.SessionSearchPath,
+            new StaticCurrentSchema(schema));
+        using var command = new NpgsqlCommand(
+            """
+            SELECT '{schema}', "{{schema}}"
+            -- {schema}
+            /* outer {{schema}} /* nested {schema} */ */
+            , $$ SELECT '{schema}' $$, $tag$ {{schema}} $tag$
+            """);
+
+        Should.NotThrow(() => interceptor.ReaderExecuting(command, null!, default));
+    }
+
+    [Fact]
     public async Task Raw_SQL_token_supports_queries_updates_repeated_tokens_and_parameters()
     {
         await ArrangeSchemasAsync();
