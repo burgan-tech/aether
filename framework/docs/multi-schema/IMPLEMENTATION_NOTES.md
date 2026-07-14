@@ -19,7 +19,8 @@
         ├── ONE NpgsqlTransaction  (only when IsTransactional = true)
         ├── SchemaScopeState       (shared; tracks Current schema + optional Cleanup delegate)
         └── DbContext cache keyed by (DbContextType, Schema)
-                                   │  each context enlists on the shared tx (UseTransactionAsync)
+                                   │  transactional UoW: each context enlists on the shared tx
+                                   │  (UseTransactionAsync)
                                    ▼
    SearchPathCommandInterceptor  ──►  mode-aware command handling
         SchemaSwitchingMode.TransactionLocal:  SET LOCAL search_path TO "<schema>", public
@@ -40,10 +41,12 @@
    is no mutable setter and no "is resolved" flag.
    (`BBT.Aether.Core/BBT/Aether/MultiSchema/CurrentSchema.cs`)
 
-2. **One connection + one transaction per Unit of Work.** All schema-bound contexts in a UoW
-   share a single `NpgsqlConnection`/`NpgsqlTransaction`, so cross-schema writes commit
-   atomically. Contexts are lazily created and cached by `(Type, Schema)`; the connection is
-   opened on the first `GetDbContextAsync`.
+2. **One connection, plus one transaction when requested, per Unit of Work.** All schema-bound
+   contexts in a UoW share a single `NpgsqlConnection`. When `IsTransactional = true`, they also
+   enlist in one shared `NpgsqlTransaction`, so cross-schema writes commit atomically. When
+   `IsTransactional = false`, no transaction is created: business writes and outbox writes cannot
+   be atomic across a process failure. Contexts are lazily created and cached by `(Type, Schema)`;
+   the connection is opened on the first `GetDbContextAsync`.
    (`BBT.Aether.Infrastructure/BBT/Aether/Uow/CompositeUnitOfWork.cs`)
 
 3. **Mode-aware isolation via `SchemaSwitchingMode`.** Schema isolation is enforced by a

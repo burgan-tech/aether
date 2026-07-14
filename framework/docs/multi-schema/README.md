@@ -261,6 +261,17 @@ services.AddAetherNpgsql<MyDbContext>(
     connectionString,
     SchemaSwitchingMode.QualifiedNames);
 
+await using var uow = uowManager.Begin(new UnitOfWorkOptions
+{
+    Scope = UnitOfWorkScopeOption.RequiresNew,
+    IsTransactional = true
+});
+
+using (currentSchema.Change("tenant_a"))
+{
+    await repository.GetListAsync();
+}
+
 using (currentSchema.Change("tenant_b"))
 {
     // The same injected repository/service instance can be reused here.
@@ -271,6 +282,8 @@ using (currentSchema.Change("tenant_b"))
         "UPDATE {{schema}}.\"orders\" SET \"Status\" = {0}",
         status);
 }
+
+await uow.CommitAsync();
 ```
 
 Schema-dependent `FromSqlRaw` and `ExecuteSqlRaw` statements must put the exact `{{schema}}`
