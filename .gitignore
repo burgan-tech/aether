@@ -286,6 +286,9 @@ ai-docs/
 # Claude
 .claude/worktrees/*
 
+# Codex
+.worktrees/
+
 #Cursor
 .cursor/plans/*
 .cursor/*.log
