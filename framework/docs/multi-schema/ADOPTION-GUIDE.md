@@ -281,7 +281,7 @@ switching mekanizmalarını implemente etmez.
 | `No active UnitOfWork.` | Ambient UoW yok. Programatik kodda `BeginAsync` yerine senkron `Begin()` kullan; istekte `UseAetherUnitOfWork` + `[UnitOfWork]` var mı bak. |
 | `UnitOfWork DbContext limit exceeded. Limit: N` | Tek UoW'da çok fazla farklı `(tip, schema)`. Tasarımı gözden geçir veya `UnitOfWorkOptions.MaxDbContextCount`'u bilinçli artır. |
 | `Invalid PostgreSQL identifier: X` | Schema adı geçersiz karakter içeriyor. |
-| `TransactionLocal mode requires IsTransactional = true.` | `SchemaSwitchingMode.TransactionLocal` kullanılmış ama `IsTransactional = false`. Ya `IsTransactional = true` yap, ya da `SessionSearchPath` moduna geç. |
+| `SchemaSwitchingMode.TransactionLocal requires a transaction, but none is active.` | `SchemaSwitchingMode.TransactionLocal` aktif transaction olmadan kullanılmış. `IsTransactional = true` yap veya pool moduna göre `SessionSearchPath` ya da `QualifiedNames` seç. |
 | `Unit of work is prepared but not initialized.` | Hazırlanmış (prepared) UoW henüz initialize edilmeden context istendi. İstek akışında aspect/`[UnitOfWork]` başlatmadan önce DB erişimi olmuş. |
 | `Schema scope corrupted: out-of-order disposal detected.` | `Change(...)` kapsamları iç içe ve sırasıyla dispose edilmeli; `using` kullan, elle Dispose'u karıştırma. |
 
