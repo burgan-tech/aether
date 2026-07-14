@@ -19,11 +19,8 @@ using Xunit;
 namespace BBT.Aether.Postgres.Tests;
 
 /// <summary>
-/// Validates <see cref="AetherDomainEventOptions.DispatchNonTransactionalEventsToOutbox"/>: when a
-/// unit of work runs WITHOUT a shared transaction (IsTransactional=false — the per-step / autoSave
-/// style used by long-running workflows), buffered domain events are normally dropped on commit
-/// because there is no transaction to co-commit them. The flag opts such flows into flushing their
-/// events to the outbox on commit (at-least-once, not atomic with the business writes).
+/// Validates that a non-transactional unit of work buffers domain events at save time and flushes
+/// them to the outbox only at its commit boundary.
 /// <para>
 /// Mirrors <see cref="OutboxWithinSharedTransactionTests"/>'s harness: a real
 /// <see cref="DomainEventDispatchStrategy.AlwaysUseOutbox"/> pipeline with a real outbox store; only
@@ -96,17 +93,15 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
         }
     }
 
-    private IServiceProvider BuildProvider(bool dispatchNonTransactional)
+    private IServiceProvider BuildProvider()
     {
         var services = new ServiceCollection();
 
         services.AddAetherCore(_ => { });
         // Session search-path mode so a non-transactional UoW is usable (TransactionLocal, the
-        // default, requires a transaction). This mirrors a deployment that runs non-transactional,
-        // per-step/autoSave transitions — exactly the flows the new flag targets.
+        // default, requires a transaction).
         services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString, SchemaSwitchingMode.SessionSearchPath);
-        services.AddAetherDomainEvents<TestDbContext>(o =>
-            o.DispatchNonTransactionalEventsToOutbox = dispatchNonTransactional);
+        services.AddAetherDomainEvents<TestDbContext>();
         services.AddAetherOutbox<TestDbContext>();
 
         services.AddSingleton(new AetherEventBusOptions { DefaultSource = "urn:test:orders" });
@@ -158,8 +153,12 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
         return (long)(await cmd.ExecuteScalarAsync())!;
     }
 
-    private async Task RunNonTransactionalAsync(IServiceProvider sp)
+    [Fact]
+    public async Task NonTransactional_SaveChanges_buffers_and_Commit_writes_outbox()
     {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+
         await using var scope = sp.CreateAsyncScope();
         var ssp = scope.ServiceProvider;
         var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
@@ -168,44 +167,20 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
 
         using (currentSchema.Change(_schema))
         {
-            // No transaction: the per-step / autoSave style. Business data is auto-committed by
-            // SaveChanges; there is no shared transaction to co-commit events with.
             await using var uow = uowManager.Begin(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
 
             var ctx = await provider.GetDbContextAsync();
             ctx.Set<Order>().Add(new Order(Guid.NewGuid(), "Alice"));
 
-            // Persist business data (and let the sink buffer the aggregate's event).
             await uow.SaveChangesAsync();
 
+            (await CountAsync("orders")).ShouldBe(1);
+            (await CountAsync("OutboxMessages")).ShouldBe(0);
+
             await uow.CommitAsync();
+
+            (await CountAsync("OutboxMessages")).ShouldBe(1);
         }
-    }
-
-    [Fact]
-    public async Task Flag_On_NonTransactional_Commit_Writes_Event_To_Outbox()
-    {
-        var sp = BuildProvider(dispatchNonTransactional: true);
-        await ArrangeSchemaAsync(sp);
-
-        await RunNonTransactionalAsync(sp);
-
-        (await CountAsync("orders")).ShouldBe(1);
-        (await CountAsync("OutboxMessages")).ShouldBe(1);
-    }
-
-    [Fact]
-    public async Task Flag_Off_NonTransactional_Commit_Drops_Event_Historical_Behavior()
-    {
-        var sp = BuildProvider(dispatchNonTransactional: false);
-        await ArrangeSchemaAsync(sp);
-
-        await RunNonTransactionalAsync(sp);
-
-        // Business data is committed, but without a transaction and with the flag off the buffered
-        // event is not dispatched — the historical behavior the flag preserves by default.
-        (await CountAsync("orders")).ShouldBe(1);
-        (await CountAsync("OutboxMessages")).ShouldBe(0);
     }
 }

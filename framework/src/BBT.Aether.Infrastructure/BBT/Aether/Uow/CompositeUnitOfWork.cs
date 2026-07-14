@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.Services;
 using BBT.Aether.Events;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow.EntityFrameworkCore;
 using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
@@ -29,12 +30,13 @@ public sealed class CompositeUnitOfWork(
     : IEfCoreUnitOfWork, ITransactionalRoot
 {
     private readonly Dictionary<DbContextKey, DbContext> _contexts = new();
-    private readonly List<DomainEventEnvelope> _events = new();
+    private readonly List<PendingDomainEvent> _events = new();
     private readonly List<Func<IUnitOfWork, Task>> _completedHandlers = new();
     private readonly List<Func<IUnitOfWork, Exception?, Task>> _failedHandlers = new();
     private readonly List<Action<IUnitOfWork>> _disposedHandlers = new();
 
     private readonly SchemaScopeState _schemaState = new();
+    private readonly ICurrentSchema? _currentSchema = serviceProvider.GetService<ICurrentSchema>();
 
     private DbConnection? _connection;
     private DbTransaction? _transaction;
@@ -164,7 +166,7 @@ public sealed class CompositeUnitOfWork(
 
         if (context is AetherDbContext<TDbContext> aether)
         {
-            aether.LocalEventEnqueuer = new BufferEnqueuer(_events);
+            aether.LocalEventEnqueuer = new BufferEnqueuer(schema, _events);
         }
 
         _contexts[key] = context;
@@ -195,12 +197,12 @@ public sealed class CompositeUnitOfWork(
             return;
         }
 
-        foreach (var context in _contexts.Values)
+        foreach (var (key, context) in _contexts)
         {
-            if (context.ChangeTracker.HasChanges())
-            {
+            if (!context.ChangeTracker.HasChanges()) continue;
+
+            using (CurrentSchema.Change(key.Schema))
                 await context.SaveChangesAsync(cancellationToken);
-            }
         }
     }
 
@@ -225,11 +227,17 @@ public sealed class CompositeUnitOfWork(
         {
             await SaveChangesAsync(cancellationToken);
 
+            if (_events.Count > 0 && eventDispatcher is null)
+            {
+                throw new InvalidOperationException(
+                    "Cannot commit pending domain events because IDomainEventDispatcher is not registered.");
+            }
+
+            var strategy = domainEventOptions?.DispatchStrategy ?? DomainEventDispatchStrategy.AlwaysUseOutbox;
+
             // There may be no connection/transaction if nothing was read or written.
             if (_transaction is not null)
             {
-                var strategy = domainEventOptions?.DispatchStrategy ?? DomainEventDispatchStrategy.AlwaysUseOutbox;
-
                 if (strategy == DomainEventDispatchStrategy.AlwaysUseOutbox)
                 {
                     await CommitWithOutboxAsync(cancellationToken);
@@ -239,11 +247,16 @@ public sealed class CompositeUnitOfWork(
                     await CommitWithDirectPublishAsync(cancellationToken);
                 }
             }
-            else if ((domainEventOptions?.DispatchNonTransactionalEventsToOutbox ?? false)
-                     && _events.Count > 0
-                     && eventDispatcher is not null)
+            else if (_events.Count > 0)
             {
-                await CommitWithoutTransactionAsync(cancellationToken);
+                if (strategy == DomainEventDispatchStrategy.AlwaysUseOutbox)
+                {
+                    await CommitWithoutTransactionAsync(cancellationToken);
+                }
+                else
+                {
+                    await PublishWithFallbackAsync(cancellationToken);
+                }
             }
 
             IsCompleted = true;
@@ -262,23 +275,21 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     private async Task CommitWithOutboxAsync(CancellationToken cancellationToken)
     {
-        if (_events.Any() && eventDispatcher != null)
+        if (_events.Count > 0)
         {
-            await eventDispatcher.DispatchEventsAsync(_events, cancellationToken);
+            await ForEachEventGroupAsync(eventDispatcher!.DispatchEventsAsync, cancellationToken);
 
             // Persist outbox rows written by the dispatcher into the shared transaction.
             await SaveChangesAsync(cancellationToken);
-
-            _events.Clear();
         }
 
         await _transaction!.CommitAsync(cancellationToken);
+        _events.Clear();
     }
 
     /// <summary>
     /// Dispatches buffered domain events for a non-transactional unit of work (no shared
-    /// transaction was opened). Enabled only via
-    /// <see cref="AetherDomainEventOptions.DispatchNonTransactionalEventsToOutbox"/>.
+    /// transaction was opened).
     /// <para>
     /// The business data has already been durably persisted by the earlier (auto-save) writes, so
     /// there is nothing to co-commit here: the events are dispatched with the configured
@@ -290,7 +301,7 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     private async Task CommitWithoutTransactionAsync(CancellationToken cancellationToken)
     {
-        await eventDispatcher!.DispatchEventsAsync(_events, cancellationToken);
+        await ForEachEventGroupAsync(eventDispatcher!.DispatchEventsAsync, cancellationToken);
 
         // Persist any outbox rows written by the dispatcher. Without a shared transaction each
         // SaveChanges auto-commits; a single outbox INSERT is atomic on its own.
@@ -305,20 +316,22 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     private async Task CommitWithDirectPublishAsync(CancellationToken cancellationToken)
     {
-        // Snapshot events before commit; the contexts will be committed and cleared.
-        var allEvents = _events.ToList();
-
         // Step 1: Commit the shared transaction (business data is now persisted).
         await _transaction!.CommitAsync(cancellationToken);
 
         // Step 2: Publish events directly after commit.
-        if (allEvents.Any() && eventDispatcher != null)
+        await PublishWithFallbackAsync(cancellationToken);
+    }
+
+    private async Task PublishWithFallbackAsync(CancellationToken cancellationToken)
+    {
+        foreach (var group in GetEventGroups())
         {
+            using var schemaScope = CurrentSchema.Change(group.Schema);
             try
             {
-                await eventDispatcher.PublishDirectlyAsync(allEvents, cancellationToken);
-
-                _events.Clear();
+                await eventDispatcher!.PublishDirectlyAsync(
+                    group.Events.Select(x => x.Envelope).ToList(), cancellationToken);
             }
             catch (Exception ex)
             {
@@ -326,9 +339,8 @@ public sealed class CompositeUnitOfWork(
                 // in a new scope. This ensures business data is not lost even if publish fails.
                 try
                 {
-                    await eventDispatcher.WriteToOutboxInNewScopeAsync(allEvents, cancellationToken);
-
-                    _events.Clear();
+                    await eventDispatcher!.WriteToOutboxInNewScopeAsync(
+                        group.Events.Select(x => x.Envelope).ToList(), cancellationToken);
                 }
                 catch (Exception outboxEx)
                 {
@@ -340,8 +352,31 @@ public sealed class CompositeUnitOfWork(
                         ex, outboxEx);
                 }
             }
+
+            foreach (var pendingEvent in group.Events)
+                _events.Remove(pendingEvent);
         }
     }
+
+    private async Task ForEachEventGroupAsync(
+        Func<IReadOnlyList<DomainEventEnvelope>, CancellationToken, Task> action,
+        CancellationToken cancellationToken)
+    {
+        foreach (var group in GetEventGroups())
+        {
+            using (CurrentSchema.Change(group.Schema))
+                await action(group.Events.Select(x => x.Envelope).ToList(), cancellationToken);
+        }
+    }
+
+    private List<(string Schema, List<PendingDomainEvent> Events)> GetEventGroups() => _events
+        .GroupBy(x => x.Schema, StringComparer.Ordinal)
+        .Select(group => (Schema: group.Key, Events: group.ToList()))
+        .ToList();
+
+    private ICurrentSchema CurrentSchema => _currentSchema
+        ?? throw new InvalidOperationException(
+            "Cannot save or dispatch schema-bound data because ICurrentSchema is not registered.");
 
     /// <summary>
     /// Rolls back the shared transaction. Exceptions during rollback are swallowed.
@@ -552,15 +587,16 @@ public sealed class CompositeUnitOfWork(
     /// Routes events collected by a DbContext during SaveChanges into the unit of work's
     /// shared event buffer, deduplicating by reference.
     /// </summary>
-    private sealed class BufferEnqueuer(List<DomainEventEnvelope> buffer) : ILocalTransactionEventEnqueuer
+    private sealed class BufferEnqueuer(string schema, List<PendingDomainEvent> buffer)
+        : ILocalTransactionEventEnqueuer
     {
         public void EnqueueEvents(IEnumerable<DomainEventEnvelope> events)
         {
             foreach (var evt in events)
             {
-                if (!buffer.Contains(evt))
+                if (buffer.All(x => !ReferenceEquals(x.Envelope, evt)))
                 {
-                    buffer.Add(evt);
+                    buffer.Add(new PendingDomainEvent(schema, evt));
                 }
             }
         }

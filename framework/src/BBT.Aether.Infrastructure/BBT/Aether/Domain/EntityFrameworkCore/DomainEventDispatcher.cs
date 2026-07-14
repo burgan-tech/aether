@@ -24,52 +24,28 @@ public class DomainEventDispatcher(
     public async Task DispatchEventsAsync(IEnumerable<DomainEventEnvelope> eventEnvelopes,
         CancellationToken cancellationToken = default)
     {
-        // For AlwaysUseOutbox strategy, write directly to outbox within transaction
-        // For backwards compatibility, also support the old WriteToOutboxOnPublishError flag
         var useOutboxDirectly = options.DispatchStrategy == DomainEventDispatchStrategy.AlwaysUseOutbox;
-        
+
         foreach (var envelope in eventEnvelopes)
         {
             var @event = envelope.Event;
             var metadata = envelope.Metadata;
 
-            if (useOutboxDirectly)
-            {
-                try
-                {
-                    logger.LogDebug("Writing domain event to outbox: {EventType} (Name: {EventName}, Version: {Version})",
-                        metadata.EventType.Name, metadata.EventName, metadata.Version);
+            logger.LogDebug(
+                useOutboxDirectly
+                    ? "Writing domain event to outbox: {EventType} (Name: {EventName}, Version: {Version})"
+                    : "Dispatching domain event: {EventType} (Name: {EventName}, Version: {Version})",
+                metadata.EventType.Name, metadata.EventName, metadata.Version);
 
-                    await eventBus.PublishAsync(@event, metadata, 
-                        subject: EventSubjectExtractor.ExtractSubject(@event),
-                        useOutbox: true, cancellationToken);
+            await eventBus.PublishAsync(@event, metadata,
+                subject: EventSubjectExtractor.ExtractSubject(@event),
+                useOutbox: useOutboxDirectly, cancellationToken);
 
-                    logger.LogDebug("Successfully wrote domain event to outbox: {EventType}", metadata.EventType.Name);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex,
-                        "Failed to publish domain event to outbox: {EventType}. Continuing with remaining events",
-                        metadata.EventType.Name);
-                }
-            }
-            else
-            {
-                try
-                {
-                    logger.LogDebug("Dispatching domain event: {EventType} (Name: {EventName}, Version: {Version})",
-                        metadata.EventType.Name, metadata.EventName, metadata.Version);
-
-                    await eventBus.PublishAsync(@event, metadata, subject: EventSubjectExtractor.ExtractSubject(@event),
-                        useOutbox: false, cancellationToken);
-
-                    logger.LogDebug("Successfully dispatched domain event: {EventType}", metadata.EventType.Name);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex, "Failed to publish domain event: {EventType}", metadata.EventType.Name);
-                }
-            }
+            logger.LogDebug(
+                useOutboxDirectly
+                    ? "Successfully wrote domain event to outbox: {EventType}"
+                    : "Successfully dispatched domain event: {EventType}",
+                metadata.EventType.Name);
         }
     }
 
@@ -95,6 +71,7 @@ public class DomainEventDispatcher(
     public async Task WriteToOutboxInNewScopeAsync(IEnumerable<DomainEventEnvelope> eventEnvelopes,
         CancellationToken cancellationToken = default)
     {
+        var envelopes = eventEnvelopes.ToList();
         logger.LogWarning("Direct publish failed, writing events to outbox in new scope as fallback");
 
         // Create new scope to avoid ambient UoW
@@ -107,7 +84,7 @@ public class DomainEventDispatcher(
         await using var uow = uowManager.Begin(
             new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew });
 
-        foreach (var envelope in eventEnvelopes)
+        foreach (var envelope in envelopes)
         {
             var @event = envelope.Event;
             var metadata = envelope.Metadata;
@@ -126,6 +103,6 @@ public class DomainEventDispatcher(
         await uow.CommitAsync(cancellationToken);
 
         logger.LogInformation("Successfully wrote {Count} events to outbox in new scope", 
-            eventEnvelopes.Count());
+            envelopes.Count);
     }
 }
