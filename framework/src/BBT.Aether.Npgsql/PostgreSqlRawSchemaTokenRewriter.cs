@@ -24,7 +24,15 @@ internal static class PostgreSqlRawSchemaTokenRewriter
         {
             if (commandText[position] == '\'' || commandText[position] == '"')
             {
-                CopyQuotedRegion(commandText, rewritten, ref position, commandText[position]);
+                var quote = commandText[position];
+                var usesBackslashEscapes = quote == '\'' &&
+                                           HasEscapeStringPrefix(commandText, position);
+                CopyQuotedRegion(
+                    commandText,
+                    rewritten,
+                    ref position,
+                    quote,
+                    usesBackslashEscapes);
                 continue;
             }
 
@@ -79,14 +87,15 @@ internal static class PostgreSqlRawSchemaTokenRewriter
         string sql,
         StringBuilder output,
         ref int position,
-        char quote)
+        char quote,
+        bool usesBackslashEscapes)
     {
         output.Append(sql[position++]);
         while (position < sql.Length)
         {
             var current = sql[position++];
             output.Append(current);
-            if (quote == '\'' && current == '\\' && position < sql.Length)
+            if (usesBackslashEscapes && current == '\\' && position < sql.Length)
             {
                 output.Append(sql[position++]);
                 continue;
@@ -103,6 +112,14 @@ internal static class PostgreSqlRawSchemaTokenRewriter
 
             return;
         }
+    }
+
+    private static bool HasEscapeStringPrefix(string sql, int quotePosition)
+    {
+        if (quotePosition == 0 || sql[quotePosition - 1] is not ('E' or 'e'))
+            return false;
+
+        return quotePosition == 1 || !IsIdentifierContinuation(sql[quotePosition - 2]);
     }
 
     private static void CopyLineComment(string sql, StringBuilder output, ref int position)

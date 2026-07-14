@@ -159,6 +159,54 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
     }
 
     [Fact]
+    public void Raw_SQL_token_after_ordinary_string_ending_in_backslash_is_rewritten()
+    {
+        const string schema = "tenant";
+        var interceptor = new SearchPathCommandInterceptor(
+            schema,
+            new SchemaScopeState(),
+            SchemaSwitchingMode.QualifiedNames,
+            new StaticCurrentSchema(schema));
+        using var command = new NpgsqlCommand(
+            """
+            SELECT 'ordinary\', {schema}."things"
+            """);
+
+        interceptor.ReaderExecuting(command, null!, default);
+
+        command.CommandText.ShouldBe(
+            """
+            SELECT 'ordinary\', "tenant"."things"
+            """);
+    }
+
+    [Fact]
+    public void Raw_SQL_tokens_in_escape_string_with_escaped_quote_and_backslash_are_protected()
+    {
+        const string schema = "tenant";
+        var interceptor = new SearchPathCommandInterceptor(
+            schema,
+            new SchemaScopeState(),
+            SchemaSwitchingMode.QualifiedNames,
+            new StaticCurrentSchema(schema));
+        using var command = new NpgsqlCommand(
+            """
+            SELECT E'escaped quote \'{schema} and backslash \\{{schema}}'
+            , e'escaped quote \'{{schema}} and backslash \\{schema}'
+            , {schema}."things"
+            """);
+
+        interceptor.ReaderExecuting(command, null!, default);
+
+        command.CommandText.ShouldBe(
+            """
+            SELECT E'escaped quote \'{schema} and backslash \\{{schema}}'
+            , e'escaped quote \'{{schema}} and backslash \\{schema}'
+            , "tenant"."things"
+            """);
+    }
+
+    [Fact]
     public void Raw_SQL_tokens_in_protected_regions_are_not_rejected_outside_qualified_names_mode()
     {
         const string schema = "tenant";
