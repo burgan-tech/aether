@@ -1,4 +1,5 @@
 using System.Data.Common;
+using BBT.Aether.MultiSchema;
 using Microsoft.EntityFrameworkCore;
 
 namespace BBT.Aether.Uow.EntityFrameworkCore;
@@ -12,6 +13,6 @@ public interface IAetherDatabaseProvider
 {
     DbConnection CreateConnection(string connectionString);
     void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,
-        string schema, SchemaScopeState state);
+        string schema, SchemaScopeState state, ICurrentSchema currentSchema);
     void ApplyConnectionString(DbContextOptionsBuilder builder, string connectionString);
 }

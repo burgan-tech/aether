@@ -1,4 +1,5 @@
 using System.Data.Common;
+using BBT.Aether.MultiSchema;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
@@ -22,7 +23,7 @@ public sealed class SqlServerAetherProvider : IAetherDatabaseProvider
     public DbConnection CreateConnection(string connectionString) => new SqlConnection(connectionString);
 
     public void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,
-        string schema, SchemaScopeState state)
+        string schema, SchemaScopeState state, ICurrentSchema currentSchema)
         => builder.UseSqlServer(sharedConnection);
 
     public void ApplyConnectionString(DbContextOptionsBuilder builder, string connectionString)

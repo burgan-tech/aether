@@ -30,7 +30,10 @@ namespace BBT.Aether.Uow.EntityFrameworkCore;
 ///   </item>
 ///   <item>
 ///     <term><see cref="SchemaSwitchingMode.QualifiedNames"/></term>
-///     <description>Not yet implemented — throws <see cref="NotSupportedException"/>.</description>
+///     <description>
+///       Rewrites the model's exact schema placeholder to the context-bound qualified schema.
+///       Throws if the current schema no longer matches that binding.
+///     </description>
 ///   </item>
 /// </list>
 /// <remarks>
@@ -42,9 +45,11 @@ namespace BBT.Aether.Uow.EntityFrameworkCore;
 public sealed class SearchPathCommandInterceptor(
     string schema,
     SchemaScopeState state,
-    SchemaSwitchingMode mode) : DbCommandInterceptor
+    SchemaSwitchingMode mode,
+    ICurrentSchema currentSchema) : DbCommandInterceptor
 {
     private readonly string _schema = schema;
+    private readonly string _quotedSchema = PostgreSqlIdentifier.QuoteSchema(schema);
     private readonly string _setLocal =
         $"SET LOCAL search_path TO {PostgreSqlIdentifier.QuoteSchema(schema)}, public";
     private readonly string _setSession =
@@ -128,8 +133,8 @@ public sealed class SearchPathCommandInterceptor(
                 break;
 
             case SchemaSwitchingMode.QualifiedNames:
-                throw new NotSupportedException(
-                    "SchemaSwitchingMode.QualifiedNames is not yet implemented.");
+                ApplyQualifiedNames(command);
+                break;
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown SchemaSwitchingMode.");
@@ -169,11 +174,24 @@ public sealed class SearchPathCommandInterceptor(
                 break;
 
             case SchemaSwitchingMode.QualifiedNames:
-                throw new NotSupportedException(
-                    "SchemaSwitchingMode.QualifiedNames is not yet implemented.");
+                ApplyQualifiedNames(command);
+                break;
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown SchemaSwitchingMode.");
         }
+    }
+
+    private void ApplyQualifiedNames(DbCommand command)
+    {
+        if (!string.Equals(currentSchema.Name, _schema, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"DbContext is bound to schema '{_schema}', but current schema is " +
+                $"'{currentSchema.Name ?? "<none>"}'. Resolve the DbContext again inside the new schema scope.");
+
+        command.CommandText = command.CommandText
+            .Replace(AetherSchemaModel.QuotedPlaceholder, _quotedSchema, StringComparison.Ordinal)
+            // Npgsql leaves safe lowercase identifiers unquoted, including the model placeholder.
+            .Replace(AetherSchemaModel.Placeholder, _quotedSchema, StringComparison.Ordinal);
     }
 }
