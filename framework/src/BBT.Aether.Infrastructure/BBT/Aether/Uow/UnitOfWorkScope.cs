@@ -62,10 +62,9 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     public bool IsDisposed => _isDisposed;
 
     /// <summary>
-    /// Gets the root composite unit of work.
-    /// Made public to allow aspects to access the root for transaction escalation.
+    /// Gets the root composite unit of work for manager-owned participant coordination.
     /// </summary>
-    public CompositeUnitOfWork Root => _root;
+    internal CompositeUnitOfWork Root => _root;
 
     /// <summary>
     /// Gets whether the shared root can no longer be used, independently of this participant's
@@ -76,6 +75,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public void SetOuter(IUnitOfWork? outer)
     {
+        UnitOfWorkOuterChainGuard.Validate(this, outer);
         _outer = outer;
     }
 
@@ -179,6 +179,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public IDisposable OnCompleted(Func<IUnitOfWork, Task> handler)
     {
+        ThrowIfCannotRegisterHandler();
         // Forward to root so hooks fire once when root completes
         return _root.OnCompleted(handler);
     }
@@ -186,6 +187,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public IDisposable OnFailed(Func<IUnitOfWork, Exception?, Task> handler)
     {
+        ThrowIfCannotRegisterHandler();
         // Forward to root so hooks fire once when root fails
         return _root.OnFailed(handler);
     }
@@ -193,7 +195,17 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public IDisposable OnDisposed(Action<IUnitOfWork> handler)
     {
+        ThrowIfCannotRegisterHandler();
         // Forward to root so hooks fire once when root is disposed
         return _root.OnDisposed(handler);
+    }
+
+    private void ThrowIfCannotRegisterHandler()
+    {
+        if (_isDisposed || IsRootTerminal || (!_ownsRoot && _participantCompleted))
+        {
+            throw new InvalidOperationException(
+                "Cannot register handlers on a completed or disposed unit of work.");
+        }
     }
 }

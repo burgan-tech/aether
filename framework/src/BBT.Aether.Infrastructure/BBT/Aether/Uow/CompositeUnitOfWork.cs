@@ -107,6 +107,7 @@ public sealed class CompositeUnitOfWork(
     /// <inheritdoc />
     public void SetOuter(IUnitOfWork? outer)
     {
+        UnitOfWorkOuterChainGuard.Validate(this, outer);
         Outer = outer;
     }
 
@@ -559,6 +560,7 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     public IDisposable OnCompleted(Func<IUnitOfWork, Task> handler)
     {
+        ThrowIfCannotRegisterHandler();
         _completedHandlers.Add(handler);
         return new AetherSubscription<Func<IUnitOfWork, Task>>(_completedHandlers, handler);
     }
@@ -568,6 +570,7 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     public IDisposable OnFailed(Func<IUnitOfWork, Exception?, Task> handler)
     {
+        ThrowIfCannotRegisterHandler();
         _failedHandlers.Add(handler);
         return new AetherSubscription<Func<IUnitOfWork, Exception?, Task>>(_failedHandlers, handler);
     }
@@ -577,8 +580,18 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     public IDisposable OnDisposed(Action<IUnitOfWork> handler)
     {
+        ThrowIfCannotRegisterHandler();
         _disposedHandlers.Add(handler);
         return new AetherSubscription<Action<IUnitOfWork>>(_disposedHandlers, handler);
+    }
+
+    private void ThrowIfCannotRegisterHandler()
+    {
+        if (IsCompleted || _isDisposed)
+        {
+            throw new InvalidOperationException(
+                "Cannot register handlers on a completed or disposed unit of work.");
+        }
     }
 
     private async Task InvokeCompletedHandlersAsync()

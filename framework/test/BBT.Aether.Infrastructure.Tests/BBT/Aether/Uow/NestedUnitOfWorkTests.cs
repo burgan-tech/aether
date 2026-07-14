@@ -1,9 +1,11 @@
 using System;
+using System.Reflection;
 using System.Threading.Tasks;
 using BBT.Aether.Uow;
 using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using NSubstitute;
 using Shouldly;
 using Xunit;
 
@@ -20,6 +22,125 @@ public sealed class NestedUnitOfWorkTests
         services.AddSingleton<IAmbientUnitOfWorkAccessor, AsyncLocalAmbientUowAccessor>();
         services.AddScoped<IUnitOfWorkManager, UnitOfWorkManager>();
         return services.BuildServiceProvider();
+    }
+
+    [Fact]
+    public void UnitOfWorkScope_does_not_expose_its_root_as_public_API()
+    {
+        typeof(UnitOfWorkScope).GetProperty(
+            "Root",
+            BindingFlags.Instance | BindingFlags.Public).ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task SetOuter_rejects_self_reference_and_cyclic_outer_chains()
+    {
+        await using var serviceScope = BuildProvider().CreateAsyncScope();
+        var manager = serviceScope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        await using var owner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+
+        Should.Throw<InvalidOperationException>(() => owner.SetOuter(owner));
+
+        var cycleA = Substitute.For<IUnitOfWork>();
+        var cycleB = Substitute.For<IUnitOfWork>();
+        cycleA.Outer.Returns(cycleB);
+        cycleB.Outer.Returns(cycleA);
+
+        Should.Throw<InvalidOperationException>(() => owner.SetOuter(cycleA));
+
+        var rootA = new CompositeUnitOfWork(serviceScope.ServiceProvider);
+        var rootB = new CompositeUnitOfWork(serviceScope.ServiceProvider);
+        rootA.SetOuter(rootB);
+
+        Should.Throw<InvalidOperationException>(() => rootB.SetOuter(rootA));
+    }
+
+    [Fact]
+    public async Task Completed_rolled_back_and_disposed_participants_reject_handler_registration()
+    {
+        await using var serviceScope = BuildProvider().CreateAsyncScope();
+        var manager = serviceScope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        await using var owner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+
+        await using var completed = manager.Begin();
+        await completed.CommitAsync();
+        AssertHandlerRegistrationIsRejected(completed);
+
+        await completed.DisposeAsync();
+        await using var rolledBack = manager.Begin();
+        await rolledBack.RollbackAsync();
+        AssertHandlerRegistrationIsRejected(rolledBack);
+
+        await rolledBack.DisposeAsync();
+        var disposed = manager.Begin();
+        await disposed.DisposeAsync();
+        AssertHandlerRegistrationIsRejected(disposed);
+    }
+
+    [Fact]
+    public async Task Root_terminal_participant_and_owner_reject_handler_registration()
+    {
+        await using var serviceScope = BuildProvider().CreateAsyncScope();
+        var manager = serviceScope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var owner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        var participant = manager.Begin();
+
+        await owner.CommitAsync();
+
+        AssertHandlerRegistrationIsRejected(participant);
+        AssertHandlerRegistrationIsRejected(owner);
+
+        await participant.DisposeAsync();
+        await owner.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Rolled_back_and_disposed_owners_reject_handler_registration()
+    {
+        await using var serviceScope = BuildProvider().CreateAsyncScope();
+        var manager = serviceScope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+
+        var rolledBack = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        await rolledBack.RollbackAsync();
+        AssertHandlerRegistrationIsRejected(rolledBack);
+        await rolledBack.DisposeAsync();
+
+        var disposed = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        await disposed.DisposeAsync();
+        AssertHandlerRegistrationIsRejected(disposed);
+    }
+
+    [Fact]
+    public async Task Terminal_composite_root_rejects_handler_registration()
+    {
+        await using var serviceScope = BuildProvider().CreateAsyncScope();
+        var root = new CompositeUnitOfWork(serviceScope.ServiceProvider);
+        root.InitializeCore(new UnitOfWorkOptions());
+
+        await root.CommitAsync();
+
+        AssertHandlerRegistrationIsRejected(root);
+        await root.DisposeAsync();
     }
 
     [Fact]
@@ -649,5 +770,15 @@ public sealed class NestedUnitOfWorkTests
         var saveException = await Should.ThrowAsync<InvalidOperationException>(() =>
             unitOfWork.SaveChangesAsync());
         saveException.Message.ShouldContain("completed or disposed");
+    }
+
+    private static void AssertHandlerRegistrationIsRejected(IUnitOfWork unitOfWork)
+    {
+        Should.Throw<InvalidOperationException>(() =>
+            unitOfWork.OnCompleted(_ => Task.CompletedTask));
+        Should.Throw<InvalidOperationException>(() =>
+            unitOfWork.OnFailed((_, _) => Task.CompletedTask));
+        Should.Throw<InvalidOperationException>(() =>
+            unitOfWork.OnDisposed(_ => { }));
     }
 }

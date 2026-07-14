@@ -13,8 +13,9 @@ public sealed class UnitOfWorkMiddlewareOptions
 {
     /// <summary>
     /// Default Unit of Work options used by the middleware.
-    /// Default: Reserve pattern (IsTransactional = false) to allow lazy escalation.
-    /// Services/aspects can escalate to transactional as needed.
+    /// Default: non-transactional (<c>IsTransactional = false</c>).
+    /// A nested <c>Required</c> scope inherits this mode; use <c>RequiresNew</c> when a nested
+    /// operation needs a transaction.
     /// </summary>
     public UnitOfWorkOptions DefaultOptions { get; set; } = new()
     {
@@ -53,4 +54,3 @@ public sealed class UnitOfWorkMiddlewareOptions
     /// </summary>
     public Func<HttpContext, bool>? ExcludeWhen { get; set; }
 }
-

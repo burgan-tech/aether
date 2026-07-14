@@ -45,6 +45,9 @@ public interface IUnitOfWork : IAsyncDisposable
     /// Sets the outer (parent) unit of work in the scope chain.
     /// </summary>
     /// <param name="outer">The outer unit of work</param>
+    /// <exception cref="InvalidOperationException">
+    /// The proposed outer chain contains this unit of work or any other reference cycle.
+    /// </exception>
     void SetOuter(IUnitOfWork? outer);
 
     /// <summary>
@@ -79,6 +82,7 @@ public interface IUnitOfWork : IAsyncDisposable
     /// </summary>
     /// <param name="handler">The async handler to invoke on successful completion, receives the UoW instance</param>
     /// <returns>A disposable subscription that can be used to unregister the handler</returns>
+    /// <exception cref="InvalidOperationException">The unit of work is completed or disposed.</exception>
     IDisposable OnCompleted(Func<IUnitOfWork, Task> handler);
 
     /// <summary>
@@ -88,6 +92,7 @@ public interface IUnitOfWork : IAsyncDisposable
     /// </summary>
     /// <param name="handler">The async handler to invoke on failure, receives the UoW instance and exception (if any)</param>
     /// <returns>A disposable subscription that can be used to unregister the handler</returns>
+    /// <exception cref="InvalidOperationException">The unit of work is completed or disposed.</exception>
     IDisposable OnFailed(Func<IUnitOfWork, Exception?, Task> handler);
 
     /// <summary>
@@ -97,6 +102,6 @@ public interface IUnitOfWork : IAsyncDisposable
     /// </summary>
     /// <param name="handler">The sync handler to invoke on disposal, receives the UoW instance</param>
     /// <returns>A disposable subscription that can be used to unregister the handler</returns>
+    /// <exception cref="InvalidOperationException">The unit of work is completed or disposed.</exception>
     IDisposable OnDisposed(Action<IUnitOfWork> handler);
 }
-
