@@ -115,6 +115,11 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     public void Abort()
     {
+        if (IsCompleted || _isDisposed)
+        {
+            return;
+        }
+
         IsAborted = true;
     }
 

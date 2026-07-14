@@ -502,6 +502,144 @@ public sealed class NestedUnitOfWorkTests
         await inner.DisposeAsync();
     }
 
+    [Fact]
+    public async Task Incomplete_required_participant_commit_is_no_op_after_root_commit()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await outer.CommitAsync();
+        await inner.CommitAsync();
+
+        inner.IsCompleted.ShouldBeFalse();
+        outer.IsCompleted.ShouldBeTrue();
+        outer.IsAborted.ShouldBeFalse();
+
+        await inner.DisposeAsync();
+        await outer.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Incomplete_required_participant_commit_is_no_op_after_root_rollback()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await outer.RollbackAsync();
+        await inner.CommitAsync();
+
+        inner.IsCompleted.ShouldBeFalse();
+        outer.IsCompleted.ShouldBeTrue();
+        outer.IsAborted.ShouldBeFalse();
+
+        await inner.DisposeAsync();
+        await outer.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Incomplete_required_participant_commit_is_no_op_after_root_disposal()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await outer.DisposeAsync();
+        await inner.CommitAsync();
+
+        inner.IsCompleted.ShouldBeFalse();
+        outer.IsCompleted.ShouldBeTrue();
+        outer.IsAborted.ShouldBeFalse();
+
+        await inner.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Owner_abort_is_no_op_after_commit()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var owner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+
+        await owner.CommitAsync();
+        owner.Abort();
+
+        owner.IsCompleted.ShouldBeTrue();
+        owner.IsAborted.ShouldBeFalse();
+
+        await owner.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Owner_abort_is_no_op_after_rollback()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var owner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+
+        await owner.RollbackAsync();
+        owner.Abort();
+
+        owner.IsCompleted.ShouldBeTrue();
+        owner.IsAborted.ShouldBeFalse();
+
+        await owner.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Owner_abort_is_no_op_after_disposal()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var owner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+
+        await owner.DisposeAsync();
+        owner.Abort();
+
+        owner.IsCompleted.ShouldBeTrue();
+        owner.IsAborted.ShouldBeFalse();
+    }
+
     private static async Task AssertWorkOperationsAreRejectedAsync(IUnitOfWork unitOfWork)
     {
         var contextException = await Should.ThrowAsync<InvalidOperationException>(() =>

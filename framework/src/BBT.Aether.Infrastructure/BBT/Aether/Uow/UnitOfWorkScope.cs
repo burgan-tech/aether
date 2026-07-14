@@ -110,7 +110,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public async Task CommitAsync(CancellationToken cancellationToken = default)
     {
-        if (!_ownsRoot && (_participantCompleted || _isDisposed))
+        if (!_ownsRoot && (_participantCompleted || _isDisposed || IsRootTerminal))
         {
             return;
         }
