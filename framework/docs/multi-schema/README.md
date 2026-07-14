@@ -353,14 +353,16 @@ Rules for `TransactionLocal` under PgBouncer transaction pooling:
 
 SQL Server is supported via `BBT.Aether.SqlServer` (`SqlServerAetherProvider`), but only as a
 **single-schema** provider. It supplies the shared connection/transaction and binds
-`UseSqlServer`, but does **not** switch schema per command — SQL Server has no
-transaction-scoped `SET LOCAL search_path` equivalent.
+`UseSqlServer`, but does **not** implement the PostgreSQL provider's runtime relation
+qualification or schema-switching mechanisms.
 
 - **Single-schema only.** Bind the schema in the model — `modelBuilder.HasDefaultSchema("x")`
   or schema-qualified `ToTable("orders", "x")`. There is no runtime per-command schema switching.
 - **Runtime cross-schema-in-one-transaction is PostgreSQL-only.** The multi-schema flow above
   (entering several `currentSchema.Change(...)` scopes and writing across schemas in one
-  transaction) relies on the transaction-scoped `SET LOCAL search_path` that SQL Server lacks.
+  transaction) is provided by PostgreSQL's `TransactionLocal`, `SessionSearchPath`, and
+  `QualifiedNames` modes. The SQL Server provider has no equivalent runtime relation
+  rewriting/schema-switching support.
 - **Outbox/Inbox is not yet supported on SQL Server.** Processing currently uses
   PostgreSQL-specific lease SQL (`FOR UPDATE SKIP LOCKED`, in `EfCoreOutboxStore` /
   `EfCoreInboxStore`). SQL Server support is a follow-up.

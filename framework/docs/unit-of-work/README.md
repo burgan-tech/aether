@@ -127,12 +127,15 @@ public class UnitOfWorkOptions
 
 - **`IsTransactional`** — `true` opens a `DbTransaction` on the shared connection before the
   first context is handed out; `false` runs without a transaction. The default is `false` on
-  the struct, but the **HTTP middleware default is `true`** (see [HTTP middleware](#http-middleware)).
+  the options object, but the **HTTP middleware default is `true`** (see
+  [HTTP middleware](#http-middleware)).
   This flag is meaningful: a non-transactional UoW never calls `BeginTransaction`. The root's
   effective transaction mode is fixed when it begins; an inner `Required` scope cannot
   escalate it later. Use `RequiresNew` when the inner operation needs its own transaction.
 - **`Scope`** — `Required` (join an existing UoW or create one), `RequiresNew` (always an
-  independent UoW), or `Suppress` (non-transactional).
+  independent UoW), or `Suppress` (temporarily clear ambient UoW coordination and create no
+  replacement UoW). To create a real non-transactional UoW, use `Required` or `RequiresNew`
+  together with `IsTransactional = false`.
 - **`IsolationLevel`** — applied when the shared transaction is opened (defaults to
   `ReadCommitted`). Ignored when `IsTransactional = false`.
 - **`MaxDbContextCount`** — guardrail on the number of distinct `(DbContextType, Schema)`
@@ -142,8 +145,9 @@ public class UnitOfWorkOptions
 
 ```csharp
 [UnitOfWork(Scope = UnitOfWorkScopeOption.Required)]     // join or create (default)
-[UnitOfWork(Scope = UnitOfWorkScopeOption.RequiresNew)]  // independent transaction
-[UnitOfWork(Scope = UnitOfWorkScopeOption.Suppress)]     // non-transactional
+[UnitOfWork(Scope = UnitOfWorkScopeOption.RequiresNew)]  // independent UoW; transaction is configured separately
+[UnitOfWork(Scope = UnitOfWorkScopeOption.Suppress)]     // clear ambient UoW; no UoW is created
+[UnitOfWork(Scope = UnitOfWorkScopeOption.Required, IsTransactional = false)] // real non-transactional UoW
 ```
 
 A participating `Required` scope does not own the shared root. Its `CommitAsync` is a logical

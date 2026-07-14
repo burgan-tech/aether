@@ -258,14 +258,15 @@ await uow.CommitAsync();   // iki schema TEK transaction'da commit olur (ya hep 
 
 SQL Server `BBT.Aether.SqlServer` (`SqlServerAetherProvider`) ile desteklenir, ancak yalnızca
 **tek-schema** provider olarak. Paylaşılan bağlantı/transaction'ı sağlar ve `UseSqlServer`'ı
-bağlar, fakat komut başına schema değiştirmez — SQL Server'da transaction kapsamlı
-`SET LOCAL search_path` karşılığı yoktur.
+bağlar, fakat PostgreSQL provider'daki çalışma-zamanı relation qualification veya schema
+switching mekanizmalarını implemente etmez.
 
 - **Yalnız tek-schema.** Schema'yı modele bağla: `modelBuilder.HasDefaultSchema("x")` veya
   schema-nitelikli `ToTable("orders", "x")`. Çalışma zamanı komut-başına schema değişimi yok.
 - **Tek transaction'da çalışma-zamanı çok-schema (runtime `Change()` ile schema'lar arası)
-  yalnız PostgreSQL'dedir** — transaction kapsamlı `SET LOCAL search_path`'e dayanır, SQL
-  Server'da bu yok.
+  yalnız PostgreSQL'dedir.** PostgreSQL provider bunu seçilen moda göre `TransactionLocal`,
+  `SessionSearchPath` veya `QualifiedNames` ile sağlar; SQL Server provider'da eşdeğer runtime
+  relation rewriting/schema-switching desteği yoktur.
 - **Outbox/Inbox işleme henüz SQL Server'da desteklenmiyor.** İşleme şu an PostgreSQL'e özgü
   lease SQL'i (`FOR UPDATE SKIP LOCKED`, `EfCoreOutboxStore` / `EfCoreInboxStore`) kullanır;
   SQL Server desteği bir sonraki adım.
@@ -295,12 +296,12 @@ flowchart TB
     CS["ICurrentSchema<br/><small>Change(s) · AsyncLocal stack · Name</small>"]
     MGR["IUnitOfWorkManager<br/><small>Begin() · Prepare() · Current</small>"]
     subgraph CORE["ÇEKİRDEK"]
-      CUOW["CompositeUnitOfWork (root)<br/><small>shared NpgsqlConnection + NpgsqlTransaction</small>"]
+      CUOW["CompositeUnitOfWork (root)<br/><small>shared NpgsqlConnection + optional NpgsqlTransaction</small>"]
       CACHE["Dictionary&lt;(Type,Schema), DbContext&gt;<br/><small>lazy cache</small>"]
     end
     SCOPE["UnitOfWorkScope<br/><small>ambient sarmalı · sahiplik/dispose</small>"]
     PROV["IAetherDbContextProvider<br/><small>Current + schema → context</small>"]
-    INT["SearchPathCommandInterceptor<br/><small>her komut öncesi SET LOCAL</small>"]
+    INT["SearchPathCommandInterceptor<br/><small>TransactionLocal: SET LOCAL · SessionSearchPath: SET/RESET · QualifiedNames: relation qualification</small>"]
     REPO["Repositories · Outbox/Inbox/Job stores"]
 
     MGR --> SCOPE --> CUOW --> CACHE
