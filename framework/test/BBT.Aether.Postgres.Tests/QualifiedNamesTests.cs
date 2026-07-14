@@ -21,7 +21,7 @@ namespace BBT.Aether.Postgres.Tests;
 [Collection("postgres")]
 public sealed class QualifiedNamesTests(PostgresFixture fx)
 {
-    private readonly string _schemaA = "qualified_a_" + Guid.NewGuid().ToString("N");
+    private readonly string _schemaA = "qualified___aether_schema___" + Guid.NewGuid().ToString("N");
     private readonly string _schemaB = "qualified_b_" + Guid.NewGuid().ToString("N");
     private readonly CommandCaptureInterceptor _commands = new();
 
@@ -102,6 +102,24 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
         _commands.CommandTexts.ShouldContain(text => text.Contains($"\"{_schemaB}\".things", StringComparison.Ordinal));
         _commands.CommandTexts.ShouldAllBe(text =>
             !text.Contains("search_path", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Quoted_placeholder_rewrite_does_not_rewrite_schema_contents()
+    {
+        const string schema = "tenant___aether_schema___archive";
+        var interceptor = new SearchPathCommandInterceptor(
+            schema,
+            new SchemaScopeState(),
+            SchemaSwitchingMode.QualifiedNames,
+            new StaticCurrentSchema(schema));
+        using var command = new NpgsqlCommand(
+            "SELECT * FROM \"__aether_schema__\".\"things\"");
+
+        interceptor.ReaderExecuting(command, null!, default);
+
+        command.CommandText.ShouldBe(
+            "SELECT * FROM \"tenant___aether_schema___archive\".\"things\"");
     }
 
     private sealed class Thing : AggregateRoot<Guid>

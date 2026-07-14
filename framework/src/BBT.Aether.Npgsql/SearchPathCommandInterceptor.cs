@@ -1,5 +1,6 @@
 using System;
 using System.Data.Common;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.MultiSchema;
@@ -189,9 +190,43 @@ public sealed class SearchPathCommandInterceptor(
                 $"DbContext is bound to schema '{_schema}', but current schema is " +
                 $"'{currentSchema.Name ?? "<none>"}'. Resolve the DbContext again inside the new schema scope.");
 
-        command.CommandText = command.CommandText
-            .Replace(AetherSchemaModel.QuotedPlaceholder, _quotedSchema, StringComparison.Ordinal)
-            // Npgsql leaves safe lowercase identifiers unquoted, including the model placeholder.
-            .Replace(AetherSchemaModel.Placeholder, _quotedSchema, StringComparison.Ordinal);
+        command.CommandText = RewriteQualifiedNames(command.CommandText);
+    }
+
+    private string RewriteQualifiedNames(string commandText)
+    {
+        var rewritten = new StringBuilder(commandText.Length);
+        var position = 0;
+
+        while (position < commandText.Length)
+        {
+            var quotedIndex = commandText.IndexOf(
+                AetherSchemaModel.QuotedPlaceholder,
+                position,
+                StringComparison.Ordinal);
+            var unquotedIndex = commandText.IndexOf(
+                AetherSchemaModel.Placeholder,
+                position,
+                StringComparison.Ordinal);
+
+            if (quotedIndex < 0 && unquotedIndex < 0)
+            {
+                rewritten.Append(commandText, position, commandText.Length - position);
+                break;
+            }
+
+            var replaceQuoted = quotedIndex >= 0 &&
+                                (unquotedIndex < 0 || quotedIndex <= unquotedIndex);
+            var placeholderIndex = replaceQuoted ? quotedIndex : unquotedIndex;
+            var placeholderLength = replaceQuoted
+                ? AetherSchemaModel.QuotedPlaceholder.Length
+                : AetherSchemaModel.Placeholder.Length;
+
+            rewritten.Append(commandText, position, placeholderIndex - position);
+            rewritten.Append(_quotedSchema);
+            position = placeholderIndex + placeholderLength;
+        }
+
+        return rewritten.ToString();
     }
 }
