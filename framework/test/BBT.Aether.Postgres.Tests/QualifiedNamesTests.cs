@@ -122,6 +122,109 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
             "SELECT * FROM \"tenant___aether_schema___archive\".\"things\"");
     }
 
+    [Fact]
+    public async Task Raw_SQL_token_supports_queries_updates_repeated_tokens_and_parameters()
+    {
+        await ArrangeSchemasAsync();
+        using var provider = BuildProvider(fx);
+        await using var scope = provider.CreateAsyncScope();
+        var sp = scope.ServiceProvider;
+        var currentSchema = sp.GetRequiredService<ICurrentSchema>();
+        var manager = sp.GetRequiredService<IUnitOfWorkManager>();
+        var repository = sp.GetRequiredService<IEfCoreRepository<Thing, Guid>>();
+        var dbContextProvider = sp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
+
+        await using var uow = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+
+        using (currentSchema.Change(_schemaA))
+            await repository.InsertAsync(new Thing(Guid.NewGuid(), "a"), true);
+        using (currentSchema.Change(_schemaB))
+            await repository.InsertAsync(new Thing(Guid.NewGuid(), "b"), true);
+
+        using (currentSchema.Change(_schemaA))
+        {
+            var db = await dbContextProvider.GetDbContextAsync();
+            var nameParameter = new NpgsqlParameter("name", "a");
+            var rows = await db.Set<Thing>()
+                .FromSqlRaw(
+                    "SELECT * FROM {{schema}}.\"things\" WHERE \"Name\" = @name",
+                    nameParameter)
+                .ToListAsync();
+
+            rows.Select(x => x.Name).ShouldBe(["a"]);
+            nameParameter.ParameterName.ShouldBe("name");
+            nameParameter.Value.ShouldBe("a");
+
+            await db.Database.ExecuteSqlRawAsync(
+                "UPDATE {{schema}}.\"things\" SET \"Name\" = {0} WHERE \"Name\" = {1}",
+                "updated", "a");
+
+            var repeatedTokenRows = await db.Set<Thing>()
+                .FromSqlRaw(
+                    """
+                    SELECT source.*
+                    FROM {{schema}}."things" AS source
+                    WHERE EXISTS (
+                        SELECT 1 FROM {{schema}}."things" AS candidate
+                        WHERE candidate."Id" = source."Id" AND candidate."Name" = {0})
+                    """,
+                    "updated")
+                .AsNoTracking()
+                .ToListAsync();
+            repeatedTokenRows.Select(x => x.Name).ShouldBe(["updated"]);
+
+            var scalar = await db.Database
+                .SqlQueryRaw<int>("SELECT 1 AS \"Value\"")
+                .SingleAsync();
+            scalar.ShouldBe(1);
+        }
+
+        using (currentSchema.Change(_schemaB))
+            (await repository.GetListAsync()).Select(x => x.Name).ShouldBe(["b"]);
+
+        await uow.CommitAsync();
+    }
+
+    [Theory]
+    [InlineData("invalid schema")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    public void Raw_SQL_invalid_runtime_schema_is_rejected_before_database_access(string schema)
+    {
+        var commandCount = _commands.CommandTexts.Count;
+
+        var exception = Should.Throw<Exception>(() => new SearchPathCommandInterceptor(
+            schema,
+            new SchemaScopeState(),
+            SchemaSwitchingMode.QualifiedNames,
+            new StaticCurrentSchema(schema)));
+
+        (exception is ArgumentException or InvalidOperationException).ShouldBeTrue();
+        _commands.CommandTexts.Count.ShouldBe(commandCount);
+    }
+
+    [Theory]
+    [InlineData(SchemaSwitchingMode.TransactionLocal)]
+    [InlineData(SchemaSwitchingMode.SessionSearchPath)]
+    public void Raw_SQL_token_is_rejected_outside_qualified_names_mode(SchemaSwitchingMode mode)
+    {
+        const string schema = "tenant";
+        var interceptor = new SearchPathCommandInterceptor(
+            schema,
+            new SchemaScopeState(),
+            mode,
+            new StaticCurrentSchema(schema));
+        using var command = new NpgsqlCommand("SELECT * FROM {{schema}}.\"things\"");
+
+        var exception = Should.Throw<InvalidOperationException>(() =>
+            interceptor.ReaderExecuting(command, null!, default));
+
+        exception.Message.ShouldContain("QualifiedNames");
+    }
+
     private sealed class Thing : AggregateRoot<Guid>
     {
         private Thing() { }

@@ -49,6 +49,9 @@ public sealed class SearchPathCommandInterceptor(
     SchemaSwitchingMode mode,
     ICurrentSchema currentSchema) : DbCommandInterceptor
 {
+    // EF Core applies composite formatting before command interception, so the public
+    // {{schema}} token arrives as {schema} whenever the raw SQL call has parameters.
+    private const string FormattedRawSqlToken = "{schema}";
     private readonly string _schema = schema;
     private readonly string _quotedSchema = PostgreSqlIdentifier.QuoteSchema(schema);
     private readonly string _setLocal =
@@ -103,6 +106,8 @@ public sealed class SearchPathCommandInterceptor(
 
     private void ApplySearchPath(DbCommand command)
     {
+        RejectRawSqlTokenOutsideQualifiedNames(command.CommandText);
+
         switch (mode)
         {
             case SchemaSwitchingMode.TransactionLocal:
@@ -144,6 +149,8 @@ public sealed class SearchPathCommandInterceptor(
 
     private async Task ApplySearchPathAsync(DbCommand command, CancellationToken cancellationToken)
     {
+        RejectRawSqlTokenOutsideQualifiedNames(command.CommandText);
+
         switch (mode)
         {
             case SchemaSwitchingMode.TransactionLocal:
@@ -190,10 +197,12 @@ public sealed class SearchPathCommandInterceptor(
                 $"DbContext is bound to schema '{_schema}', but current schema is " +
                 $"'{currentSchema.Name ?? "<none>"}'. Resolve the DbContext again inside the new schema scope.");
 
-        command.CommandText = RewriteQualifiedNames(command.CommandText);
+        command.CommandText = RewriteModelPlaceholder(command.CommandText)
+            .Replace(AetherSchemaModel.RawSqlToken, _quotedSchema, StringComparison.Ordinal)
+            .Replace(FormattedRawSqlToken, _quotedSchema, StringComparison.Ordinal);
     }
 
-    private string RewriteQualifiedNames(string commandText)
+    private string RewriteModelPlaceholder(string commandText)
     {
         var rewritten = new StringBuilder(commandText.Length);
         var position = 0;
@@ -228,5 +237,16 @@ public sealed class SearchPathCommandInterceptor(
         }
 
         return rewritten.ToString();
+    }
+
+    private void RejectRawSqlTokenOutsideQualifiedNames(string commandText)
+    {
+        if (mode != SchemaSwitchingMode.QualifiedNames &&
+            (commandText.Contains(AetherSchemaModel.RawSqlToken, StringComparison.Ordinal) ||
+             commandText.Contains(FormattedRawSqlToken, StringComparison.Ordinal)))
+            throw new InvalidOperationException(
+                $"Raw SQL token '{AetherSchemaModel.RawSqlToken}' requires " +
+                $"SchemaSwitchingMode.QualifiedNames. In {mode} mode, omit the token and rely on " +
+                "the documented search_path contract.");
     }
 }

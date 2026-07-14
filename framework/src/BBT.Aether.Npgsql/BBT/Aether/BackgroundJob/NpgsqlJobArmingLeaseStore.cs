@@ -37,11 +37,9 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
     {
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var entityType = dbContext.Model.FindEntityType(typeof(BackgroundJobInfo))!;
-        var tableName = entityType.GetTableName();
-        var schema = entityType.GetSchema();
-        var fullTableName = string.IsNullOrEmpty(schema)
-            ? $"\"{tableName}\""
-            : $"\"{schema}\".\"{tableName}\"";
+        var schema = currentSchema.Name
+            ?? throw new InvalidOperationException("Current schema is not set.");
+        var fullTableName = PostgreSqlRelationName.For(entityType, schema);
 
         var connection = dbContext.Database.GetDbConnection();
         var now = clock.UtcNow;
@@ -52,17 +50,6 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
             await connection.OpenAsync(cancellationToken);
 
         var dbTransaction = dbContext.Database.CurrentTransaction?.GetDbTransaction();
-
-        // SET LOCAL is transaction-scoped; Phase 1 always runs inside IsTransactional=true, so
-        // dbTransaction is guaranteed non-null here. If called outside a transaction SET LOCAL
-        // would silently widen to SET SESSION (connection pool leak) — callers must not do that.
-        if (string.IsNullOrEmpty(schema) && !string.IsNullOrEmpty(currentSchema.Name))
-        {
-            await using var setCmd = connection.CreateCommand();
-            setCmd.Transaction = dbTransaction;
-            setCmd.CommandText = $"SET LOCAL search_path TO \"{currentSchema.Name}\";";
-            await setCmd.ExecuteNonQueryAsync(cancellationToken);
-        }
 
         await using var command = connection.CreateCommand();
         command.Transaction = dbTransaction;

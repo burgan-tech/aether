@@ -3,8 +3,8 @@ using System.Text.RegularExpressions;
 namespace BBT.Aether.MultiSchema;
 
 /// <summary>
-/// Validates and quotes PostgreSQL schema identifiers. Schema names cannot be passed
-/// as SQL parameters, so they must be validated before interpolation into SET LOCAL.
+/// Validates and quotes PostgreSQL identifiers. Identifiers cannot be passed as SQL
+/// parameters, so they must be validated before interpolation into SQL text.
 /// </summary>
 public static class PostgreSqlIdentifier
 {
@@ -18,21 +18,28 @@ public static class PostgreSqlIdentifier
     /// <returns>The schema name wrapped in double quotes, suitable for SQL interpolation.</returns>
     /// <exception cref="System.InvalidOperationException">Thrown when the schema name is not a valid PostgreSQL identifier.</exception>
     /// <exception cref="System.ArgumentException">Thrown when the schema name exceeds PostgreSQL's 63-byte identifier limit.</exception>
-    public static string QuoteSchema(string schema)
+    public static string QuoteSchema(string schema) => Quote(schema, nameof(schema));
+
+    /// <summary>
+    /// Validates the supplied table name and returns it as a double-quoted PostgreSQL identifier.
+    /// </summary>
+    public static string QuoteTable(string table) => Quote(table, nameof(table));
+
+    private static string Quote(string identifier, string parameterName)
     {
-        if (string.IsNullOrWhiteSpace(schema) || !ValidIdentifier.IsMatch(schema))
+        if (string.IsNullOrWhiteSpace(identifier) || !ValidIdentifier.IsMatch(identifier))
         {
-            throw new System.InvalidOperationException($"Invalid PostgreSQL schema name: {schema}");
+            throw new System.InvalidOperationException($"Invalid PostgreSQL identifier: {identifier}");
         }
 
         const int MaxIdentifierBytes = 63; // PostgreSQL NAMEDATALEN - 1; longer names are silently truncated.
-        if (System.Text.Encoding.UTF8.GetByteCount(schema) > MaxIdentifierBytes)
+        if (System.Text.Encoding.UTF8.GetByteCount(identifier) > MaxIdentifierBytes)
         {
             throw new System.ArgumentException(
-                $"Schema identifier exceeds PostgreSQL's {MaxIdentifierBytes}-byte limit and would be silently truncated.",
-                nameof(schema));
+                $"PostgreSQL identifier exceeds the {MaxIdentifierBytes}-byte limit and would be silently truncated.",
+                parameterName);
         }
 
-        return "\"" + schema.Replace("\"", "\"\"") + "\"";
+        return "\"" + identifier.Replace("\"", "\"\"") + "\"";
     }
 }

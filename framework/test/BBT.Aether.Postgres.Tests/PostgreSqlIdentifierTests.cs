@@ -1,4 +1,6 @@
 using BBT.Aether.MultiSchema;
+using BBT.Aether.Uow.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using Xunit;
 
@@ -33,5 +35,77 @@ public sealed class PostgreSqlIdentifierTests
     {
         var atLimit = new string('a', 63);
         PostgreSqlIdentifier.QuoteSchema(atLimit).ShouldBe($"\"{atLimit}\"");
+    }
+
+    [Fact]
+    public void QuoteTable_validates_and_quotes_table_identifiers()
+    {
+        PostgreSqlIdentifier.QuoteTable("OutboxMessages").ShouldBe("\"OutboxMessages\"");
+        Should.Throw<System.InvalidOperationException>(() =>
+            PostgreSqlIdentifier.QuoteTable("outbox messages"));
+    }
+
+    [Fact]
+    public void RelationName_uses_runtime_schema_for_placeholder_mapping()
+    {
+        using var db = CreateRelationDbContext();
+        var entityType = db.Model.FindEntityType(typeof(RuntimeEntity))!;
+
+        PostgreSqlRelationName.For(entityType, "tenant")
+            .ShouldBe("\"tenant\".\"runtime_items\"");
+    }
+
+    [Fact]
+    public void RelationName_preserves_explicit_schema_mapping()
+    {
+        using var db = CreateRelationDbContext();
+        var entityType = db.Model.FindEntityType(typeof(ExplicitEntity))!;
+
+        PostgreSqlRelationName.For(entityType, "tenant")
+            .ShouldBe("\"audit\".\"audit_items\"");
+    }
+
+    [Fact]
+    public void RelationName_rejects_entity_without_table_mapping()
+    {
+        using var db = CreateRelationDbContext();
+        var entityType = db.Model.FindEntityType(typeof(ViewEntity))!;
+
+        Should.Throw<System.InvalidOperationException>(() =>
+            PostgreSqlRelationName.For(entityType, "tenant"));
+    }
+
+    private static RelationDbContext CreateRelationDbContext()
+    {
+        var options = new DbContextOptionsBuilder<RelationDbContext>()
+            .UseNpgsql("Host=localhost;Database=unused;Username=unused;Password=unused")
+            .Options;
+        return new RelationDbContext(options);
+    }
+
+    private sealed class RelationDbContext(DbContextOptions<RelationDbContext> options)
+        : DbContext(options)
+    {
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<RuntimeEntity>().ToTable("runtime_items", AetherSchemaModel.Placeholder);
+            modelBuilder.Entity<ExplicitEntity>().ToTable("audit_items", "audit");
+            modelBuilder.Entity<ViewEntity>().ToView("items_view");
+        }
+    }
+
+    private sealed class RuntimeEntity
+    {
+        public int Id { get; set; }
+    }
+
+    private sealed class ExplicitEntity
+    {
+        public int Id { get; set; }
+    }
+
+    private sealed class ViewEntity
+    {
+        public int Id { get; set; }
     }
 }
