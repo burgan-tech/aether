@@ -23,7 +23,7 @@ public sealed class SqlServerAetherProvider : IAetherDatabaseProvider
     public DbConnection CreateConnection(string connectionString) => new SqlConnection(connectionString);
 
     public void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,
-        string schema, SchemaScopeState state, ICurrentSchema currentSchema)
+        string schema, SchemaScopeState state)
         => builder.UseSqlServer(sharedConnection);
 
     public void ApplyConnectionString(DbContextOptionsBuilder builder, string connectionString)

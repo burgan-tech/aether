@@ -280,7 +280,7 @@ switching mekanizmalarını implemente etmez.
 | `Current schema is not set.` | Aktif `Change(...)` kapsamı yok. Provider/repository çağrısını bir `using (currentSchema.Change("…"))` içine al (veya request'te `UseSchemaResolution` ekli mi kontrol et). |
 | `No active UnitOfWork.` | Ambient UoW yok. Programatik kodda `BeginAsync` yerine senkron `Begin()` kullan; istekte `UseAetherUnitOfWork` + `[UnitOfWork]` var mı bak. |
 | `UnitOfWork DbContext limit exceeded. Limit: N` | Tek UoW'da çok fazla farklı `(tip, schema)`. Tasarımı gözden geçir veya `UnitOfWorkOptions.MaxDbContextCount`'u bilinçli artır. |
-| `Invalid PostgreSQL schema name: X` | Schema adı geçersiz karakter içeriyor. |
+| `Invalid PostgreSQL identifier: X` | Schema adı geçersiz karakter içeriyor. |
 | `TransactionLocal mode requires IsTransactional = true.` | `SchemaSwitchingMode.TransactionLocal` kullanılmış ama `IsTransactional = false`. Ya `IsTransactional = true` yap, ya da `SessionSearchPath` moduna geç. |
 | `Unit of work is prepared but not initialized.` | Hazırlanmış (prepared) UoW henüz initialize edilmeden context istendi. İstek akışında aspect/`[UnitOfWork]` başlatmadan önce DB erişimi olmuş. |
 | `Schema scope corrupted: out-of-order disposal detected.` | `Change(...)` kapsamları iç içe ve sırasıyla dispose edilmeli; `using` kullan, elle Dispose'u karıştırma. |

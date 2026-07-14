@@ -275,7 +275,7 @@ non-transactional business and outbox writes.
 | `Current schema is not set.` | A context is requested with no active `currentSchema.Change(...)` scope. |
 | `No active UnitOfWork.` | A context is requested with no ambient UoW (common when using `BeginAsync` where the ambient does not propagate to the caller — use `Begin`). |
 | `UnitOfWork DbContext limit exceeded. Limit: N` | More than `MaxDbContextCount` distinct `(Type, Schema)` contexts in one UoW. |
-| `Invalid PostgreSQL schema name: X` | The active schema name fails PostgreSQL identifier validation before it enters command text. |
+| `Invalid PostgreSQL identifier: X` | The active schema name fails PostgreSQL identifier validation before it enters command text. |
 | `TransactionLocal mode requires IsTransactional = true.` | `SchemaSwitchingMode.TransactionLocal` was used with `IsTransactional = false`. Either set `IsTransactional = true` or switch to `SessionSearchPath` mode. |
 | `A transactional Required UnitOfWork cannot join a non-transactional outer UnitOfWork.` | The inner operation requested a transaction that the existing root cannot acquire; use `RequiresNew`. |
 | `DbContext is bound to schema 'A', but current schema is 'B'.` | A QualifiedNames context/query crossed schema scopes; resolve it again in the current scope. |

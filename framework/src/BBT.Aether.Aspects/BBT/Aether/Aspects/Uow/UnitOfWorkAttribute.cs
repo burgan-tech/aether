@@ -1,5 +1,6 @@
 using System;
 using System.Data;
+using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.DependencyInjection;
@@ -60,11 +61,29 @@ public class UnitOfWorkAttribute : AetherMethodInterceptionAspect
         // a non-owning participant: commit is logical-only, while rollback aborts the shared root. This also
         // enforces transaction-mode compatibility instead of silently bypassing it.
         await using var uow = uowManager.Begin(options);
+        await ExecuteWithinUnitOfWorkAsync(
+            uow,
+            async () => await args.ProceedAsync(),
+            args,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Executes the intercepted body and success hook before completing the UoW participant.
+    /// Keeping the hook inside the rollback boundary is essential for nested Required scopes:
+    /// once a participant commits logically, its rollback intentionally becomes a no-op.
+    /// </summary>
+    protected async Task ExecuteWithinUnitOfWorkAsync(
+        IUnitOfWork uow,
+        Func<Task> proceed,
+        MethodInterceptionArgs args,
+        CancellationToken cancellationToken)
+    {
         try
         {
-            await args.ProceedAsync();
-            await uow.CommitAsync(cancellationToken);
+            await proceed();
             await OnAfterAsync(args);
+            await uow.CommitAsync(cancellationToken);
         }
         catch (Exception ex)
         {

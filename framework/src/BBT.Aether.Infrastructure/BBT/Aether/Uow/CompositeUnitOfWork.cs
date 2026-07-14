@@ -49,6 +49,7 @@ public sealed class CompositeUnitOfWork(
     private bool _isInitialized;
     private bool _isDisposed;
     private bool _failedHandlersInvoked;
+    private bool _transactionCommitted;
     private Exception? _exception;
 
     /// <summary>
@@ -255,7 +256,11 @@ public sealed class CompositeUnitOfWork(
 
         try
         {
-            await SaveChangesAsync(cancellationToken);
+            // A PublishWithFallback retry can enter here after the physical database transaction
+            // committed but delivery and its fallback both failed. At that point CommitAsync is a
+            // delivery retry only: the completed transaction must never be saved/committed again.
+            if (!_transactionCommitted)
+                await SaveChangesAsync(cancellationToken);
 
             if (_events.Count > 0 && eventDispatcher is null)
             {
@@ -266,7 +271,11 @@ public sealed class CompositeUnitOfWork(
             var strategy = domainEventOptions?.DispatchStrategy ?? DomainEventDispatchStrategy.AlwaysUseOutbox;
 
             // There may be no connection/transaction if nothing was read or written.
-            if (_transaction is not null)
+            if (_transactionCommitted)
+            {
+                await PublishWithFallbackAsync(cancellationToken);
+            }
+            else if (_transaction is not null)
             {
                 if (strategy == DomainEventDispatchStrategy.AlwaysUseOutbox)
                 {
@@ -289,6 +298,7 @@ public sealed class CompositeUnitOfWork(
                 }
             }
 
+            _exception = null;
             IsCompleted = true;
             await InvokeCompletedHandlersAsync();
         }
@@ -328,9 +338,35 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     private async Task CommitWithoutTransactionAsync(CancellationToken cancellationToken)
     {
-        await StageAndSaveOutboxEventsAsync(cancellationToken);
+        // Auto-commit makes each contiguous schema run independently durable. Remove a run from
+        // the retry buffer immediately after its outbox rows save successfully; if a later run
+        // fails, retry resumes there without duplicating already-durable earlier runs and still
+        // preserves A1,B1,A2 ordering.
+        foreach (var run in GetEventRuns())
+        {
+            await StageAndSaveEventRunAsync(run, cancellationToken);
+            foreach (var pendingEvent in run.Events)
+                _events.Remove(pendingEvent);
+        }
+    }
 
-        _events.Clear();
+    private async Task StageAndSaveEventRunAsync(
+        (string Schema, List<PendingDomainEvent> Events) run,
+        CancellationToken cancellationToken)
+    {
+        var trackedEntityStates = CaptureTrackedEntityStates();
+        try
+        {
+            using (CurrentSchema.Change(run.Schema))
+                await eventDispatcher!.DispatchEventsAsync(
+                    run.Events.Select(x => x.Envelope).ToList(), cancellationToken);
+            await SaveChangesAsync(cancellationToken);
+        }
+        catch
+        {
+            DetachNewOutboxStagingEntities(trackedEntityStates);
+            throw;
+        }
     }
 
     private async Task StageAndSaveOutboxEventsAsync(CancellationToken cancellationToken)
@@ -385,6 +421,7 @@ public sealed class CompositeUnitOfWork(
     {
         // Step 1: Commit the shared transaction (business data is now persisted).
         await _transaction!.CommitAsync(cancellationToken);
+        _transactionCommitted = true;
 
         // Step 2: Publish events directly after commit.
         await PublishWithFallbackAsync(cancellationToken);

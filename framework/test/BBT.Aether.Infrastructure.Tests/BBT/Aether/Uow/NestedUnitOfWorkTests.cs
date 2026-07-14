@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Threading.Tasks;
 using BBT.Aether.Uow;
 using BBT.Aether.Uow.EntityFrameworkCore;
+using BBT.Aether.Aspects;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
@@ -13,6 +14,14 @@ namespace BBT.Aether.Infrastructure.Tests.BBT.Aether.Uow;
 
 public sealed class NestedUnitOfWorkTests
 {
+    private sealed class ThrowingAfterUnitOfWorkAttribute : UnitOfWorkAttribute
+    {
+        public Task ExecuteAsync(IUnitOfWork unitOfWork) =>
+            ExecuteWithinUnitOfWorkAsync(unitOfWork, () => Task.CompletedTask, null!, default);
+
+        protected override Task OnAfterAsync(PostSharp.Aspects.MethodInterceptionArgs args) =>
+            Task.FromException(new InvalidOperationException("after failed"));
+    }
     private sealed class TerminalProbeDbContext(DbContextOptions<TerminalProbeDbContext> options)
         : DbContext(options);
 
@@ -22,6 +31,30 @@ public sealed class NestedUnitOfWorkTests
         services.AddSingleton<IAmbientUnitOfWorkAccessor, AsyncLocalAmbientUowAccessor>();
         services.AddScoped<IUnitOfWorkManager, UnitOfWorkManager>();
         return services.BuildServiceProvider();
+    }
+
+    [Fact]
+    public async Task Required_aspect_after_hook_failure_aborts_shared_root_before_participant_completion()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        await using var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        await using var participant = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await Should.ThrowAsync<InvalidOperationException>(() =>
+            new ThrowingAfterUnitOfWorkAttribute().ExecuteAsync(participant));
+
+        outer.IsAborted.ShouldBeTrue();
+        participant.IsCompleted.ShouldBeTrue();
+        await Should.ThrowAsync<InvalidOperationException>(() => outer.CommitAsync());
     }
 
     [Fact]

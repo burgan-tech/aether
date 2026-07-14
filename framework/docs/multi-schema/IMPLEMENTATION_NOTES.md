@@ -142,7 +142,7 @@ identifiers, comments, and dollar-quoted bodies are data and remain unchanged.
 - `PostgreSqlIdentifier.QuoteSchema` validates against `^[a-zA-Z_][a-zA-Z0-9_]*$`, enforces
   PostgreSQL's identifier-length limit, and quotes the name before it enters command text.
   Invalid names throw
-  `Invalid PostgreSQL schema name: <name>`.
+  `Invalid PostgreSQL identifier: <name>`.
 
 ## Guardrails / common errors
 
@@ -151,7 +151,7 @@ identifiers, comments, and dollar-quoted bodies are data and remain unchanged.
 | `Current schema is not set.` | `IAetherDbContextProvider.GetDbContextAsync()` called with no active `Change(...)` scope. |
 | `No active UnitOfWork.` | No UoW is ambient when a context is requested. |
 | `UnitOfWork DbContext limit exceeded. Limit: N` | More than `MaxDbContextCount` distinct `(Type, Schema)` contexts in one UoW (default 16). |
-| `Invalid PostgreSQL schema name: X` | Schema name fails the identifier regex. |
+| `Invalid PostgreSQL identifier: X` | Schema name fails the identifier regex. |
 | `Schema scope corrupted: out-of-order disposal detected.` | `Change(...)` scopes disposed out of order. |
 | `DbContext is bound to schema 'A', but current schema is 'B'.` | A DbContext/DbSet/IQueryable resolved in one QualifiedNames scope was executed in another; resolve it again. |
 | `Raw SQL token '{{schema}}' requires SchemaSwitchingMode.QualifiedNames.` | The explicit token was used with a search-path mode. |

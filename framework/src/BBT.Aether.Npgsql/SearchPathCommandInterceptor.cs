@@ -201,41 +201,9 @@ public sealed class SearchPathCommandInterceptor(
     }
 
     private string RewriteModelPlaceholder(string commandText)
-    {
-        var rewritten = new StringBuilder(commandText.Length);
-        var position = 0;
-
-        while (position < commandText.Length)
-        {
-            var quotedIndex = commandText.IndexOf(
-                AetherSchemaModel.QuotedPlaceholder,
-                position,
-                StringComparison.Ordinal);
-            var unquotedIndex = commandText.IndexOf(
-                AetherSchemaModel.Placeholder,
-                position,
-                StringComparison.Ordinal);
-
-            if (quotedIndex < 0 && unquotedIndex < 0)
-            {
-                rewritten.Append(commandText, position, commandText.Length - position);
-                break;
-            }
-
-            var replaceQuoted = quotedIndex >= 0 &&
-                                (unquotedIndex < 0 || quotedIndex <= unquotedIndex);
-            var placeholderIndex = replaceQuoted ? quotedIndex : unquotedIndex;
-            var placeholderLength = replaceQuoted
-                ? AetherSchemaModel.QuotedPlaceholder.Length
-                : AetherSchemaModel.Placeholder.Length;
-
-            rewritten.Append(commandText, position, placeholderIndex - position);
-            rewritten.Append(_quotedSchema);
-            position = placeholderIndex + placeholderLength;
-        }
-
-        return rewritten.ToString();
-    }
+        => PostgreSqlRawSchemaTokenRewriter
+            .RewriteModelPlaceholder(commandText, _quotedSchema)
+            .CommandText;
 
     private void RejectRawSqlTokenOutsideQualifiedNames(string commandText)
     {

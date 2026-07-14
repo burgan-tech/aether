@@ -93,7 +93,7 @@ name is what `Name` returns and what ends up on the connection.
 
 Before a name is interpolated into `SET LOCAL search_path`, it is validated and quoted by
 `PostgreSqlIdentifier.QuoteSchema(...)` (regex `^[a-zA-Z_][a-zA-Z0-9_]*$`). An invalid name
-throws `InvalidOperationException: Invalid PostgreSQL schema name: <name>`. Schema names
+throws `InvalidOperationException: Invalid PostgreSQL identifier: <name>`. Schema names
 cannot be passed as SQL parameters, so this validate-then-quote step is the injection guard.
 
 ## Schema switching modes

@@ -13,6 +13,10 @@ public sealed class NpgsqlAetherProvider(
     public DbConnection CreateConnection(string connectionString) => new NpgsqlConnection(connectionString);
 
     public void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,
+        string schema, SchemaScopeState state) =>
+        ApplyShared(builder, sharedConnection, schema, state, new StaticCurrentSchema(schema));
+
+    public void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,
         string schema, SchemaScopeState state, ICurrentSchema currentSchema)
     {
         builder.UseNpgsql(sharedConnection);

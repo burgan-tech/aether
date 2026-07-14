@@ -123,6 +123,38 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
     }
 
     [Fact]
+    public void Model_placeholders_are_rewritten_only_in_SQL_code_regions()
+    {
+        const string schema = "tenant";
+        var interceptor = new SearchPathCommandInterceptor(
+            schema, new SchemaScopeState(), SchemaSwitchingMode.QualifiedNames,
+            new StaticCurrentSchema(schema));
+        using var command = new NpgsqlCommand(
+            """
+            SELECT '__aether_schema__', '"__aether_schema__"', E'__aether_schema__ \\'
+            , "prefix__aether_schema__"
+            -- __aether_schema__ "__aether_schema__"
+            /* __aether_schema__ /* "__aether_schema__" */ */
+            , $$ __aether_schema__ "__aether_schema__" $$
+            FROM "__aether_schema__"."things"
+            JOIN __aether_schema__."things" AS other ON TRUE
+            """);
+
+        interceptor.ReaderExecuting(command, null!, default);
+
+        command.CommandText.ShouldBe(
+            """
+            SELECT '__aether_schema__', '"__aether_schema__"', E'__aether_schema__ \\'
+            , "prefix__aether_schema__"
+            -- __aether_schema__ "__aether_schema__"
+            /* __aether_schema__ /* "__aether_schema__" */ */
+            , $$ __aether_schema__ "__aether_schema__" $$
+            FROM "tenant"."things"
+            JOIN "tenant"."things" AS other ON TRUE
+            """);
+    }
+
+    [Fact]
     public void Raw_SQL_tokens_are_rewritten_only_in_SQL_code_regions()
     {
         const string schema = "tenant";
