@@ -215,4 +215,166 @@ public sealed class NestedUnitOfWorkTests
         await outer.CommitAsync();
         outer.IsCompleted.ShouldBeTrue();
     }
+
+    [Fact]
+    public async Task Incomplete_required_participant_is_not_active_after_shared_root_completes()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await outer.CommitAsync();
+
+        inner.IsCompleted.ShouldBeFalse();
+        manager.Current.ShouldBeNull();
+
+        await inner.DisposeAsync();
+        await outer.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Incomplete_required_participant_is_not_active_after_shared_root_is_disposed()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await outer.DisposeAsync();
+
+        inner.IsCompleted.ShouldBeFalse();
+        inner.IsDisposed.ShouldBeFalse();
+        manager.Current.ShouldBeNull();
+
+        await inner.DisposeAsync();
+        manager.Current.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Completed_required_participant_cannot_later_abort_shared_root()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        await using var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        await using var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await inner.CommitAsync();
+        await inner.RollbackAsync();
+        inner.Abort();
+        await inner.CommitAsync();
+
+        inner.IsCompleted.ShouldBeTrue();
+        outer.IsAborted.ShouldBeFalse();
+
+        await outer.CommitAsync();
+        outer.IsCompleted.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Rolled_back_required_participant_remains_terminal_on_later_commit_and_rollback()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        await using var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        await using var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await inner.RollbackAsync();
+        await inner.CommitAsync();
+        await inner.RollbackAsync();
+
+        inner.IsCompleted.ShouldBeTrue();
+        outer.IsAborted.ShouldBeTrue();
+
+        await outer.RollbackAsync();
+        outer.IsCompleted.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Disposed_required_participant_operations_do_not_mutate_shared_root()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        await using var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        });
+        var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        await inner.DisposeAsync();
+        await inner.RollbackAsync();
+        await inner.CommitAsync();
+        inner.Abort();
+
+        inner.IsDisposed.ShouldBeTrue();
+        inner.IsCompleted.ShouldBeFalse();
+        outer.IsAborted.ShouldBeFalse();
+        outer.IsCompleted.ShouldBeFalse();
+
+        await outer.CommitAsync();
+        outer.IsCompleted.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Nontransactional_required_can_join_transactional_outer()
+    {
+        await using var scope = BuildProvider().CreateAsyncScope();
+        var manager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        await using var outer = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = true
+        });
+        await using var inner = manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = false
+        });
+
+        inner.Options.ShouldBeSameAs(outer.Options);
+        inner.Options!.IsTransactional.ShouldBeTrue();
+
+        await inner.CommitAsync();
+        outer.IsCompleted.ShouldBeFalse();
+
+        await outer.CommitAsync();
+        outer.IsCompleted.ShouldBeTrue();
+    }
 }

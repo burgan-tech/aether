@@ -67,6 +67,12 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// </summary>
     public CompositeUnitOfWork Root => _root;
 
+    /// <summary>
+    /// Gets whether the shared root can no longer be used, independently of this participant's
+    /// local completion state.
+    /// </summary>
+    internal bool IsRootTerminal => _root.IsCompleted || _root.IsDisposed;
+
     /// <inheritdoc />
     public void SetOuter(IUnitOfWork? outer)
     {
@@ -76,6 +82,11 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public void Abort()
     {
+        if (!_ownsRoot && (_participantCompleted || _isDisposed))
+        {
+            return;
+        }
+
         _root.Abort();
     }
 
@@ -96,6 +107,11 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public async Task CommitAsync(CancellationToken cancellationToken = default)
     {
+        if (!_ownsRoot && (_participantCompleted || _isDisposed))
+        {
+            return;
+        }
+
         if (_ownsRoot)
         {
             await _root.CommitAsync(cancellationToken);
@@ -109,6 +125,11 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
+        if (!_ownsRoot && (_participantCompleted || _isDisposed))
+        {
+            return;
+        }
+
         if (_ownsRoot)
         {
             await _root.RollbackAsync(cancellationToken);
