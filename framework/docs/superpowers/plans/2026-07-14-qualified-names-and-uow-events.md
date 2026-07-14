@@ -152,7 +152,7 @@ Call it from sync/async reader, non-query, and scalar paths without executing a 
 
 Run: `dotnet test framework/test/BBT.Aether.Postgres.Tests/BBT.Aether.Postgres.Tests.csproj --filter FullyQualifiedName~QualifiedNamesTests -m:1`
 
-Expected: PASS; SQL contains `"tenant"."things"` and no search-path commands.
+Expected: PASS; SQL contains a schema-qualified relation such as `"tenant".things` and no search-path commands. Npgsql may leave safe lowercase table identifiers unquoted; do not add a general table-identifier rewrite solely to force `"things"`.
 
 - [ ] **Step 7: Commit**
 

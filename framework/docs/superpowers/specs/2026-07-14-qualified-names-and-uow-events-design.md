@@ -184,6 +184,7 @@ Implementation follows test-driven development. Each behavior is introduced by a
 - One Unit of Work and one repository instance read/write `tenant_a`, then `tenant_b`, then `tenant_a` again.
 - Each schema sees only its own rows.
 - Captured commands use fully qualified table names.
+- Safe lowercase table identifiers may remain unquoted in Npgsql output (for example, `"tenant_a".orders`); schema qualification, not cosmetic table quoting, is the invariant.
 - No search-path command is issued.
 - A previously obtained IQueryable fails when executed under a different schema scope.
 - Returning to the original schema reuses its schema-bound context safely.
