@@ -41,6 +41,7 @@ public sealed class CompositeUnitOfWork(
     private DbConnection? _connection;
     private DbTransaction? _transaction;
     private UnitOfWorkOptions _options = new();
+    private bool _effectiveIsTransactional;
     private bool _isInitialized;
     private bool _isDisposed;
     private bool _failedHandlersInvoked;
@@ -68,6 +69,12 @@ public sealed class CompositeUnitOfWork(
 
     /// <inheritdoc />
     public bool IsDisposed => _isDisposed;
+
+    /// <summary>
+    /// Gets the transaction mode captured when this root was initialized. Later mutations of the
+    /// caller-owned options object cannot change the root's transaction semantics.
+    /// </summary>
+    internal bool EffectiveIsTransactional => _effectiveIsTransactional;
 
     /// <inheritdoc />
     public UnitOfWorkOptions? Options { get; private set; }
@@ -99,6 +106,7 @@ public sealed class CompositeUnitOfWork(
             throw new InvalidOperationException("CompositeUnitOfWork has already been initialized.");
         }
 
+        _effectiveIsTransactional = options.IsTransactional;
         _options = options;
         Options = options;
         _isInitialized = true;
@@ -107,6 +115,7 @@ public sealed class CompositeUnitOfWork(
     /// <inheritdoc />
     public void SetOuter(IUnitOfWork? outer)
     {
+        ThrowIfTerminal("change the outer scope of");
         UnitOfWorkOuterChainGuard.Validate(this, outer);
         Outer = outer;
     }
@@ -155,7 +164,7 @@ public sealed class CompositeUnitOfWork(
             // Reset schema state whenever a fresh connection is established.
             _schemaState.Current = null;
 
-            if (_options.IsTransactional)
+            if (_effectiveIsTransactional)
             {
                 _transaction = await _connection.BeginTransactionAsync(
                     _options.IsolationLevel ?? IsolationLevel.ReadCommitted, cancellationToken);
@@ -198,6 +207,8 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
     {
+        ThrowIfTerminal("save changes in");
+
         if (!_isInitialized)
         {
             return;
@@ -591,6 +602,15 @@ public sealed class CompositeUnitOfWork(
         {
             throw new InvalidOperationException(
                 "Cannot register handlers on a completed or disposed unit of work.");
+        }
+    }
+
+    private void ThrowIfTerminal(string operation)
+    {
+        if (IsCompleted || _isDisposed)
+        {
+            throw new InvalidOperationException(
+                $"Cannot {operation} a completed or disposed unit of work.");
         }
     }
 

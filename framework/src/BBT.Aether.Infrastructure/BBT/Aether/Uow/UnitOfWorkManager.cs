@@ -47,7 +47,7 @@ public sealed class UnitOfWorkManager(
         {
             EnsureRequiredScopeIsCompatible(options, existing);
             return new UnitOfWorkScope(
-                existing.Root,
+                existing.SharedRoot,
                 ambient,
                 ownsRoot: false);
         }
@@ -79,7 +79,7 @@ public sealed class UnitOfWorkManager(
         {
             EnsureRequiredScopeIsCompatible(options, existing);
             return new UnitOfWorkScope(
-                existing.Root,
+                existing.SharedRoot,
                 ambient,
                 ownsRoot: false);
         }
@@ -98,7 +98,7 @@ public sealed class UnitOfWorkManager(
         UnitOfWorkOptions options,
         UnitOfWorkScope existing)
     {
-        if (options.IsTransactional && existing.Root.Options?.IsTransactional != true)
+        if (options.IsTransactional && !existing.SharedRoot.EffectiveIsTransactional)
         {
             throw new InvalidOperationException(
                 "A transactional Required UnitOfWork cannot join a non-transactional outer UnitOfWork. " +

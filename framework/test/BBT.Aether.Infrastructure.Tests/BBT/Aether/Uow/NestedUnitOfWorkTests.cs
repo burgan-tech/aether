@@ -25,11 +25,73 @@ public sealed class NestedUnitOfWorkTests
     }
 
     [Fact]
-    public void UnitOfWorkScope_does_not_expose_its_root_as_public_API()
+    public async Task UnitOfWorkScope_preserves_public_root_getter_only_for_owning_scope()
     {
-        typeof(UnitOfWorkScope).GetProperty(
-            "Root",
-            BindingFlags.Instance | BindingFlags.Public).ShouldBeNull();
+        var property = typeof(UnitOfWorkScope).GetProperty(
+            "Root", BindingFlags.Instance | BindingFlags.Public);
+        property.ShouldNotBeNull();
+        property.GetMethod.ShouldNotBeNull();
+
+        await using var serviceScope = BuildProvider().CreateAsyncScope();
+        var manager = serviceScope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        await using var owner = (UnitOfWorkScope)manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew
+        });
+        await using var participant = (UnitOfWorkScope)manager.Begin();
+
+#pragma warning disable CS0618
+        owner.Root.ShouldNotBeNull();
+        Should.Throw<InvalidOperationException>(() => _ = participant.Root)
+            .Message.ShouldContain("owning");
+#pragma warning restore CS0618
+    }
+
+    [Fact]
+    public async Task Required_compatibility_uses_transaction_mode_captured_when_root_begins()
+    {
+        await using var serviceScope = BuildProvider().CreateAsyncScope();
+        var manager = serviceScope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var originalOptions = new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew,
+            IsTransactional = false
+        };
+        await using var owner = manager.Begin(originalOptions);
+
+        originalOptions.IsTransactional = true;
+        owner.Options!.IsTransactional = true;
+
+        Should.Throw<InvalidOperationException>(() => manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.Required,
+            IsTransactional = true
+        }));
+    }
+
+    [Fact]
+    public async Task Terminal_composite_and_scope_reject_work_and_outer_mutation()
+    {
+        await using var serviceScope = BuildProvider().CreateAsyncScope();
+        var manager = serviceScope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var owner = (UnitOfWorkScope)manager.Begin(new UnitOfWorkOptions
+        {
+            Scope = UnitOfWorkScopeOption.RequiresNew
+        });
+#pragma warning disable CS0618
+        var root = owner.Root;
+#pragma warning restore CS0618
+
+        await owner.CommitAsync();
+
+        await AssertWorkOperationsAreRejectedAsync(root);
+        Should.Throw<InvalidOperationException>(() => root.SetOuter(null));
+        Should.Throw<InvalidOperationException>(() => owner.SetOuter(null));
+
+        await owner.DisposeAsync();
+
+        Should.Throw<InvalidOperationException>(() => root.SetOuter(null));
+        Should.Throw<InvalidOperationException>(() => owner.SetOuter(null));
     }
 
     [Fact]

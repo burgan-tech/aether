@@ -64,7 +64,20 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <summary>
     /// Gets the root composite unit of work for manager-owned participant coordination.
     /// </summary>
-    internal CompositeUnitOfWork Root => _root;
+    internal CompositeUnitOfWork SharedRoot => _root;
+
+    /// <summary>
+    /// Gets the root composite unit of work for an owning scope.
+    /// </summary>
+    /// <remarks>
+    /// Retained for source and binary compatibility. A participating <c>Required</c> scope cannot
+    /// expose the shared root because doing so would bypass its logical commit/rollback boundary.
+    /// </remarks>
+    [Obsolete("Direct root access is supported only for owning scopes. Use IUnitOfWork APIs instead.")]
+    public CompositeUnitOfWork Root => _ownsRoot
+        ? _root
+        : throw new InvalidOperationException(
+            "A participating Required unit of work is not an owning scope and cannot expose the shared root.");
 
     /// <summary>
     /// Gets whether the shared root can no longer be used, independently of this participant's
@@ -75,6 +88,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public void SetOuter(IUnitOfWork? outer)
     {
+        ThrowIfCannotWork();
         UnitOfWorkOuterChainGuard.Validate(this, outer);
         _outer = outer;
     }

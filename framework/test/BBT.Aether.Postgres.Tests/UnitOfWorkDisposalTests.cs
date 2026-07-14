@@ -210,6 +210,36 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
     }
 
     [Fact]
+    public async Task Connection_uses_transaction_mode_captured_at_begin_after_input_options_mutate()
+    {
+        await ArrangeSchemaAsync();
+        var sp = BuildProvider();
+
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var mgr = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
+
+        using (currentSchema.Change(_schema))
+        {
+            var options = new UnitOfWorkOptions
+            {
+                Scope = UnitOfWorkScopeOption.RequiresNew,
+                IsTransactional = true
+            };
+            await using var uow = mgr.Begin(options);
+
+            options.IsTransactional = false;
+            uow.Options!.IsTransactional = false;
+            var db = await provider.GetDbContextAsync();
+
+            db.Database.CurrentTransaction.ShouldNotBeNull();
+            await uow.CommitAsync();
+        }
+    }
+
+    [Fact]
     public async Task SessionSearchPath_two_queries_share_same_connection()
     {
         await ArrangeSchemaAsync();
