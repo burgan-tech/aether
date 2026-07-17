@@ -164,8 +164,8 @@ public sealed class BackgroundJobService(
                 ambient.OnCompleted(_ => ArmNowAsync(handlerName, jobName, schedule, payloadBytes,
                     failurePolicyOptions, effectiveJobId, CancellationToken.None));
             logger.LogInformation(
-                "Enqueued Pending job '{HandlerName}'/'{JobName}' into ambient UoW. Id: {Id}",
-                handlerName, jobName, effectiveJobId);
+                "Enqueued {Status} job '{HandlerName}'/'{JobName}' into ambient UoW. Id: {Id}",
+                jobInfo.Status, handlerName, jobName, effectiveJobId);
             activity?.SetStatus(ActivityStatusCode.Ok);
             return effectiveJobId;
         }
@@ -225,7 +225,8 @@ public sealed class BackgroundJobService(
             catch (Exception rollbackEx)
             {
                 logger.LogError(rollbackEx,
-                    "Failed to roll back job '{JobName}' to Pending; arming poller will arm it on next visibility-timeout pass",
+                    "Failed to roll back job '{JobName}' to Pending; row may remain Scheduled without a scheduler entry, " +
+                    "the arming poller will not claim it, and reconciliation or manual intervention is required",
                     jobName);
                 if (rollbackUow != null)
                     await rollbackUow.RollbackAsync(ct);

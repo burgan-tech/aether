@@ -165,6 +165,18 @@ public sealed class FixedBackgroundJobSchemaTests(PostgresFixture fixture)
                 envelope.Schema.ShouldBe(_tenantSchema);
                 envelope.Data.Value.ShouldBe(42);
 
+                (await jobStore.TryTransitionStatusAsync(
+                    jobId,
+                    BackgroundJobStatus.Pending,
+                    BackgroundJobStatus.Scheduled)).ShouldBeTrue();
+                currentSchema.Name.ShouldBe(_tenantSchema);
+
+                (await jobStore.TryTransitionStatusAsync(
+                    jobId,
+                    BackgroundJobStatus.Scheduled,
+                    BackgroundJobStatus.Pending)).ShouldBeTrue();
+                currentSchema.Name.ShouldBe(_tenantSchema);
+
                 var claims = await leaseStore.ClaimBatchAsync(
                     10, "fixed-schema-worker", TimeSpan.FromSeconds(30));
                 currentSchema.Name.ShouldBe(_tenantSchema);
