@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.EntityFrameworkCore.Modeling;
@@ -85,6 +86,52 @@ public sealed class FixedBackgroundJobSchemaStoreTests
         (await store.GetAsync(Guid.NewGuid())).ShouldBeNull();
 
         await provider.Received(1).GetDbContextAsync(Arg.Any<CancellationToken>());
+        currentSchema.Name.ShouldBe("tenant_a");
+    }
+
+    [Fact]
+    public async Task Ef_lease_store_uses_configured_schema_and_restores_tenant()
+    {
+        await using var db = CreateContext();
+        var currentSchema = new StaticCurrentSchema("tenant_a");
+        var provider = Substitute.For<IAetherDbContextProvider<JobDbContext>>();
+        provider.GetDbContextAsync(Arg.Any<CancellationToken>()).Returns(_ =>
+        {
+            currentSchema.Name.ShouldBe("sys_queues");
+            return db;
+        });
+        var clock = Substitute.For<IClock>();
+        clock.UtcNow.Returns(DateTime.UtcNow);
+        var store = new EfCoreJobArmingLeaseStore<JobDbContext>(
+            provider,
+            clock,
+            new BackgroundJobOptions { Schema = "sys_queues" },
+            currentSchema);
+
+        (await store.ClaimBatchAsync(10, "worker", TimeSpan.FromSeconds(30)))
+            .ShouldBeEmpty();
+
+        currentSchema.Name.ShouldBe("tenant_a");
+    }
+
+    [Fact]
+    public async Task Ef_lease_store_legacy_constructor_preserves_ambient_schema_behavior()
+    {
+        await using var db = CreateContext();
+        var currentSchema = new StaticCurrentSchema("tenant_a");
+        var provider = Substitute.For<IAetherDbContextProvider<JobDbContext>>();
+        provider.GetDbContextAsync(Arg.Any<CancellationToken>()).Returns(_ =>
+        {
+            currentSchema.Name.ShouldBe("tenant_a");
+            return db;
+        });
+        var clock = Substitute.For<IClock>();
+        clock.UtcNow.Returns(DateTime.UtcNow);
+        var store = new EfCoreJobArmingLeaseStore<JobDbContext>(provider, clock);
+
+        (await store.ClaimBatchAsync(10, "worker", TimeSpan.FromSeconds(30)))
+            .ShouldBeEmpty();
+
         currentSchema.Name.ShouldBe("tenant_a");
     }
 

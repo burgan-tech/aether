@@ -25,9 +25,21 @@ namespace BBT.Aether.BackgroundJob;
 public class NpgsqlJobArmingLeaseStore<TDbContext>(
     IAetherDbContextProvider<TDbContext> dbContextProvider,
     ICurrentSchema currentSchema,
-    IClock clock) : IJobArmingLeaseStore
+    IClock clock,
+    BackgroundJobOptions? options) : IJobArmingLeaseStore
     where TDbContext : DbContext, IHasEfCoreBackgroundJobs
 {
+    /// <summary>
+    /// Backward-compatible constructor that preserves the former ambient-schema behavior.
+    /// </summary>
+    public NpgsqlJobArmingLeaseStore(
+        IAetherDbContextProvider<TDbContext> dbContextProvider,
+        ICurrentSchema currentSchema,
+        IClock clock)
+        : this(dbContextProvider, currentSchema, clock, null)
+    {
+    }
+
     /// <inheritdoc/>
     public async Task<IReadOnlyList<BackgroundJobArmingClaim>> ClaimBatchAsync(
         int batchSize,
@@ -35,6 +47,7 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
         TimeSpan leaseDuration,
         CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var entityType = dbContext.Model.FindEntityType(typeof(BackgroundJobInfo))!;
         var schema = currentSchema.Name
@@ -112,6 +125,13 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
         }
 
         return claims;
+    }
+
+    private IDisposable BeginConfiguredSchemaScope()
+    {
+        return string.IsNullOrWhiteSpace(options?.Schema)
+            ? global::BBT.Aether.NullDisposable.Instance
+            : currentSchema.Change(options.Schema);
     }
 
     private static void AddParameter(DbCommand command, string name, object value)

@@ -10,6 +10,7 @@ using BBT.Aether.Domain.Repositories;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using BBT.Aether.Uow;
+using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
@@ -67,7 +68,8 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
         await modelConn.OpenAsync();
         await using var ctx = ActivatorUtilities.CreateInstance<TestJobDbContext>(
             sp, configurator.BuildOptions(modelConn, _schema, new BBT.Aether.Uow.EntityFrameworkCore.SchemaScopeState()));
-        var script = ctx.Database.GenerateCreateScript();
+        var script = ctx.Database.GenerateCreateScript()
+            .Replace("__aether_schema__", _schema, StringComparison.Ordinal);
 
         await using var ddlConn = new NpgsqlConnection(fx.ConnectionString);
         await ddlConn.OpenAsync();
@@ -368,6 +370,17 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
         return services.BuildServiceProvider();
     }
 
+    private ServiceProvider BuildProviderWithFixedSchemaNpgsqlLeaseStore()
+    {
+        var services = new ServiceCollection();
+        services.AddAetherCore(_ => { });
+        services.AddAetherNpgsql<TestJobDbContext>(
+            fx.ConnectionString,
+            SchemaSwitchingMode.QualifiedNames);
+        services.AddAetherBackgroundJob<TestJobDbContext>(options => options.Schema = _schema);
+        return services.BuildServiceProvider();
+    }
+
     private async Task<List<BackgroundJobArmingClaim>> ClaimBatchConcurrently(
         IServiceProvider sp, string workerId, int batchSize)
     {
@@ -408,6 +421,64 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
         var allClaimed = claimsA.Concat(claimsB).Select(c => c.Job.Id).ToList();
         allClaimed.Count.ShouldBe(4);
         allClaimed.Distinct().Count().ShouldBe(4, "no job claimed by both pods");
+    }
+
+    [Fact]
+    public async Task NpgsqlLeaseStore_qualified_names_uses_configured_schema_not_caller_schema()
+    {
+        const string tenantSchema = "tenant_a";
+        using var sp = BuildProviderWithFixedSchemaNpgsqlLeaseStore();
+        await ArrangeSchemaAsync(sp);
+        await using (var connection = new NpgsqlConnection(fx.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"CREATE SCHEMA IF NOT EXISTS \"{tenantSchema}\";";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var id = Guid.NewGuid();
+        var job = NewJob(id, BackgroundJobStatus.Pending);
+        job.NextRetryAt = DateTime.UtcNow.AddMinutes(-1);
+        await SeedAsync(sp, job);
+
+        IReadOnlyList<BackgroundJobArmingClaim> claims;
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var services = scope.ServiceProvider;
+            var currentSchema = services.GetRequiredService<ICurrentSchema>();
+            using (currentSchema.Change(tenantSchema))
+            {
+                await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+                    new UnitOfWorkOptions
+                    {
+                        Scope = UnitOfWorkScopeOption.RequiresNew,
+                        IsTransactional = true
+                    });
+                var leaseStore = services.GetRequiredService<IJobArmingLeaseStore>();
+                leaseStore.ShouldBeOfType<
+                    global::BBT.Aether.BackgroundJob.NpgsqlJobArmingLeaseStore<TestJobDbContext>>();
+                claims = await leaseStore.ClaimBatchAsync(
+                    10, "worker", TimeSpan.FromSeconds(30));
+                await uow.CommitAsync();
+
+                currentSchema.Name.ShouldBe(tenantSchema);
+            }
+        }
+
+        claims.Count.ShouldBe(1);
+        claims[0].Job.Id.ShouldBe(id);
+        (await RelationExistsAsync(tenantSchema, "BackgroundJobs")).ShouldBeFalse();
+    }
+
+    private async Task<bool> RelationExistsAsync(string schema, string table)
+    {
+        await using var connection = new NpgsqlConnection(fx.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT to_regclass(@relation) IS NOT NULL";
+        command.Parameters.AddWithValue("relation", $"\"{schema}\".\"{table}\"");
+        return (bool)(await command.ExecuteScalarAsync())!;
     }
 
     [Fact]
