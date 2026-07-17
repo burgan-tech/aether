@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using BBT.Aether.Clock;
 using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Guids;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -16,11 +17,32 @@ public class EfCoreOutboxStore<TDbContext>(
     IAetherDbContextProvider<TDbContext> dbContextProvider,
     IEventSerializer eventSerializer,
     IGuidGenerator guidGenerator,
-    IClock clock) : IOutboxStore
+    IClock clock,
+    AetherOutboxOptions options,
+    ICurrentSchema? currentSchema) : IOutboxStore
     where TDbContext : DbContext, IHasEfCoreOutbox
 {
+    /// <summary>
+    /// Backward-compatible constructor that preserves the former ambient-schema behavior.
+    /// </summary>
+    public EfCoreOutboxStore(
+        IAetherDbContextProvider<TDbContext> dbContextProvider,
+        IEventSerializer eventSerializer,
+        IGuidGenerator guidGenerator,
+        IClock clock)
+        : this(
+            dbContextProvider,
+            eventSerializer,
+            guidGenerator,
+            clock,
+            new AetherOutboxOptions { Schema = null },
+            null)
+    {
+    }
+
     public async Task StoreAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var serializedBytes = eventSerializer.Serialize(envelope);
 
@@ -40,5 +62,12 @@ public class EfCoreOutboxStore<TDbContext>(
             outboxMessage.ExtraProperties["Subject"] = envelope.Subject;
 
         await dbContext.OutboxMessages.AddAsync(outboxMessage, cancellationToken);
+    }
+
+    private IDisposable BeginConfiguredSchemaScope()
+    {
+        return currentSchema is null || string.IsNullOrWhiteSpace(options.Schema)
+            ? global::BBT.Aether.NullDisposable.Instance
+            : currentSchema.Change(options.Schema);
     }
 }

@@ -114,7 +114,7 @@ public sealed class OutboxWithinSharedTransactionTests(PostgresFixture fx)
         services.AddAetherDomainEvents<TestDbContext>();
 
         // Outbox store -> EfCoreOutboxStore<TestDbContext> (real path that writes the outbox row).
-        services.AddAetherOutbox<TestDbContext>();
+        services.AddAetherOutbox<TestDbContext>(options => options.Schema = _schema);
 
         // Event bus dependencies (registered manually to avoid pulling in the Dapr bus).
         services.AddSingleton(new AetherEventBusOptions { DefaultSource = "urn:test:orders" });
