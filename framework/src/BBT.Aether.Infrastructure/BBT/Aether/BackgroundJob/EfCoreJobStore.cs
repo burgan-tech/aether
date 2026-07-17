@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.Repositories;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -20,6 +21,8 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     where TDbContext : DbContext, IHasEfCoreBackgroundJobs
 {
     private readonly IAetherDbContextProvider<TDbContext> _dbContextProvider;
+    private readonly BackgroundJobOptions? _options;
+    private readonly ICurrentSchema? _currentSchema;
 
     /// <summary>
     /// Initializes a new instance of the EfCoreJobStore class.
@@ -30,12 +33,29 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         _dbContextProvider = dbContextProvider ?? throw new ArgumentNullException(nameof(dbContextProvider));
     }
 
+    /// <summary>
+    /// Initializes a new instance of the EfCoreJobStore class with an explicitly configured schema.
+    /// </summary>
+    /// <param name="dbContextProvider">Provider resolving the schema-bound database context for job persistence.</param>
+    /// <param name="options">Background job options containing the persistence schema.</param>
+    /// <param name="currentSchema">The ambient schema accessor.</param>
+    public EfCoreJobStore(
+        IAetherDbContextProvider<TDbContext> dbContextProvider,
+        BackgroundJobOptions options,
+        ICurrentSchema currentSchema)
+        : this(dbContextProvider)
+    {
+        _options = options ?? throw new ArgumentNullException(nameof(options));
+        _currentSchema = currentSchema ?? throw new ArgumentNullException(nameof(currentSchema));
+    }
+
     /// <inheritdoc/>
     public async Task SaveAsync(BackgroundJobInfo jobInfo, CancellationToken cancellationToken = default)
     {
         if (jobInfo == null)
             throw new ArgumentNullException(nameof(jobInfo));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
 
         // Id-based upsert: look up by the entity primary key so the operation works for a job in ANY
@@ -77,6 +97,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         return await dbContext.BackgroundJobs
             .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
@@ -89,6 +110,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (string.IsNullOrWhiteSpace(jobName))
             throw new ArgumentNullException(nameof(jobName));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         return await dbContext.BackgroundJobs
             .FirstOrDefaultAsync(j => j.JobName == jobName
@@ -103,6 +125,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (string.IsNullOrWhiteSpace(handlerName))
             throw new ArgumentNullException(nameof(handlerName));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         return await dbContext.BackgroundJobs
             .Where(j => j.HandlerName == handlerName)
@@ -112,6 +135,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     /// <inheritdoc/>
     public async Task<IEnumerable<BackgroundJobInfo>> GetActiveAsync(CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         return await dbContext.BackgroundJobs
             .Where(j => j.Status == BackgroundJobStatus.Scheduled || j.Status == BackgroundJobStatus.Running)
@@ -129,6 +153,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         var job = await dbContext.BackgroundJobs
             .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
@@ -161,6 +186,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
 
         // Conditional UPDATE: provider-agnostic optimistic-concurrency guard. The WHERE clause pins
@@ -177,6 +203,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     public async Task<IReadOnlyList<BackgroundJobInfo>> GetDueForArmingAsync(DateTime nowUtc, int batchSize,
         CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         return await dbContext.BackgroundJobs
             .Where(j => (j.Status == BackgroundJobStatus.Pending
@@ -195,6 +222,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         var job = await dbContext.BackgroundJobs
             .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
@@ -223,6 +251,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         var job = await dbContext.BackgroundJobs
             .FirstOrDefaultAsync(j => j.Id == id, cancellationToken);
@@ -252,6 +281,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
 
         // Conditional UPDATE: provider-agnostic optimistic-concurrency claim. The WHERE clause pins
@@ -276,6 +306,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         var now = DateTime.UtcNow;
 
@@ -299,6 +330,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         var now = DateTime.UtcNow;
 
@@ -322,6 +354,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         var now = DateTime.UtcNow;
 
@@ -343,6 +376,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     public async Task<IReadOnlyList<BackgroundJobInfo>> GetStaleRunningAsync(DateTime cutoffUtc, int batchSize,
         CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         return await dbContext.BackgroundJobs
             .Where(j => j.Status == BackgroundJobStatus.Running && j.RunningSince != null && j.RunningSince < cutoffUtc)
@@ -355,6 +389,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     public async Task<bool> TryTransitionFromArmingAsync(Guid id, Guid armingToken,
         BackgroundJobStatus to, CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         var now = DateTime.UtcNow;
         var affected = await dbContext.BackgroundJobs
@@ -372,6 +407,7 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     public async Task<int> ResetExpiredArmingClaimsAsync(DateTime now, int batchSize,
         CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         // EF Core does not support LIMIT inside ExecuteUpdateAsync, so read IDs first.
         var expiredIds = await dbContext.BackgroundJobs
@@ -391,5 +427,12 @@ public class EfCoreJobStore<TDbContext> : IJobStore
                 .SetProperty(j => j.ArmingUntil, (DateTime?)null)
                 .SetProperty(j => j.ModifiedAt, utcNow),
                 cancellationToken);
+    }
+
+    private IDisposable BeginConfiguredSchemaScope()
+    {
+        return _currentSchema is null || string.IsNullOrWhiteSpace(_options?.Schema)
+            ? global::BBT.Aether.NullDisposable.Instance
+            : _currentSchema.Change(_options.Schema);
     }
 }
