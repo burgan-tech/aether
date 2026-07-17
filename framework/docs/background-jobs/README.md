@@ -3,17 +3,18 @@
 ## Overview
 
 The background-job system runs scheduled and recurring work with the **job table as the single source of
-truth**. Enqueue writes a database row only; a fixed-schema **arming poller** later registers the job in an
-external scheduler (default: Dapr Jobs) and the scheduler's fire is routed back through an execution bridge to
-a type-safe handler. This row-first design makes enqueue atomic with the caller's business transaction (no
-orphaned schedules on rollback), provides framework-managed retry with exponential backoff for one-shot jobs,
-and uses an optimistic-concurrency claim so delivery is at-least-once safe.
+truth**. By default (`directly: false`), enqueue writes a database row only and a fixed-schema **arming poller**
+later registers the job in an external scheduler (default: Dapr Jobs). With `directly: true`, enqueue registers
+the schedule only after the row's persistence transaction commits. The scheduler's fire is routed back through
+an execution bridge to a type-safe handler. This row-first design makes enqueue atomic with the caller's
+business transaction (no orphaned schedules on rollback), provides framework-managed retry with exponential
+backoff for one-shot jobs, and uses an optimistic-concurrency claim so delivery is at-least-once safe.
 
 The pieces:
 
 | Component | Role |
 |-----------|------|
-| `IBackgroundJobService` (`BackgroundJobService`) | `EnqueueAsync` / `UpdateAsync` / `DeleteAsync`. Writes/updates the job row. Never calls the scheduler on the enqueue path. |
+| `IBackgroundJobService` (`BackgroundJobService`) | `EnqueueAsync` / `UpdateAsync` / `DeleteAsync`. The default enqueue path writes the row only; `directly: true` arms the scheduler after persistence commits. |
 | `BackgroundJobArmingProcessor` | Fixed-schema poller. Leases due rows, arms them in the scheduler **outside** any transaction, then flips them to `Scheduled`. |
 | `IJobScheduler` (`DaprJobScheduler`) | The external scheduler abstraction (`ScheduleAsync`, `ScheduleOneShotAsync`, `DeleteAsync`). |
 | `IJobExecutionBridge` (`DaprJobExecutionBridge`) | Dapr trigger entry point: looks the job up (in its own UoW) and delegates to the dispatcher. Does no other DB work. |
@@ -23,7 +24,7 @@ The pieces:
 ## Lifecycle
 
 ```
-                 EnqueueAsync (writes row, no scheduler call)
+       EnqueueAsync default/directly:false (writes row, no scheduler call)
                          │
                          ▼
                      ┌─────────┐
@@ -165,10 +166,12 @@ var jobId = await jobs.EnqueueAsync(
     kind: JobKind.Recurring);                       // optional — omit to infer the kind from the schedule
 ```
 
-`EnqueueAsync` writes a single `Pending` row (with the serialized envelope as its payload) and returns the
-job id. It makes **no scheduler call** — the arming poller arms the row after it commits. The `JobKind` is
-inferred from the schedule when `kind` is omitted: a value starting with `@` (e.g. `@every 5m`, `@daily`) or a
-5–6 field cron expression ⇒ `Recurring`; anything else (e.g. an ISO-8601 instant) ⇒ `OneShot`.
+By default (`directly: false`), `EnqueueAsync` writes a single `Pending` row (with the serialized envelope as
+its payload), returns the job id, and makes **no scheduler call**; the arming poller registers the schedule
+after the row commits. With `directly: true`, the service registers the schedule only after persistence commits
+(through the ambient UoW's `OnCompleted` callback or after its own UoW commit). The `JobKind` is inferred from
+the schedule when `kind` is omitted: a value starting with `@` (e.g. `@every 5m`, `@daily`) or a 5–6 field cron
+expression ⇒ `Recurring`; anything else (e.g. an ISO-8601 instant) ⇒ `OneShot`.
 
 ### Atomic enqueue with the caller's transaction
 
@@ -341,9 +344,10 @@ above your slowest handler so legitimate long runs are not reaped mid-flight.
 
 ## Concepts
 
-- **Job table as source of truth + arming poller.** The row exists before anything is scheduled, and the
-  poller is the only thing that registers schedules. A crash between commit and arming leaves a `Pending` row
-  the next poller pass picks up — there are no orphaned scheduler entries and no lost jobs.
+- **Job table as source of truth + arming poller.** The row is durably persisted before anything is scheduled.
+  The default path leaves registration to the poller; `directly: true` registers only after the persistence
+  commit. If direct registration fails, the row returns to `Pending` for the poller to pick up — there are no
+  scheduler entries created before commit and no lost jobs.
 
 - **Optimistic-concurrency CAS claim (at-least-once safe).** The dispatcher claims a job with a conditional
   `Scheduled→Running` update (`IJobStore.TryTransitionStatusAsync`). If two deliveries race, exactly one wins
