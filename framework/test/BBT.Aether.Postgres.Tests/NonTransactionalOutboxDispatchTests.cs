@@ -149,7 +149,7 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
         // default, requires a transaction).
         services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString, SchemaSwitchingMode.SessionSearchPath);
         services.AddAetherDomainEvents<TestDbContext>();
-        services.AddAetherOutbox<TestDbContext>();
+        services.AddAetherOutbox<TestDbContext>(options => options.Schema = _schema);
 
         services.AddSingleton(new AetherEventBusOptions { DefaultSource = "urn:test:orders" });
         services.AddSingleton<ITopicNameStrategy, SimpleTopicNameStrategy>();

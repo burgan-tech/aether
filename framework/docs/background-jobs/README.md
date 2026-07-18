@@ -3,18 +3,20 @@
 ## Overview
 
 The background-job system runs scheduled and recurring work with the **job table as the single source of
-truth**. Enqueue writes a database row only; a per-schema **arming poller** later registers the job in an
-external scheduler (default: Dapr Jobs) and the scheduler's fire is routed back through an execution bridge to
-a type-safe handler. This row-first design makes enqueue atomic with the caller's business transaction (no
-orphaned schedules on rollback), provides framework-managed retry with exponential backoff for one-shot jobs,
-and uses an optimistic-concurrency claim so delivery is at-least-once safe.
+truth**. By default (`directly: false`), enqueue writes a database row only and a fixed-schema **arming poller**
+later registers the job in an external scheduler (default: Dapr Jobs). With `directly: true`, enqueue attempts
+to register the schedule only after the row's persistence transaction commits. The scheduler's fire is routed
+back through an execution bridge to a type-safe handler. This row-first design makes enqueue atomic with the
+caller's business transaction (no orphaned schedules on rollback), provides framework-managed retry with
+exponential backoff for one-shot jobs, and uses an optimistic-concurrency claim so delivery is at-least-once
+safe.
 
 The pieces:
 
 | Component | Role |
 |-----------|------|
-| `IBackgroundJobService` (`BackgroundJobService`) | `EnqueueAsync` / `UpdateAsync` / `DeleteAsync`. Writes/updates the job row. Never calls the scheduler on the enqueue path. |
-| `BackgroundJobArmingProcessor` | Per-schema poller. Leases due rows, arms them in the scheduler **outside** any transaction, then flips them to `Scheduled`. |
+| `IBackgroundJobService` (`BackgroundJobService`) | `EnqueueAsync` / `UpdateAsync` / `DeleteAsync`. The default enqueue path writes the row only; `directly: true` attempts to arm the scheduler after persistence commits. |
+| `BackgroundJobArmingProcessor` | Fixed-schema poller. Leases due rows, arms them in the scheduler **outside** any transaction, then flips them to `Scheduled`. |
 | `IJobScheduler` (`DaprJobScheduler`) | The external scheduler abstraction (`ScheduleAsync`, `ScheduleOneShotAsync`, `DeleteAsync`). |
 | `IJobExecutionBridge` (`DaprJobExecutionBridge`) | Dapr trigger entry point: looks the job up (in its own UoW) and delegates to the dispatcher. Does no other DB work. |
 | `IJobDispatcher` (`JobDispatcher`) | CAS-claims `Scheduled→Running` (stamping `RunningSince`), invokes the handler with **no dispatcher-owned transaction**, records the outcome. |
@@ -23,7 +25,7 @@ The pieces:
 ## Lifecycle
 
 ```
-                 EnqueueAsync (writes row, no scheduler call)
+       EnqueueAsync default/directly:false (writes row, no scheduler call)
                          │
                          ▼
                      ┌─────────┐
@@ -104,7 +106,7 @@ options from the `configure` callback. Chain a scheduler-specific extension such
 ```csharp
 services.AddAetherBackgroundJob<MyDbContext>(o =>
 {
-    o.Schema = "orders";                          // the schema this poller instance arms (see below)
+    o.Schema = "sys_queues"; // fixed persistence schema for the dedicated BackgroundJob DbContext
     o.MaxRetryCount = 3;                          // one-shot framework retries
     o.RetryBaseDelay = TimeSpan.FromSeconds(30);  // exponential backoff base
     o.ArmingInterval = TimeSpan.FromSeconds(10);  // poller interval
@@ -137,11 +139,22 @@ The endpoint catches only infrastructure faults and rethrows them (so Dapr obser
 own delivery retry). Handler failures never reach it: the dispatcher records the outcome and returns
 normally, so Dapr sees a 200 and does **not** retry — framework retry owns handler retries.
 
-### Per-schema arming
+### Fixed persistence schema
 
-The `Schema` option binds **one poller instance to one schema**. Each `RunAsync` opens a UnitOfWork scoped to
-`Schema`, so the poller only ever arms that schema's rows. If `Schema` is null/empty the poller logs a warning
-and does nothing. For a multi-schema deployment, register one configured poller per schema.
+One `AddAetherBackgroundJob<TDbContext>` registration owns one immutable persistence schema. `Schema` binds
+the dedicated BackgroundJob DbContext, store, and arming lease to that schema (for example, `sys_queues`).
+Request-time tenant changes through `ICurrentSchema` never redirect `BackgroundJobs` into a tenant schema;
+the store temporarily enters the configured persistence schema for each operation and restores the caller's
+tenant schema before returning.
+
+The serialized job payload independently carries the tenant schema that was active at enqueue time. The job
+row therefore stays in the fixed persistence schema while dispatch restores the payload's tenant schema for
+handler execution. If `Schema` is null or empty, persistence retains the historical ambient-schema behavior;
+the arming processor itself requires a configured schema and otherwise logs a warning and does no work.
+
+Schema selection for migrations remains model-driven. Generate migrations from the dedicated BackgroundJob
+DbContext and keep its configured/default schema aligned with the persistence schema; request-time store
+scoping does not rewrite the migration model.
 
 ## Enqueue usage
 
@@ -154,16 +167,21 @@ var jobId = await jobs.EnqueueAsync(
     kind: JobKind.Recurring);                       // optional — omit to infer the kind from the schedule
 ```
 
-`EnqueueAsync` writes a single `Pending` row (with the serialized envelope as its payload) and returns the
-job id. It makes **no scheduler call** — the arming poller arms the row after it commits. The `JobKind` is
+By default (`directly: false`), `EnqueueAsync` writes a single `Pending` row (with the serialized envelope as
+its payload), returns the job id, and makes **no scheduler call**; the arming poller registers the schedule
+after the row commits. With `directly: true`, the service attempts to register the schedule only after
+persistence commits (through the ambient UoW's `OnCompleted` callback or after its own UoW commit). This direct
+registration attempt does not provide the durable poller-first guarantee described below. The `JobKind` is
 inferred from the schedule when `kind` is omitted: a value starting with `@` (e.g. `@every 5m`, `@daily`) or a
 5–6 field cron expression ⇒ `Recurring`; anything else (e.g. an ISO-8601 instant) ⇒ `OneShot`.
 
 ### Atomic enqueue with the caller's transaction
 
-Enqueue is **always atomic** with the caller's ambient UnitOfWork. When an ambient UoW is active, the row is
-persisted **into it** — the job commits atomically with the caller's business transaction and a rollback
-discards the job. When there is **no** ambient UoW, a short `RequiresNew` transaction is opened and committed.
+Enqueue is atomic with the caller's business writes when both DbContexts participate in the same **shared,
+transactional** ambient UnitOfWork. The job row is persisted into that UoW, so commit applies both writes and
+rollback discards both. When there is no ambient UoW, enqueue opens and commits a short `RequiresNew`
+transaction for the job row; there is then no caller transaction with which to provide cross-context
+atomicity.
 
 ```csharp
 await using var uow = uowManager.Begin(
@@ -178,9 +196,10 @@ await jobs.EnqueueAsync(
 await uow.CommitAsync();             // job row commits atomically with the business data
 ```
 
-The row commits with the business data in one transaction. If the caller rolls back, the row never exists, so
-there is never an orphaned scheduled job. The poller arms the row only after a successful commit, and the
-scheduler is only ever touched after that — no scheduler call runs inside the caller's transaction (which also
+The row commits with the business data in one shared transaction. If the caller rolls back, the row never
+exists, so there is never an orphaned scheduled job. This atomic boundary ends with enqueue persistence:
+poller or inline scheduler arming attempts, handler work, and outcome recording run later in separate
+boundaries. No scheduler call or handler execution runs inside the caller's enqueue transaction (which also
 avoids nested-UoW / shared-DbContext collisions).
 
 To enqueue a job that must survive a caller rollback, enqueue it outside that transaction (manage the UoW
@@ -188,9 +207,10 @@ boundary yourself).
 
 ### Arming immediately (`directly`)
 
-By default arming is left entirely to the poller. Pass `directly: true` to arm the scheduler **inline**
-immediately after the job row is durably committed (and flip it `Pending → Scheduled`) instead of waiting for
-the next poller pass:
+By default arming is left entirely to the poller. Pass `directly: true` to attempt to arm the scheduler
+**inline** after the persistence transaction commits instead of waiting for the next poller pass. To prevent a
+poller race, this path initially persists the job row as `Scheduled`; it does not persist `Pending` and later
+flip it to `Scheduled`.
 
 ```csharp
 await jobs.EnqueueAsync("SendEmail", jobName, payload, "@daily", directly: true);
@@ -198,8 +218,11 @@ await jobs.EnqueueAsync("SendEmail", jobName, payload, "@daily", directly: true)
 
 - In the **ambient** case, arming is deferred to the ambient UoW's `OnCompleted` callback, so it only fires
   after the caller's commit (a rollback still discards everything — nothing is armed).
-- The arming **poller remains the backstop**: if the inline arm fails it is logged as a warning and the row is
-  left `Pending` for the poller to arm on its next pass. `directly` only trades latency, never correctness.
+- Without an ambient UoW, the scheduler call runs only after enqueue's own `RequiresNew` UoW commits.
+- If the scheduler call throws, the service makes a **best-effort** `Scheduled → Pending` recovery so the poller
+  can retry. A process crash, cancellation, or recovery failure can leave the row `Scheduled` without a
+  scheduler entry; the poller does not claim `Scheduled` rows. Prefer the default `directly: false` path when
+  durable poller-first registration is required.
 
 ## Job management
 
@@ -327,9 +350,10 @@ above your slowest handler so legitimate long runs are not reaped mid-flight.
 
 ## Concepts
 
-- **Job table as source of truth + arming poller.** The row exists before anything is scheduled, and the
-  poller is the only thing that registers schedules. A crash between commit and arming leaves a `Pending` row
-  the next poller pass picks up — there are no orphaned scheduler entries and no lost jobs.
+- **Job table as source of truth + arming poller.** The row is durably persisted before anything is scheduled.
+  The default path persists `Pending` and leaves registration to the poller. `directly: true` instead persists
+  `Scheduled`, then attempts registration after commit; its recovery to `Pending` on scheduler failure is
+  best-effort and is not crash-safe. Use the default path for the durable poller-first guarantee.
 
 - **Optimistic-concurrency CAS claim (at-least-once safe).** The dispatcher claims a job with a conditional
   `Scheduled→Running` update (`IJobStore.TryTransitionStatusAsync`). If two deliveries race, exactly one wins
@@ -390,6 +414,6 @@ All background-job operations automatically emit OpenTelemetry spans via the
 ## Related features
 
 - [Unit of Work](../unit-of-work/README.md) — the transaction model the enqueue/dispatch paths build on.
-- [Multi-Schema](../multi-schema/ADOPTION-GUIDE.md) — schema scoping, which the per-schema poller relies on.
+- [Multi-Schema](../multi-schema/ADOPTION-GUIDE.md) — tenant handler scoping and fixed infrastructure persistence.
 - [Distributed Lock](../distributed-lock/README.md) — coordinate work across instances inside a handler.
 ```

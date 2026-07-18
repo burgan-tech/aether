@@ -40,7 +40,7 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
         var services = new ServiceCollection();
         services.AddAetherCore(_ => { });
         services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString, mode);
-        services.AddAetherOutbox<TestDbContext>();
+        services.AddAetherOutbox<TestDbContext>(options => options.Schema = _schema);
         services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
         return services.BuildServiceProvider();
     }

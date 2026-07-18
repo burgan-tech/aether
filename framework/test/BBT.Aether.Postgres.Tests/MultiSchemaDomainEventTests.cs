@@ -146,7 +146,7 @@ public sealed class MultiSchemaDomainEventTests(PostgresFixture fx)
         services.AddAetherCore(_ => { });
         services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString, SchemaSwitchingMode.QualifiedNames);
         services.AddAetherDomainEvents<TestDbContext>();
-        services.AddAetherOutbox<TestDbContext>();
+        services.AddAetherOutbox<TestDbContext>(options => options.Schema = null);
         services.AddSingleton(new AetherEventBusOptions { DefaultSource = "urn:test:orders" });
         services.AddSingleton<ITopicNameStrategy, SimpleTopicNameStrategy>();
         services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
@@ -163,7 +163,7 @@ public sealed class MultiSchemaDomainEventTests(PostgresFixture fx)
         services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString, SchemaSwitchingMode.QualifiedNames);
         services.AddAetherDomainEvents<TestDbContext>(options =>
             options.DispatchStrategy = DomainEventDispatchStrategy.PublishWithFallback);
-        services.AddAetherOutbox<TestDbContext>();
+        services.AddAetherOutbox<TestDbContext>(options => options.Schema = null);
         services.AddSingleton(new AetherEventBusOptions { DefaultSource = "urn:test:orders" });
         services.AddSingleton<ITopicNameStrategy, SimpleTopicNameStrategy>();
         services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
