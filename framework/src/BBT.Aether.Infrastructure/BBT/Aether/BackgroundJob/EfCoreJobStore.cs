@@ -299,6 +299,36 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     }
 
     /// <inheritdoc/>
+    public async Task<bool> TryCancelWaitingAsync(
+        Guid id,
+        DateTime handledTimeUtc,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        using var schemaScope = BeginConfiguredSchemaScope();
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id &&
+                        (j.Status == BackgroundJobStatus.Pending ||
+                         j.Status == BackgroundJobStatus.Scheduled ||
+                         j.Status == BackgroundJobStatus.Retrying))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(j => j.Status, BackgroundJobStatus.Cancelled)
+                .SetProperty(j => j.HandledTime, handledTimeUtc)
+                .SetProperty(j => j.RunningSince, (DateTime?)null)
+                .SetProperty(j => j.RunningToken, (Guid?)null)
+                .SetProperty(j => j.ArmingToken, (Guid?)null)
+                .SetProperty(j => j.ArmingUntil, (DateTime?)null)
+                .SetProperty(j => j.ModifiedAt, now), cancellationToken);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
     public async Task<bool> TryRecordTerminalAsync(Guid id, Guid runningToken,
         BackgroundJobStatus terminalStatus, DateTime handledTimeUtc, string? error,
         CancellationToken cancellationToken = default)

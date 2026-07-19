@@ -153,6 +153,15 @@ public interface IJobStore
     Task<bool> TryClaimAsync(Guid id, DateTime nowUtc, Guid runningToken, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Atomically cancels a Pending, Scheduled, or Retrying job.
+    /// Running and terminal jobs are not changed.
+    /// </summary>
+    Task<bool> TryCancelWaitingAsync(
+        Guid id,
+        DateTime handledTimeUtc,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Atomically records a terminal outcome (Completed/Failed/Cancelled) for a Running job, guarded on the
     /// claim token: updates only when <c>Status==Running &amp;&amp; RunningToken==runningToken</c>. Clears
     /// RunningSince/RunningToken. Returns true iff a row was updated (false ⇒ the claim was lost — the job is
@@ -234,4 +243,3 @@ public interface IJobStore
         int batchSize,
         CancellationToken cancellationToken = default);
 }
-
