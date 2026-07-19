@@ -98,8 +98,11 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
         private readonly ConcurrentDictionary<string, byte> _entries = new();
         private int _scheduleCallCount;
         private int _deleteCallCount;
+        private CancellationTokenRegistration _throwingCancellationRegistration;
 
         public bool GateSecondAfterCreate { get; set; }
+        public bool GateCompensatingDelete { get; set; }
+        public bool ThrowOnCompensatingDeleteCancellation { get; set; }
         public int? ThrowOnDeleteCall { get; set; }
         public int DeleteCallCount => Volatile.Read(ref _deleteCallCount);
         public TaskCompletionSource FirstScheduleEntered { get; } =
@@ -109,6 +112,10 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
         public TaskCompletionSource SecondScheduleCreated { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource AllowSecondScheduleToReturn { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CompensatingDeleteEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowCompensatingDelete { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public bool HasEntry(string jobName) => _entries.ContainsKey(jobName);
@@ -150,18 +157,32 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
             }
         }
 
-        public Task DeleteAsync(
+        public async Task DeleteAsync(
             string handlerName,
             string jobName,
             CancellationToken cancellationToken = default)
         {
             var call = Interlocked.Increment(ref _deleteCallCount);
+            if (call == 2 && GateCompensatingDelete)
+            {
+                CompensatingDeleteEntered.TrySetResult();
+                await AllowCompensatingDelete.Task.WaitAsync(cancellationToken);
+            }
+
+            if (call == 2 && ThrowOnCompensatingDeleteCancellation)
+            {
+                _throwingCancellationRegistration = cancellationToken.Register(
+                    () => throw new InvalidOperationException("renewal shutdown callback boom"));
+            }
+
             if (ThrowOnDeleteCall == call)
                 throw new InvalidOperationException("compensating delete boom");
 
             _entries.TryRemove(jobName, out _);
-            return Task.CompletedTask;
         }
+
+        public void DisposeThrowingCancellationRegistration() =>
+            _throwingCancellationRegistration.Dispose();
     }
 
     private sealed class RecordingLogger : ILogger<BackgroundJobArmingProcessor>
@@ -203,8 +224,7 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
 
         services.AddAetherCore(_ => { });
         services.AddAetherNpgsql<TestJobDbContext>(fx.ConnectionString);
-        services.AddScoped<IJobStore, global::BBT.Aether.BackgroundJob.EfCoreJobStore<TestJobDbContext>>();
-        services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
+        services.AddAetherBackgroundJob<TestJobDbContext>(options => options.Schema = _schema);
         services.AddSingleton(scheduler);
 
         return services.BuildServiceProvider();
@@ -550,7 +570,101 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
         await processorTask;
 
         logger.HasWarningContaining("compensating").ShouldBeTrue();
-        (await ReloadAsync(sp, id))!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+        reloaded.ArmingToken.ShouldBeNull("the compensation lease must be released in finally");
+    }
+
+    [Fact]
+    public async Task Compensation_lease_prevents_delete_from_losing_concurrent_update_generation()
+    {
+        var scheduler = new GatedJobScheduler { GateCompensatingDelete = true };
+        var sp = BuildProvider(scheduler);
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        var job = NewJob(id, BackgroundJobStatus.Pending);
+        await SeedAsync(sp, job);
+
+        var options = new BackgroundJobOptions
+        {
+            Schema = _schema,
+            ArmingBatchSize = 1,
+            ArmingLeaseDuration = TimeSpan.FromMilliseconds(300)
+        };
+        var staleProcessorRun = BuildProcessor(sp, options).RunAsync();
+        await scheduler.FirstScheduleEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        (await CancelWaitingAsync(sp, id)).ShouldBeTrue();
+        await scheduler.DeleteAsync(job.HandlerName, job.JobName);
+        scheduler.AllowFirstSchedule.TrySetResult();
+        await scheduler.CompensatingDeleteEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        await using (var updateScope = sp.CreateAsyncScope())
+        {
+            var services = updateScope.ServiceProvider;
+            using (services.GetRequiredService<ICurrentSchema>().Change(_schema))
+            {
+                await services.GetRequiredService<IBackgroundJobService>()
+                    .UpdateAsync(id, "@every 2m");
+            }
+        }
+
+        var pendingDuringCleanup = await ReloadAsync(sp, id);
+        pendingDuringCleanup!.Status.ShouldBe(BackgroundJobStatus.Pending);
+        pendingDuringCleanup.ArmingToken.ShouldNotBeNull(
+            "terminal cleanup must retain ownership while external delete is in flight");
+
+        await Task.Delay(TimeSpan.FromSeconds(1));
+
+        // A new armer must not create a generation while the stale owner's delete is still pending.
+        await BuildProcessor(sp, options).RunAsync();
+
+        scheduler.AllowCompensatingDelete.TrySetResult();
+        await staleProcessorRun;
+
+        // Once cleanup releases its lease, the pending update is recoverable and can be armed normally.
+        await BuildProcessor(sp, options).RunAsync();
+
+        var final = await ReloadAsync(sp, id);
+        final!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
+        final.ArmingToken.ShouldBeNull();
+        scheduler.HasEntry(job.JobName).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Renewal_shutdown_failure_still_releases_compensation_lease()
+    {
+        var scheduler = new GatedJobScheduler { ThrowOnCompensatingDeleteCancellation = true };
+        var logger = new RecordingLogger();
+        var sp = BuildProvider(scheduler);
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        var job = NewJob(id, BackgroundJobStatus.Pending);
+        await SeedAsync(sp, job);
+
+        var options = new BackgroundJobOptions { Schema = _schema, ArmingBatchSize = 1 };
+        var processorRun = BuildProcessor(sp, options, logger).RunAsync();
+        await scheduler.FirstScheduleEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        (await CancelWaitingAsync(sp, id)).ShouldBeTrue();
+        await scheduler.DeleteAsync(job.HandlerName, job.JobName);
+        scheduler.AllowFirstSchedule.TrySetResult();
+
+        try
+        {
+            await Should.NotThrowAsync(async () => await processorRun);
+        }
+        finally
+        {
+            scheduler.DisposeThrowingCancellationRegistration();
+        }
+
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+        reloaded.ArmingToken.ShouldBeNull();
+        logger.HasWarningContaining("renewal").ShouldBeTrue();
     }
 
     [Fact]

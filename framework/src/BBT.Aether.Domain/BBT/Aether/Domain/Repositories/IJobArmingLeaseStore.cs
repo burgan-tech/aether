@@ -33,7 +33,8 @@ public interface IJobArmingLeaseStore
 /// <summary>A single job claim returned by <see cref="IJobArmingLeaseStore.ClaimBatchAsync"/>.</summary>
 /// <param name="Job">The claimed job entity.</param>
 /// <param name="OriginalStatus">The status at claim time (Pending or Retrying) — used to revert on failure.</param>
-/// <param name="ArmingToken">The token stamped onto the row; passed to <see cref="IJobStore.TryTransitionFromArmingAsync"/>.</param>
+/// <param name="ArmingToken">The token stamped onto the row; passed to
+/// <c>IJobStore.TryTransitionFromArmingAsync</c>.</param>
 public record BackgroundJobArmingClaim(
     BackgroundJobInfo Job,
     BackgroundJobStatus OriginalStatus,

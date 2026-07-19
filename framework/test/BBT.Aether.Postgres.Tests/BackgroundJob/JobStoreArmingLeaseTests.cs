@@ -167,7 +167,8 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
                 await using var uow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
                 result = await store.TryTransitionFromArmingAsync(
-                    id, token, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled);
+                    id, token, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled,
+                    CancellationToken.None);
                 await uow.CommitAsync();
             }
         }
@@ -210,7 +211,8 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
                 await using var uow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
                 result = await store.TryTransitionFromArmingAsync(
-                    id, wrongToken, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled);
+                    id, wrongToken, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled,
+                    CancellationToken.None);
                 await uow.CommitAsync();
             }
         }
@@ -247,7 +249,8 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
                 await using var uow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
                 result = await store.TryTransitionFromArmingAsync(
-                    id, token, BackgroundJobStatus.Retrying, BackgroundJobStatus.Retrying);
+                    id, token, BackgroundJobStatus.Retrying, BackgroundJobStatus.Retrying,
+                    CancellationToken.None);
                 await uow.CommitAsync();
             }
         }
@@ -484,7 +487,8 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
                 transitioned = await services.GetRequiredService<IJobStore>()
                     .TryTransitionFromArmingAsync(
-                        id, token, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled);
+                        id, token, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled,
+                        CancellationToken.None);
                 await uow.CommitAsync();
             }
         }
@@ -529,7 +533,8 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
                     id,
                     claim.ArmingToken,
                     claim.OriginalStatus,
-                    BackgroundJobStatus.Scheduled)).ShouldBeFalse();
+                    BackgroundJobStatus.Scheduled,
+                    CancellationToken.None)).ShouldBeFalse();
                 await uow.CommitAsync();
             }
         }

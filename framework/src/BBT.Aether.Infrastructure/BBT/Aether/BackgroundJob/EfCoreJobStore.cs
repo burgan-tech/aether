@@ -442,9 +442,30 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     public async Task<bool> TryTransitionFromArmingAsync(
         Guid id,
         Guid armingToken,
-        BackgroundJobStatus expectedOriginalStatus,
         BackgroundJobStatus to,
         CancellationToken cancellationToken = default)
+    {
+        using var schemaScope = BeginConfiguredSchemaScope();
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+        var affected = await dbContext.BackgroundJobs
+            .Where(j => j.Id == id && j.ArmingToken == armingToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, to)
+                .SetProperty(j => j.ArmingToken, (Guid?)null)
+                .SetProperty(j => j.ArmingUntil, (DateTime?)null)
+                .SetProperty(j => j.ModifiedAt, now),
+                cancellationToken);
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryTransitionFromArmingAsync(
+        Guid id,
+        Guid armingToken,
+        BackgroundJobStatus expectedOriginalStatus,
+        BackgroundJobStatus to,
+        CancellationToken cancellationToken)
     {
         using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
@@ -458,6 +479,66 @@ public class EfCoreJobStore<TDbContext> : IJobStore
                 .SetProperty(j => j.ArmingToken, (Guid?)null)
                 .SetProperty(j => j.ArmingUntil, (DateTime?)null)
                 .SetProperty(j => j.ModifiedAt, now),
+                cancellationToken);
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryAcquireTerminalArmingCompensationAsync(
+        Guid id,
+        Guid lostArmingToken,
+        Guid compensationToken,
+        DateTime now,
+        DateTime compensationUntil,
+        CancellationToken cancellationToken = default)
+    {
+        using var schemaScope = BeginConfiguredSchemaScope();
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var affected = await dbContext.BackgroundJobs
+            .Where(job => job.Id == id
+                          && (job.Status == BackgroundJobStatus.Completed
+                              || job.Status == BackgroundJobStatus.Failed
+                              || job.Status == BackgroundJobStatus.Cancelled)
+                          && (job.ArmingToken == null
+                              || job.ArmingToken == lostArmingToken
+                              || job.ArmingUntil < now))
+            .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(job => job.ArmingToken, compensationToken)
+                    .SetProperty(job => job.ArmingUntil, compensationUntil),
+                cancellationToken);
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryReleaseArmingCompensationAsync(
+        Guid id,
+        Guid compensationToken,
+        CancellationToken cancellationToken = default)
+    {
+        using var schemaScope = BeginConfiguredSchemaScope();
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var affected = await dbContext.BackgroundJobs
+            .Where(job => job.Id == id && job.ArmingToken == compensationToken)
+            .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(job => job.ArmingToken, (Guid?)null)
+                    .SetProperty(job => job.ArmingUntil, (DateTime?)null),
+                cancellationToken);
+        return affected > 0;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> TryRenewArmingCompensationAsync(
+        Guid id,
+        Guid compensationToken,
+        DateTime compensationUntil,
+        CancellationToken cancellationToken = default)
+    {
+        using var schemaScope = BeginConfiguredSchemaScope();
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var affected = await dbContext.BackgroundJobs
+            .Where(job => job.Id == id && job.ArmingToken == compensationToken)
+            .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(job => job.ArmingUntil, compensationUntil),
                 cancellationToken);
         return affected > 0;
     }

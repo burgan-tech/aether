@@ -278,25 +278,161 @@ public class BackgroundJobArmingProcessor(
             return;
         }
 
-        var newerLeaseOwnsRow = snapshot?.ArmingToken is { } currentToken
-                                && currentToken != lostArmingToken;
         var terminalWinner = snapshot?.Status is BackgroundJobStatus.Completed
             or BackgroundJobStatus.Failed
             or BackgroundJobStatus.Cancelled;
 
-        if (newerLeaseOwnsRow || !terminalWinner)
+        if (!terminalWinner)
             return;
 
+        var compensationToken = Guid.NewGuid();
+        var now = clock.UtcNow;
+        var compensationLeaseDuration = options.ArmingLeaseDuration > TimeSpan.Zero
+            ? options.ArmingLeaseDuration
+            : TimeSpan.FromSeconds(30);
+        bool acquired;
+        try
+        {
+            await using var acquireUow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+            acquired = await jobStore.TryAcquireTerminalArmingCompensationAsync(
+                claimedJob.Id,
+                lostArmingToken,
+                compensationToken,
+                now,
+                now.Add(compensationLeaseDuration),
+                cancellationToken);
+            await acquireUow.CommitAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Failed to acquire compensating scheduler-cleanup lease for background job '{JobName}' (id {JobId}); deletion was skipped.",
+                snapshot!.JobName, claimedJob.Id);
+            return;
+        }
+
+        if (!acquired)
+            return;
+
+        using var deleteCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var renewalTask = RenewCompensationLeaseUntilCancelledAsync(
+            uowManager,
+            jobStore,
+            claimedJob,
+            compensationToken,
+            compensationLeaseDuration,
+            deleteCancellation);
         try
         {
             await scheduler.DeleteAsync(
-                snapshot!.HandlerName, snapshot.JobName, cancellationToken);
+                snapshot!.HandlerName, snapshot.JobName, deleteCancellation.Token);
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex,
                 "Failed compensating scheduler deletion for terminal background job '{JobName}' (id {JobId}); persisted state remains unchanged.",
                 snapshot!.JobName, claimedJob.Id);
+        }
+        finally
+        {
+            try
+            {
+                try
+                {
+                    await deleteCancellation.CancelAsync();
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Failed to stop compensation-lease renewal for background job '{JobName}' (id {JobId}); release will still be attempted.",
+                        snapshot!.JobName, claimedJob.Id);
+                }
+
+                try
+                {
+                    await renewalTask;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Compensation-lease renewal ended with an error for background job '{JobName}' (id {JobId}); release will still be attempted.",
+                        snapshot!.JobName, claimedJob.Id);
+                }
+            }
+            finally
+            {
+                try
+                {
+                    await using var releaseUow = uowManager.Begin(
+                        new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                    var released = await jobStore.TryReleaseArmingCompensationAsync(
+                        claimedJob.Id, compensationToken, CancellationToken.None);
+                    await releaseUow.CommitAsync(CancellationToken.None);
+
+                    if (!released)
+                    {
+                        logger.LogWarning(
+                            "Compensating scheduler-cleanup lease for background job '{JobName}' (id {JobId}) was no longer owned during release.",
+                            snapshot!.JobName, claimedJob.Id);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Failed to release compensating scheduler-cleanup lease for background job '{JobName}' (id {JobId}); the arming reaper will recover it after expiry.",
+                        snapshot!.JobName, claimedJob.Id);
+                }
+            }
+        }
+    }
+
+    private async Task RenewCompensationLeaseUntilCancelledAsync(
+        IUnitOfWorkManager uowManager,
+        IJobStore jobStore,
+        BackgroundJobInfo claimedJob,
+        Guid compensationToken,
+        TimeSpan leaseDuration,
+        CancellationTokenSource deleteCancellation)
+    {
+        var renewalInterval = TimeSpan.FromTicks(
+            Math.Max(TimeSpan.TicksPerMillisecond, leaseDuration.Ticks / 3));
+
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(renewalInterval, deleteCancellation.Token);
+                var renewalNow = clock.UtcNow;
+                await using var renewUow = uowManager.Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                var renewed = await jobStore.TryRenewArmingCompensationAsync(
+                    claimedJob.Id,
+                    compensationToken,
+                    renewalNow.Add(leaseDuration),
+                    deleteCancellation.Token);
+                await renewUow.CommitAsync(deleteCancellation.Token);
+
+                if (renewed)
+                    continue;
+
+                logger.LogWarning(
+                    "Lost compensating scheduler-cleanup lease for background job '{JobName}' (id {JobId}); cancelling the stale delete.",
+                    claimedJob.JobName, claimedJob.Id);
+                await deleteCancellation.CancelAsync();
+                return;
+            }
+        }
+        catch (OperationCanceledException) when (deleteCancellation.IsCancellationRequested)
+        {
+            // Normal shutdown: delete completed, caller cancelled, or ownership was lost.
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Failed to renew compensating scheduler-cleanup lease for background job '{JobName}' (id {JobId}); cancelling the stale delete.",
+                claimedJob.JobName, claimedJob.Id);
+            await deleteCancellation.CancelAsync();
         }
     }
 }
