@@ -16,6 +16,7 @@ using BBT.Aether.Persistence;
 using BBT.Aether.Uow;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Shouldly;
@@ -58,18 +59,22 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
     /// Test handler whose behavior (succeed / throw) is driven by a static switch, and which records its
     /// invocation count so tests can assert whether it ran at all (e.g. the CAS-skip path).
     /// </summary>
-    private sealed class TestHandler : IBackgroundJobHandler<TestArgs>
+    private sealed class TestHandler(IServiceProvider serviceProvider) : IBackgroundJobHandler<TestArgs>
     {
         public static bool ShouldThrow { get; set; }
+        public static bool LoseClaim { get; set; }
+        public static Guid JobId { get; set; }
         public static int InvocationCount { get; set; }
 
         public static void Reset()
         {
             ShouldThrow = false;
+            LoseClaim = false;
+            JobId = Guid.Empty;
             InvocationCount = 0;
         }
 
-        public Task HandleAsync(TestArgs args, CancellationToken cancellationToken)
+        public async Task HandleAsync(TestArgs args, CancellationToken cancellationToken)
         {
             InvocationCount++;
             if (ShouldThrow)
@@ -77,7 +82,21 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
                 throw new InvalidOperationException("handler boom");
             }
 
-            return Task.CompletedTask;
+            if (LoseClaim)
+            {
+                var manager = serviceProvider.GetRequiredService<IUnitOfWorkManager>();
+                await using var uow = manager.Begin(new UnitOfWorkOptions
+                {
+                    Scope = UnitOfWorkScopeOption.RequiresNew,
+                    IsTransactional = true
+                });
+                await serviceProvider.GetRequiredService<IJobStore>().UpdateStatusAsync(
+                    JobId,
+                    BackgroundJobStatus.Cancelled,
+                    DateTime.UtcNow,
+                    cancellationToken: cancellationToken);
+                await uow.CommitAsync(cancellationToken);
+            }
         }
     }
 
@@ -160,6 +179,28 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         }
     }
 
+    private sealed class CapturingLogger : ILogger<JobDispatcher>
+    {
+        private readonly List<(LogLevel level, string message)> _entries = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            _entries.Add((logLevel, formatter(state, exception)));
+        }
+
+        public bool HasLog(LogLevel level, string message) =>
+            _entries.Any(entry => entry.level == level && entry.message == message);
+    }
+
     private BackgroundJobOptions BuildOptions()
     {
         var options = new BackgroundJobOptions { Schema = _schema, MaxRetryCount = 3 };
@@ -184,14 +225,17 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         return services.BuildServiceProvider();
     }
 
-    private JobDispatcher BuildDispatcher(IServiceProvider sp, BackgroundJobOptions options)
+    private JobDispatcher BuildDispatcher(
+        IServiceProvider sp,
+        BackgroundJobOptions options,
+        ILogger<JobDispatcher>? logger = null)
     {
         return new JobDispatcher(
             sp.GetRequiredService<IServiceScopeFactory>(),
             options,
             sp.GetRequiredService<IClock>(),
             sp.GetRequiredService<IEventSerializer>(),
-            NullLogger<JobDispatcher>.Instance);
+            logger ?? NullLogger<JobDispatcher>.Instance);
     }
 
     private async Task ArrangeSchemaAsync(IServiceProvider sp)
@@ -322,6 +366,31 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         reloaded.RunningSince.ShouldBeNull();
         scheduler.DeleteCalls.Count.ShouldBe(1);
         scheduler.DeleteCalls[0].jobName.ShouldBe(JobNameFor(id));
+    }
+
+    [Fact]
+    public async Task Lost_success_claim_warns_without_success_log()
+    {
+        TestHandler.Reset();
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+        var id = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Scheduled));
+        TestHandler.JobId = id;
+        TestHandler.LoseClaim = true;
+        var logger = new CapturingLogger();
+
+        await BuildDispatcher(sp, options, logger)
+            .DispatchAsync(JobNameFor(id), BuildPayload(sp));
+
+        logger.HasLog(LogLevel.Warning,
+                $"Claim for job id '{id}' was lost before success could be recorded; skipping")
+            .ShouldBeTrue();
+        logger.HasLog(LogLevel.Information,
+                $"Successfully completed handler '{HandlerName}' for job id '{id}'")
+            .ShouldBeFalse();
     }
 
     [Fact]
