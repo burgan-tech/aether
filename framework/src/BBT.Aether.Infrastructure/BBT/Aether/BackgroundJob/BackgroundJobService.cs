@@ -330,25 +330,23 @@ public sealed class BackgroundJobService(
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
-        var existing = await jobStore.GetAsync(id, cancellationToken);
-        if (existing is null)
-            return BackgroundJobCancellationResult.NotFound;
-
-        var handlerName = existing.HandlerName;
-        var jobName = existing.JobName;
-
         if (uowManager.Current is { } ambient)
         {
+            var existing = await jobStore.GetCancellationSnapshotAsync(id, cancellationToken);
+            if (existing is null)
+                return BackgroundJobCancellationResult.NotFound;
+
             var ambientResult = await TryCancelAndClassifyAsync(id, cancellationToken);
             if (ambientResult == BackgroundJobCancellationResult.Cancelled)
             {
                 ambient.OnCompleted(_ => TryDeleteSchedulerEntryAsync(
-                    handlerName, jobName, CancellationToken.None));
+                    existing.HandlerName, existing.JobName, CancellationToken.None));
             }
 
             return ambientResult;
         }
 
+        BackgroundJobCancellationSnapshot? snapshot;
         BackgroundJobCancellationResult result;
         await using (var uow = uowManager.Begin(new UnitOfWorkOptions
                      {
@@ -356,12 +354,16 @@ public sealed class BackgroundJobService(
                          IsTransactional = true
                      }))
         {
-            result = await TryCancelAndClassifyAsync(id, cancellationToken);
+            snapshot = await jobStore.GetCancellationSnapshotAsync(id, cancellationToken);
+            result = snapshot is null
+                ? BackgroundJobCancellationResult.NotFound
+                : await TryCancelAndClassifyAsync(id, cancellationToken);
             await uow.CommitAsync(cancellationToken);
         }
 
         if (result == BackgroundJobCancellationResult.Cancelled)
-            await TryDeleteSchedulerEntryAsync(handlerName, jobName, cancellationToken);
+            await TryDeleteSchedulerEntryAsync(
+                snapshot!.HandlerName, snapshot.JobName, CancellationToken.None);
 
         return result;
     }
@@ -375,7 +377,7 @@ public sealed class BackgroundJobService(
             if (await jobStore.TryCancelWaitingAsync(id, clock.UtcNow, cancellationToken))
                 return BackgroundJobCancellationResult.Cancelled;
 
-            var current = await jobStore.GetAsync(id, cancellationToken);
+            var current = await jobStore.GetCancellationSnapshotAsync(id, cancellationToken);
             if (current is null)
                 return BackgroundJobCancellationResult.NotFound;
             if (current.Status == BackgroundJobStatus.Running)

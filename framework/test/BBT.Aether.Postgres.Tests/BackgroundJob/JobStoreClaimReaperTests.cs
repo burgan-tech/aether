@@ -267,6 +267,44 @@ public sealed class JobStoreClaimReaperTests(PostgresFixture fx)
         (await ReloadAsync(sp, id))!.Status.ShouldBe(initial);
     }
 
+    [Theory]
+    [InlineData(BackgroundJobStatus.Running)]
+    [InlineData(BackgroundJobStatus.Completed)]
+    public async Task Cancellation_snapshot_bypasses_tracked_waiting_entity_after_concurrent_transition(
+        BackgroundJobStatus concurrentStatus)
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+        var id = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Pending));
+
+        await using var scope = sp.CreateAsyncScope();
+        var services = scope.ServiceProvider;
+        using var schema = services.GetRequiredService<ICurrentSchema>().Change(_schema);
+        await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+            new UnitOfWorkOptions
+            {
+                Scope = UnitOfWorkScopeOption.RequiresNew,
+                IsTransactional = true
+            });
+        var store = services.GetRequiredService<IJobStore>();
+        var tracked = await store.GetAsync(id);
+        tracked.ShouldNotBeNull();
+        tracked!.Status.ShouldBe(BackgroundJobStatus.Pending);
+
+        await RunInUowAsync(sp, concurrentStore =>
+            concurrentStore.UpdateStatusAsync(id, concurrentStatus, DateTime.UtcNow));
+
+        (await store.TryCancelWaitingAsync(id, DateTime.UtcNow)).ShouldBeFalse();
+        tracked.Status.ShouldBe(BackgroundJobStatus.Pending,
+            "ExecuteUpdate and the concurrent UoW do not refresh the first context's tracked entity");
+
+        var snapshot = await store.GetCancellationSnapshotAsync(id);
+        snapshot.ShouldNotBeNull();
+        snapshot!.Status.ShouldBe(concurrentStatus);
+        await uow.CommitAsync();
+    }
+
     [Fact]
     public async Task Claim_and_waiting_cancellation_have_exactly_one_winner()
     {

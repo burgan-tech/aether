@@ -45,8 +45,8 @@ public sealed class BackgroundJobServiceCancelWaitingTests
     public async Task Running_returns_skipped_and_never_deletes_scheduler()
     {
         var id = Guid.NewGuid();
-        var running = NewJob(id, BackgroundJobStatus.Running);
-        _jobStore.GetAsync(id, Arg.Any<CancellationToken>()).Returns(running, running);
+        var running = NewSnapshot(BackgroundJobStatus.Running);
+        _jobStore.GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>()).Returns(running, running);
         _jobStore.TryCancelWaitingAsync(id, Arg.Any<DateTime>(), Arg.Any<CancellationToken>())
             .Returns(false);
 
@@ -64,8 +64,8 @@ public sealed class BackgroundJobServiceCancelWaitingTests
     public async Task Terminal_returns_already_terminal(BackgroundJobStatus status)
     {
         var id = Guid.NewGuid();
-        var terminal = NewJob(id, status);
-        _jobStore.GetAsync(id, Arg.Any<CancellationToken>()).Returns(terminal, terminal);
+        var terminal = NewSnapshot(status);
+        _jobStore.GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>()).Returns(terminal, terminal);
         _jobStore.TryCancelWaitingAsync(id, Arg.Any<DateTime>(), Arg.Any<CancellationToken>())
             .Returns(false);
 
@@ -77,8 +77,8 @@ public sealed class BackgroundJobServiceCancelWaitingTests
     public async Task Missing_returns_not_found_without_store_transition()
     {
         var id = Guid.NewGuid();
-        _jobStore.GetAsync(id, Arg.Any<CancellationToken>())
-            .Returns((BackgroundJobInfo?)null);
+        _jobStore.GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>())
+            .Returns((BackgroundJobCancellationSnapshot?)null);
 
         (await _sut.CancelWaitingAsync(id))
             .ShouldBe(BackgroundJobCancellationResult.NotFound);
@@ -90,8 +90,8 @@ public sealed class BackgroundJobServiceCancelWaitingTests
     public async Task Waiting_classification_retries_atomic_cancel_once()
     {
         var id = Guid.NewGuid();
-        var pending = NewJob(id, BackgroundJobStatus.Pending);
-        _jobStore.GetAsync(id, Arg.Any<CancellationToken>()).Returns(pending, pending);
+        var pending = NewSnapshot(BackgroundJobStatus.Pending);
+        _jobStore.GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>()).Returns(pending, pending);
         _jobStore.TryCancelWaitingAsync(id, Arg.Any<DateTime>(), Arg.Any<CancellationToken>())
             .Returns(false, true);
         var ambient = Substitute.For<IUnitOfWork>();
@@ -110,8 +110,8 @@ public sealed class BackgroundJobServiceCancelWaitingTests
     public async Task Waiting_classification_throws_after_one_retry()
     {
         var id = Guid.NewGuid();
-        var pending = NewJob(id, BackgroundJobStatus.Pending);
-        _jobStore.GetAsync(id, Arg.Any<CancellationToken>()).Returns(pending);
+        var pending = NewSnapshot(BackgroundJobStatus.Pending);
+        _jobStore.GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>()).Returns(pending);
         _jobStore.TryCancelWaitingAsync(id, Arg.Any<DateTime>(), Arg.Any<CancellationToken>())
             .Returns(false);
         _uowManager.Current.Returns(Substitute.For<IUnitOfWork>());
@@ -126,14 +126,38 @@ public sealed class BackgroundJobServiceCancelWaitingTests
             .DeleteAsync(default!, default!, default);
     }
 
+    [Theory]
+    [InlineData(BackgroundJobStatus.Running, BackgroundJobCancellationResult.SkippedRunning)]
+    [InlineData(BackgroundJobStatus.Completed, BackgroundJobCancellationResult.AlreadyTerminal)]
+    public async Task Concurrent_transition_is_classified_from_fresh_snapshot(
+        BackgroundJobStatus currentStatus,
+        BackgroundJobCancellationResult expected)
+    {
+        var id = Guid.NewGuid();
+        _jobStore.GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>())
+            .Returns(NewSnapshot(BackgroundJobStatus.Pending), NewSnapshot(currentStatus));
+        _jobStore.TryCancelWaitingAsync(id, Arg.Any<DateTime>(), Arg.Any<CancellationToken>())
+            .Returns(false);
+        var ambient = Substitute.For<IUnitOfWork>();
+        _uowManager.Current.Returns(ambient);
+
+        (await _sut.CancelWaitingAsync(id)).ShouldBe(expected);
+
+        await _jobStore.Received(2)
+            .GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>());
+        await _jobStore.DidNotReceiveWithAnyArgs().GetAsync(default, default);
+        await _jobScheduler.DidNotReceiveWithAnyArgs()
+            .DeleteAsync(default!, default!, default);
+    }
+
     [Fact]
     public async Task Ambient_cancellation_defers_scheduler_delete()
     {
         var ambient = Substitute.For<IUnitOfWork>();
         _uowManager.Current.Returns(ambient);
         var id = Guid.NewGuid();
-        _jobStore.GetAsync(id, Arg.Any<CancellationToken>())
-            .Returns(NewJob(id, BackgroundJobStatus.Scheduled));
+        _jobStore.GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>())
+            .Returns(NewSnapshot(BackgroundJobStatus.Scheduled));
         _jobStore.TryCancelWaitingAsync(id, Arg.Any<DateTime>(), Arg.Any<CancellationToken>())
             .Returns(true);
         Func<IUnitOfWork, Task>? callback = null;
@@ -156,8 +180,8 @@ public sealed class BackgroundJobServiceCancelWaitingTests
         var ambient = Substitute.For<IUnitOfWork>();
         _uowManager.Current.Returns(ambient);
         var id = Guid.NewGuid();
-        _jobStore.GetAsync(id, Arg.Any<CancellationToken>())
-            .Returns(NewJob(id, BackgroundJobStatus.Pending));
+        _jobStore.GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>())
+            .Returns(NewSnapshot(BackgroundJobStatus.Pending));
         _jobStore.TryCancelWaitingAsync(id, Arg.Any<DateTime>(), Arg.Any<CancellationToken>())
             .Returns(true);
         ambient.OnCompleted(Arg.Any<Func<IUnitOfWork, Task>>())
@@ -172,28 +196,64 @@ public sealed class BackgroundJobServiceCancelWaitingTests
     }
 
     [Fact]
-    public async Task Non_ambient_cancellation_commits_before_scheduler_delete()
+    public async Task Non_ambient_cancellation_reads_inside_transaction_and_deletes_after_dispose_with_none()
     {
         var ownUow = Substitute.For<IUnitOfWork>();
         _uowManager.Current.Returns((IUnitOfWork?)null);
         _uowManager.Begin(Arg.Any<UnitOfWorkOptions>()).Returns(ownUow);
+        var commitEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowCommit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposeEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowDispose = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ownUow.CommitAsync(Arg.Any<CancellationToken>()).Returns(_ =>
+        {
+            commitEntered.TrySetResult();
+            return allowCommit.Task;
+        });
+        ownUow.DisposeAsync().Returns(_ =>
+        {
+            disposeEntered.TrySetResult();
+            return new ValueTask(allowDispose.Task);
+        });
         var id = Guid.NewGuid();
-        _jobStore.GetAsync(id, Arg.Any<CancellationToken>())
-            .Returns(NewJob(id, BackgroundJobStatus.Pending));
+        _jobStore.GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>())
+            .Returns(NewSnapshot(BackgroundJobStatus.Pending));
         _jobStore.TryCancelWaitingAsync(id, Arg.Any<DateTime>(), Arg.Any<CancellationToken>())
             .Returns(true);
+        using var callerCancellation = new CancellationTokenSource();
 
-        (await _sut.CancelWaitingAsync(id))
-            .ShouldBe(BackgroundJobCancellationResult.Cancelled);
+        var cancellation = _sut.CancelWaitingAsync(id, callerCancellation.Token);
+
+        await commitEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await _jobScheduler.DidNotReceiveWithAnyArgs()
+            .DeleteAsync(default!, default!, default);
+
+        callerCancellation.Cancel();
+        allowCommit.TrySetResult();
+        await disposeEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await _jobScheduler.DidNotReceiveWithAnyArgs()
+            .DeleteAsync(default!, default!, default);
+
+        allowDispose.TrySetResult();
+        (await cancellation).ShouldBe(BackgroundJobCancellationResult.Cancelled);
+
+        _uowManager.Received(1).Begin(Arg.Is<UnitOfWorkOptions>(options =>
+            options.Scope == UnitOfWorkScopeOption.RequiresNew && options.IsTransactional));
 
         Received.InOrder(() =>
         {
+            _uowManager.Begin(Arg.Any<UnitOfWorkOptions>());
+            _jobStore.GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>());
             _jobStore.TryCancelWaitingAsync(
                 id, Arg.Any<DateTime>(), Arg.Any<CancellationToken>());
             ownUow.CommitAsync(Arg.Any<CancellationToken>());
+            ownUow.DisposeAsync();
             _jobScheduler.DeleteAsync(
-                "handler", "job-1", Arg.Any<CancellationToken>());
+                "handler", "job-1", CancellationToken.None);
         });
+
+        await _jobScheduler.Received(1)
+            .DeleteAsync("handler", "job-1", CancellationToken.None);
     }
 
     [Fact]
@@ -203,8 +263,8 @@ public sealed class BackgroundJobServiceCancelWaitingTests
         _uowManager.Current.Returns((IUnitOfWork?)null);
         _uowManager.Begin(Arg.Any<UnitOfWorkOptions>()).Returns(ownUow);
         var id = Guid.NewGuid();
-        _jobStore.GetAsync(id, Arg.Any<CancellationToken>())
-            .Returns(NewJob(id, BackgroundJobStatus.Scheduled));
+        _jobStore.GetCancellationSnapshotAsync(id, Arg.Any<CancellationToken>())
+            .Returns(NewSnapshot(BackgroundJobStatus.Scheduled));
         _jobStore.TryCancelWaitingAsync(id, Arg.Any<DateTime>(), Arg.Any<CancellationToken>())
             .Returns(true);
         _jobScheduler.DeleteAsync(
@@ -233,6 +293,6 @@ public sealed class BackgroundJobServiceCancelWaitingTests
         });
     }
 
-    private static BackgroundJobInfo NewJob(Guid id, BackgroundJobStatus status) =>
-        new(id, "handler", "job-1") { Status = status };
+    private static BackgroundJobCancellationSnapshot NewSnapshot(BackgroundJobStatus status) =>
+        new("handler", "job-1", status);
 }

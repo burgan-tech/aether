@@ -35,6 +35,18 @@ public interface IJobStore
     /// </returns>
     /// <exception cref="ArgumentException">Thrown when id is empty.</exception>
     Task<BackgroundJobInfo?> GetAsync(Guid id, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads the current persisted cancellation fields without consulting a tracked entity instance.
+    /// Use this after a failed set-based cancellation update so concurrent Running or terminal transitions
+    /// are classified from fresh database state.
+    /// </summary>
+    /// <param name="id">The unique entity identifier of the job.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>The current cancellation snapshot, or null when the job does not exist.</returns>
+    Task<BackgroundJobCancellationSnapshot?> GetCancellationSnapshotAsync(
+        Guid id,
+        CancellationToken cancellationToken = default);
     
     /// <summary>
     /// Retrieves active background job information by the job name (external scheduler identifier).

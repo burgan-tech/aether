@@ -104,6 +104,26 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     }
 
     /// <inheritdoc/>
+    public async Task<BackgroundJobCancellationSnapshot?> GetCancellationSnapshotAsync(
+        Guid id,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        using var schemaScope = BeginConfiguredSchemaScope();
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        return await dbContext.BackgroundJobs
+            .AsNoTracking()
+            .Where(job => job.Id == id)
+            .Select(job => new BackgroundJobCancellationSnapshot(
+                job.HandlerName,
+                job.JobName,
+                job.Status))
+            .SingleOrDefaultAsync(cancellationToken);
+    }
+
+    /// <inheritdoc/>
     public async Task<BackgroundJobInfo?> GetByJobNameAsync(string jobName,
         CancellationToken cancellationToken = default)
     {
