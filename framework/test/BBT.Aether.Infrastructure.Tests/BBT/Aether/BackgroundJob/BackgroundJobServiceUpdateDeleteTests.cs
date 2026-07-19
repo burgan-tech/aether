@@ -17,7 +17,7 @@ namespace BBT.Aether.BackgroundJob;
 
 public class BackgroundJobServiceUpdateDeleteTests
 {
-    private readonly IJobStore _jobStore = Substitute.For<IJobStore>();
+    private readonly IJobStore _jobStore = Substitute.For<IJobStore, IJobRescheduleStore>();
     private readonly IJobScheduler _jobScheduler = Substitute.For<IJobScheduler>();
     private readonly IUnitOfWorkManager _uowManager = Substitute.For<IUnitOfWorkManager>();
     private readonly IGuidGenerator _guidGenerator = Substitute.For<IGuidGenerator>();
@@ -32,6 +32,9 @@ public class BackgroundJobServiceUpdateDeleteTests
         _guidGenerator.Create().Returns(Guid.NewGuid());
         _clock.UtcNow.Returns(DateTime.UtcNow);
         _currentSchema.Name.Returns("runtime_test");
+        ((IJobRescheduleStore)_jobStore)
+            .TryRescheduleWaitingAsync(default, default!, default, default, default)
+            .ReturnsForAnyArgs(new BackgroundJobRescheduleResult(true, BackgroundJobStatus.Pending));
         _sut = new BackgroundJobService(
             _jobStore, _jobScheduler, _uowManager, _guidGenerator, _clock,
             _currentSchema, _eventSerializer, _options,
@@ -50,18 +53,12 @@ public class BackgroundJobServiceUpdateDeleteTests
         var existing = new BackgroundJobInfo(jobId, "handler", "job-1")
             { ExpressionValue = "@every 5s", Status = BackgroundJobStatus.Scheduled };
         _jobStore.GetAsync(jobId, Arg.Any<CancellationToken>()).Returns(existing);
-        BackgroundJobInfo? saved = null;
-        await _jobStore.SaveAsync(Arg.Do<BackgroundJobInfo>(j => saved = j), Arg.Any<CancellationToken>());
-
         // Act
         await _sut.UpdateAsync(jobId, "@every 10s");
 
-        // Assert — updates happen in ambient; no own UoW opened, no commit called
-        await _jobStore.Received(1).SaveAsync(Arg.Any<BackgroundJobInfo>(), Arg.Any<CancellationToken>());
-        saved.ShouldNotBeNull();
-        saved!.ExpressionValue.ShouldBe("@every 10s");
-        saved!.Status.ShouldBe(BackgroundJobStatus.Pending);
-        saved!.Kind.ShouldBe(JobKind.Recurring);
+        // Assert — the atomic update happens in ambient; no own UoW opened, no commit called
+        await ((IJobRescheduleStore)_jobStore).Received(1).TryRescheduleWaitingAsync(
+            jobId, "@every 10s", JobKind.Recurring, Arg.Any<DateTime>(), Arg.Any<CancellationToken>());
         _uowManager.DidNotReceive().Begin(Arg.Any<UnitOfWorkOptions>());
         await ambientUow.DidNotReceive().CommitAsync(Arg.Any<CancellationToken>());
     }
@@ -77,21 +74,15 @@ public class BackgroundJobServiceUpdateDeleteTests
         var existing = new BackgroundJobInfo(jobId, "handler", "job-1")
             { ExpressionValue = "@every 5s", Status = BackgroundJobStatus.Scheduled };
         _jobStore.GetAsync(jobId, Arg.Any<CancellationToken>()).Returns(existing);
-        BackgroundJobInfo? saved = null;
-        await _jobStore.SaveAsync(Arg.Do<BackgroundJobInfo>(j => saved = j), Arg.Any<CancellationToken>());
-
         // Act
         await _sut.UpdateAsync(jobId, "@every 10s");
 
-        // Assert — opens own UoW, saves, commits
+        // Assert — opens own UoW, atomically updates, commits
         _uowManager.Received(1).Begin(Arg.Is<UnitOfWorkOptions>(o =>
             o.Scope == UnitOfWorkScopeOption.RequiresNew && o.IsTransactional));
-        await _jobStore.Received(1).SaveAsync(Arg.Any<BackgroundJobInfo>(), Arg.Any<CancellationToken>());
+        await ((IJobRescheduleStore)_jobStore).Received(1).TryRescheduleWaitingAsync(
+            jobId, "@every 10s", JobKind.Recurring, Arg.Any<DateTime>(), Arg.Any<CancellationToken>());
         await ownUow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
-        saved.ShouldNotBeNull();
-        saved!.ExpressionValue.ShouldBe("@every 10s");
-        saved!.Status.ShouldBe(BackgroundJobStatus.Pending);
-        saved!.Kind.ShouldBe(JobKind.Recurring);
     }
 
     [Fact]
@@ -100,9 +91,33 @@ public class BackgroundJobServiceUpdateDeleteTests
         var ambientUow = Substitute.For<IUnitOfWork>();
         _uowManager.Current.Returns(ambientUow);
         var jobId = Guid.NewGuid();
-        _jobStore.GetAsync(jobId, Arg.Any<CancellationToken>()).Returns((BackgroundJobInfo?)null);
+        ((IJobRescheduleStore)_jobStore)
+            .TryRescheduleWaitingAsync(jobId, Arg.Any<string>(), Arg.Any<JobKind>(), Arg.Any<DateTime>(),
+                Arg.Any<CancellationToken>())
+            .Returns(new BackgroundJobRescheduleResult(false, null));
 
         await Should.ThrowAsync<InvalidOperationException>(() => _sut.UpdateAsync(jobId, "@every 10s"));
+    }
+
+    [Theory]
+    [InlineData(BackgroundJobStatus.Running)]
+    [InlineData(BackgroundJobStatus.Completed)]
+    [InlineData(BackgroundJobStatus.Failed)]
+    [InlineData(BackgroundJobStatus.Cancelled)]
+    public async Task UpdateAsync_NonWaitingStatus_ThrowsWithCurrentStatus(BackgroundJobStatus status)
+    {
+        _uowManager.Current.Returns(Substitute.For<IUnitOfWork>());
+        var jobId = Guid.NewGuid();
+        ((IJobRescheduleStore)_jobStore)
+            .TryRescheduleWaitingAsync(jobId, Arg.Any<string>(), Arg.Any<JobKind>(), Arg.Any<DateTime>(),
+                Arg.Any<CancellationToken>())
+            .Returns(new BackgroundJobRescheduleResult(false, status));
+
+        var exception = await Should.ThrowAsync<InvalidOperationException>(
+            () => _sut.UpdateAsync(jobId, "@every 10s"));
+
+        exception.Message.ShouldContain(status.ToString());
+        exception.Message.ShouldContain("Only Pending, Scheduled, or Retrying");
     }
 
     // ─── DeleteAsync ───────────────────────────────────────────────────────────

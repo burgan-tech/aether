@@ -67,7 +67,8 @@ public interface IBackgroundJobService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Updates the schedule of an existing background job.
+    /// Atomically updates the schedule of a Pending, Scheduled, or Retrying background job.
+    /// Running and terminal jobs are immutable and are not returned to Pending.
     /// </summary>
     /// <param name="id">The entity ID of the job to update.</param>
     /// <param name="newSchedule">The new schedule expression for the job.</param>

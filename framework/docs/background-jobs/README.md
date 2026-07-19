@@ -227,13 +227,18 @@ await jobs.EnqueueAsync("SendEmail", jobName, payload, "@daily", directly: true)
 ## Job management
 
 ```csharp
-// Reschedule: hands the row back to the poller (sets the new schedule, marks it Pending + due now,
-// re-infers the kind). Does NOT call the scheduler and does NOT touch the stored payload.
+// Reschedule a waiting row: atomically sets the new schedule, marks it Pending + due now,
+// and re-infers the kind. Does NOT call the scheduler and does NOT touch the stored payload.
 await jobs.UpdateAsync(jobId, "@weekly");
 
 // Cancel: deletes from the scheduler and marks the row Cancelled.
 await jobs.DeleteAsync(jobId);
 ```
+
+`UpdateAsync` accepts only `Pending`, `Scheduled`, or `Retrying` rows. The built-in EF store applies the
+schedule and status changes with one conditional database update, so a concurrent cancellation or terminal
+transition cannot be overwritten. `Running`, `Completed`, `Failed`, and `Cancelled` rows are rejected with
+an `InvalidOperationException`; schedule a new job row when a later generation is required.
 
 ## Defining handlers
 

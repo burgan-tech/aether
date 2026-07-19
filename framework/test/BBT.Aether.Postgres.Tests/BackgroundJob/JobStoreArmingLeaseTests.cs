@@ -24,7 +24,7 @@ namespace BBT.Aether.Postgres.Tests.BackgroundJob;
 
 /// <summary>
 /// Real-PostgreSQL validation of the arming-lease methods added to <see cref="IJobStore"/>:
-/// <see cref="IJobStore.TryTransitionFromArmingAsync"/> and
+/// <see cref="IJobArmingStore.TryTransitionFromArmingAsync"/> and
 /// <see cref="IJobStore.ResetExpiredArmingClaimsAsync"/>.
 /// </summary>
 [Collection("postgres")]
@@ -166,7 +166,7 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
             {
                 await using var uow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                result = await store.TryTransitionFromArmingAsync(
+                result = await ((IJobArmingStore)store).TryTransitionFromArmingAsync(
                     id, token, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled,
                     CancellationToken.None);
                 await uow.CommitAsync();
@@ -210,7 +210,7 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
             {
                 await using var uow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                result = await store.TryTransitionFromArmingAsync(
+                result = await ((IJobArmingStore)store).TryTransitionFromArmingAsync(
                     id, wrongToken, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled,
                     CancellationToken.None);
                 await uow.CommitAsync();
@@ -248,7 +248,7 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
             {
                 await using var uow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                result = await store.TryTransitionFromArmingAsync(
+                result = await ((IJobArmingStore)store).TryTransitionFromArmingAsync(
                     id, token, BackgroundJobStatus.Retrying, BackgroundJobStatus.Retrying,
                     CancellationToken.None);
                 await uow.CommitAsync();
@@ -485,7 +485,7 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
             {
                 await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                transitioned = await services.GetRequiredService<IJobStore>()
+                transitioned = await ((IJobArmingStore)services.GetRequiredService<IJobStore>())
                     .TryTransitionFromArmingAsync(
                         id, token, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled,
                         CancellationToken.None);
@@ -496,6 +496,40 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
         transitioned.ShouldBeFalse();
         var reloaded = await ReloadAsync(sp, id);
         reloaded!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+    }
+
+    [Fact]
+    public async Task Legacy_arming_transition_does_not_revive_cancelled_row_with_same_token()
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        var token = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(
+            id,
+            BackgroundJobStatus.Cancelled,
+            armingToken: token,
+            armingUntil: DateTime.UtcNow.AddSeconds(30)));
+
+        bool transitioned;
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var services = scope.ServiceProvider;
+            using (services.GetRequiredService<ICurrentSchema>().Change(_schema))
+            {
+                await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                transitioned = await services.GetRequiredService<IJobStore>().TryTransitionFromArmingAsync(
+                    id, token, BackgroundJobStatus.Scheduled, CancellationToken.None);
+                await uow.CommitAsync();
+            }
+        }
+
+        transitioned.ShouldBeFalse();
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+        reloaded.ArmingToken.ShouldBe(token);
     }
 
     [Fact]
@@ -529,7 +563,7 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
             {
                 await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                (await services.GetRequiredService<IJobStore>().TryTransitionFromArmingAsync(
+                (await ((IJobArmingStore)services.GetRequiredService<IJobStore>()).TryTransitionFromArmingAsync(
                     id,
                     claim.ArmingToken,
                     claim.OriginalStatus,

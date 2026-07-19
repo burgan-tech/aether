@@ -57,6 +57,15 @@ public class BackgroundJobArmingProcessor(
         var currentSchema = sp.GetRequiredService<ICurrentSchema>();
         var uowManager = sp.GetRequiredService<IUnitOfWorkManager>();
         var jobStore = sp.GetRequiredService<IJobStore>();
+        if (jobStore is not IJobArmingStore armingStore)
+        {
+            logger.LogError(
+                "Background-job store '{StoreType}' does not implement {Capability}; skipping arming before any external scheduler side effect.",
+                jobStore.GetType().FullName,
+                nameof(IJobArmingStore));
+            return;
+        }
+
         var leaseStore = sp.GetRequiredService<IJobArmingLeaseStore>();
         var scheduler = sp.GetRequiredService<IJobScheduler>();
 
@@ -139,7 +148,7 @@ public class BackgroundJobArmingProcessor(
                     await using (var uow = uowManager.Begin(
                         new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
                     {
-                        transitioned = await jobStore.TryTransitionFromArmingAsync(
+                        transitioned = await armingStore.TryTransitionFromArmingAsync(
                             job.Id, claim.ArmingToken, claim.OriginalStatus, targetStatus, ct);
                         await uow.CommitAsync(ct);
                     }
@@ -163,7 +172,7 @@ public class BackgroundJobArmingProcessor(
                 if (inspectLostArmedClaim)
                 {
                     await CompensateTerminalArmingLossAsync(
-                        uowManager, jobStore, scheduler, job, claim.ArmingToken, ct);
+                        uowManager, jobStore, armingStore, scheduler, job, claim.ArmingToken, ct);
                 }
             }
 
@@ -257,6 +266,7 @@ public class BackgroundJobArmingProcessor(
     private async Task CompensateTerminalArmingLossAsync(
         IUnitOfWorkManager uowManager,
         IJobStore jobStore,
+        IJobArmingStore armingStore,
         IJobScheduler scheduler,
         BackgroundJobInfo claimedJob,
         Guid lostArmingToken,
@@ -295,7 +305,7 @@ public class BackgroundJobArmingProcessor(
         {
             await using var acquireUow = uowManager.Begin(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-            acquired = await jobStore.TryAcquireTerminalArmingCompensationAsync(
+            acquired = await armingStore.TryAcquireTerminalArmingCompensationAsync(
                 claimedJob.Id,
                 lostArmingToken,
                 compensationToken,
@@ -318,7 +328,7 @@ public class BackgroundJobArmingProcessor(
         using var deleteCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var renewalTask = RenewCompensationLeaseUntilCancelledAsync(
             uowManager,
-            jobStore,
+            armingStore,
             claimedJob,
             compensationToken,
             compensationLeaseDuration,
@@ -366,7 +376,7 @@ public class BackgroundJobArmingProcessor(
                 {
                     await using var releaseUow = uowManager.Begin(
                         new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                    var released = await jobStore.TryReleaseArmingCompensationAsync(
+                    var released = await armingStore.TryReleaseArmingCompensationAsync(
                         claimedJob.Id, compensationToken, CancellationToken.None);
                     await releaseUow.CommitAsync(CancellationToken.None);
 
@@ -389,7 +399,7 @@ public class BackgroundJobArmingProcessor(
 
     private async Task RenewCompensationLeaseUntilCancelledAsync(
         IUnitOfWorkManager uowManager,
-        IJobStore jobStore,
+        IJobArmingStore armingStore,
         BackgroundJobInfo claimedJob,
         Guid compensationToken,
         TimeSpan leaseDuration,
@@ -406,7 +416,7 @@ public class BackgroundJobArmingProcessor(
                 var renewalNow = clock.UtcNow;
                 await using var renewUow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                var renewed = await jobStore.TryRenewArmingCompensationAsync(
+                var renewed = await armingStore.TryRenewArmingCompensationAsync(
                     claimedJob.Id,
                     compensationToken,
                     renewalNow.Add(leaseDuration),

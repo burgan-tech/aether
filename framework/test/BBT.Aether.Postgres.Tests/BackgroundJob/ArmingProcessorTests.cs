@@ -102,6 +102,7 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
 
         public bool GateSecondAfterCreate { get; set; }
         public bool GateCompensatingDelete { get; set; }
+        public bool IgnoreCompensatingDeleteCancellation { get; set; }
         public bool ThrowOnCompensatingDeleteCancellation { get; set; }
         public int? ThrowOnDeleteCall { get; set; }
         public int DeleteCallCount => Volatile.Read(ref _deleteCallCount);
@@ -166,7 +167,10 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
             if (call == 2 && GateCompensatingDelete)
             {
                 CompensatingDeleteEntered.TrySetResult();
-                await AllowCompensatingDelete.Task.WaitAsync(cancellationToken);
+                if (IgnoreCompensatingDeleteCancellation)
+                    await AllowCompensatingDelete.Task;
+                else
+                    await AllowCompensatingDelete.Task.WaitAsync(cancellationToken);
             }
 
             if (call == 2 && ThrowOnCompensatingDeleteCancellation)
@@ -576,9 +580,13 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task Compensation_lease_prevents_delete_from_losing_concurrent_update_generation()
+    public async Task Compensation_cleanup_rejects_terminal_reschedule_after_lease_loss()
     {
-        var scheduler = new GatedJobScheduler { GateCompensatingDelete = true };
+        var scheduler = new GatedJobScheduler
+        {
+            GateCompensatingDelete = true,
+            IgnoreCompensatingDeleteCancellation = true
+        };
         var sp = BuildProvider(scheduler);
         await ArrangeSchemaAsync(sp);
 
@@ -600,36 +608,49 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
         scheduler.AllowFirstSchedule.TrySetResult();
         await scheduler.CompensatingDeleteEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
+        var terminalDuringCleanup = await ReloadAsync(sp, id);
+        terminalDuringCleanup!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+        terminalDuringCleanup.ArmingToken.ShouldNotBeNull();
+
+        // Simulate compensation ownership becoming ambiguous (expiry/reaper/process failure) while the
+        // external scheduler has already accepted a delete that ignores any later ownership loss.
+        await using (var leaseLossScope = sp.CreateAsyncScope())
+        {
+            var services = leaseLossScope.ServiceProvider;
+            using (services.GetRequiredService<ICurrentSchema>().Change(_schema))
+            {
+                await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                var context = await services.GetRequiredService<IAetherDbContextProvider<TestJobDbContext>>()
+                    .GetDbContextAsync();
+                await context.BackgroundJobs
+                    .Where(candidate => candidate.Id == id)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(candidate => candidate.ArmingToken, (Guid?)null)
+                        .SetProperty(candidate => candidate.ArmingUntil, (DateTime?)null));
+                await uow.CommitAsync();
+            }
+        }
+
         await using (var updateScope = sp.CreateAsyncScope())
         {
             var services = updateScope.ServiceProvider;
             using (services.GetRequiredService<ICurrentSchema>().Change(_schema))
             {
-                await services.GetRequiredService<IBackgroundJobService>()
-                    .UpdateAsync(id, "@every 2m");
+                var exception = await Should.ThrowAsync<InvalidOperationException>(() =>
+                    services.GetRequiredService<IBackgroundJobService>().UpdateAsync(id, "@every 2m"));
+                exception.Message.ShouldContain(nameof(BackgroundJobStatus.Cancelled));
             }
         }
-
-        var pendingDuringCleanup = await ReloadAsync(sp, id);
-        pendingDuringCleanup!.Status.ShouldBe(BackgroundJobStatus.Pending);
-        pendingDuringCleanup.ArmingToken.ShouldNotBeNull(
-            "terminal cleanup must retain ownership while external delete is in flight");
-
-        await Task.Delay(TimeSpan.FromSeconds(1));
-
-        // A new armer must not create a generation while the stale owner's delete is still pending.
-        await BuildProcessor(sp, options).RunAsync();
 
         scheduler.AllowCompensatingDelete.TrySetResult();
         await staleProcessorRun;
 
-        // Once cleanup releases its lease, the pending update is recoverable and can be armed normally.
-        await BuildProcessor(sp, options).RunAsync();
-
         var final = await ReloadAsync(sp, id);
-        final!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
+        final!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
         final.ArmingToken.ShouldBeNull();
-        scheduler.HasEntry(job.JobName).ShouldBeTrue();
+        final.ExpressionValue.ShouldBe("@every 1m");
+        scheduler.HasEntry(job.JobName).ShouldBeFalse();
     }
 
     [Fact]

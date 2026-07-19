@@ -258,23 +258,22 @@ public sealed class BackgroundJobService(
 
         logger.LogInformation("Updating job with entity id '{Id}' to new schedule '{NewSchedule}'", id, newSchedule);
 
+        if (jobStore is not IJobRescheduleStore rescheduleStore)
+        {
+            var capabilityException = new NotSupportedException(
+                $"Job store '{jobStore.GetType().Name}' does not support atomic waiting-job rescheduling.");
+            RecordException(activity, capabilityException);
+            throw capabilityException;
+        }
+
+        var kind = InferKind(newSchedule);
+        var nextRetryAt = clock.UtcNow;
+
         if (uowManager.Current is { })
         {
-            var jobInfo = await jobStore.GetAsync(id, cancellationToken);
-            if (jobInfo == null)
-            {
-                var notFoundEx = new InvalidOperationException($"Job with id '{id}' not found.");
-                RecordException(activity, notFoundEx);
-                throw notFoundEx;
-            }
-
-            activity?.SetTag("job.handler_name", jobInfo.HandlerName);
-            activity?.SetTag("job.name", jobInfo.JobName);
-            jobInfo.ExpressionValue = newSchedule;
-            jobInfo.Kind = InferKind(newSchedule);
-            jobInfo.Status = BackgroundJobStatus.Pending;
-            jobInfo.NextRetryAt = clock.UtcNow;
-            await jobStore.SaveAsync(jobInfo, cancellationToken);
+            var result = await rescheduleStore.TryRescheduleWaitingAsync(
+                id, newSchedule, kind, nextRetryAt, cancellationToken);
+            EnsureRescheduled(id, result, activity);
             logger.LogInformation("Successfully updated job with entity id '{Id}'", id);
             activity?.SetStatus(ActivityStatusCode.Ok);
             return;
@@ -284,28 +283,9 @@ public sealed class BackgroundJobService(
             new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
         try
         {
-            // Load job from store
-            var jobInfo = await jobStore.GetAsync(id, cancellationToken);
-            if (jobInfo == null)
-            {
-                throw new InvalidOperationException($"Job with id '{id}' not found.");
-            }
-
-            activity?.SetTag("job.handler_name", jobInfo.HandlerName);
-            activity?.SetTag("job.name", jobInfo.JobName);
-
-            // Reschedule by handing the row back to the arming poller: set the new schedule, recompute the
-            // kind, mark it Pending and due now. The poller re-arms it in the scheduler (overwrite: true,
-            // so the new schedule replaces the old). We do NOT call the scheduler here and we do NOT touch
-            // Payload — it already holds the original envelope with the original schema context, which the
-            // poller reuses. This avoids the previous bugs: wrong-schema re-wrap, double-wrapping the
-            // payload, losing the failure policy, and the delete/reschedule race.
-            jobInfo.ExpressionValue = newSchedule;
-            jobInfo.Kind = InferKind(newSchedule);
-            jobInfo.Status = BackgroundJobStatus.Pending;
-            jobInfo.NextRetryAt = clock.UtcNow;
-
-            await jobStore.SaveAsync(jobInfo, cancellationToken);
+            var result = await rescheduleStore.TryRescheduleWaitingAsync(
+                id, newSchedule, kind, nextRetryAt, cancellationToken);
+            EnsureRescheduled(id, result, activity);
 
             // Commit transaction
             await uow.CommitAsync(cancellationToken);
@@ -320,6 +300,23 @@ public sealed class BackgroundJobService(
             await uow.RollbackAsync(cancellationToken);
             throw;
         }
+    }
+
+    private static void EnsureRescheduled(
+        Guid id,
+        BackgroundJobRescheduleResult result,
+        Activity? activity)
+    {
+        if (result.Succeeded)
+            return;
+
+        var exception = result.CurrentStatus is null
+            ? new InvalidOperationException($"Job with id '{id}' not found.")
+            : new InvalidOperationException(
+                $"Job with id '{id}' cannot be rescheduled from status '{result.CurrentStatus}'. " +
+                "Only Pending, Scheduled, or Retrying jobs can be rescheduled.");
+        RecordException(activity, exception);
+        throw exception;
     }
 
     /// <inheritdoc/>

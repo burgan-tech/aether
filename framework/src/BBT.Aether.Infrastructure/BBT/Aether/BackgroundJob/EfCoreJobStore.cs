@@ -17,7 +17,7 @@ namespace BBT.Aether.BackgroundJob;
 /// Provides persistence operations for background jobs using EF Core and integrates with UoW pattern.
 /// </summary>
 /// <typeparam name="TDbContext">The DbContext type that implements IHasEfCoreBackgroundJobs</typeparam>
-public class EfCoreJobStore<TDbContext> : IJobStore
+public class EfCoreJobStore<TDbContext> : IJobStore, IJobRescheduleStore, IJobArmingStore
     where TDbContext : DbContext, IHasEfCoreBackgroundJobs
 {
     private readonly IAetherDbContextProvider<TDbContext> _dbContextProvider;
@@ -352,6 +352,46 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     }
 
     /// <inheritdoc/>
+    public async Task<BackgroundJobRescheduleResult> TryRescheduleWaitingAsync(
+        Guid id,
+        string newSchedule,
+        JobKind kind,
+        DateTime nextRetryAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        using var schemaScope = BeginConfiguredSchemaScope();
+        var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+
+        var affected = await dbContext.BackgroundJobs
+            .Where(job => job.Id == id
+                          && (job.Status == BackgroundJobStatus.Pending
+                              || job.Status == BackgroundJobStatus.Scheduled
+                              || job.Status == BackgroundJobStatus.Retrying))
+            .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(job => job.ExpressionValue, newSchedule)
+                    .SetProperty(job => job.Kind, kind)
+                    .SetProperty(job => job.Status, BackgroundJobStatus.Pending)
+                    .SetProperty(job => job.NextRetryAt, nextRetryAtUtc)
+                    .SetProperty(job => job.ModifiedAt, now),
+                cancellationToken);
+
+        if (affected > 0)
+            return new BackgroundJobRescheduleResult(true, BackgroundJobStatus.Pending);
+
+        var currentStatus = await dbContext.BackgroundJobs
+            .AsNoTracking()
+            .Where(job => job.Id == id)
+            .Select(job => (BackgroundJobStatus?)job.Status)
+            .SingleOrDefaultAsync(cancellationToken);
+
+        return new BackgroundJobRescheduleResult(false, currentStatus);
+    }
+
+    /// <inheritdoc/>
     public async Task<bool> TryRecordTerminalAsync(Guid id, Guid runningToken,
         BackgroundJobStatus terminalStatus, DateTime handledTimeUtc, string? error,
         CancellationToken cancellationToken = default)
@@ -449,7 +489,10 @@ public class EfCoreJobStore<TDbContext> : IJobStore
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         var now = DateTime.UtcNow;
         var affected = await dbContext.BackgroundJobs
-            .Where(j => j.Id == id && j.ArmingToken == armingToken)
+            .Where(j => j.Id == id
+                        && j.ArmingToken == armingToken
+                        && (j.Status == BackgroundJobStatus.Pending
+                            || j.Status == BackgroundJobStatus.Retrying))
             .ExecuteUpdateAsync(s => s
                 .SetProperty(j => j.Status, to)
                 .SetProperty(j => j.ArmingToken, (Guid?)null)

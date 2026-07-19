@@ -242,54 +242,6 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Clears <see cref="BackgroundJobInfo.ArmingToken"/>/<see cref="BackgroundJobInfo.ArmingUntil"/>
-    /// and transitions the job to <paramref name="to"/>, guarded on both the arming token and
-    /// <paramref name="expectedOriginalStatus"/>. Returns false if either no longer matches
-    /// (another pod or cancellation already acted on this row, or the lease expired).
-    /// </summary>
-    Task<bool> TryTransitionFromArmingAsync(
-        Guid id,
-        Guid armingToken,
-        BackgroundJobStatus expectedOriginalStatus,
-        BackgroundJobStatus to,
-        CancellationToken cancellationToken) =>
-        TryTransitionFromArmingAsync(id, armingToken, to, cancellationToken);
-
-    /// <summary>
-    /// Atomically leases terminal scheduler cleanup by stamping <paramref name="compensationToken"/>.
-    /// The claim succeeds only for a terminal row whose arming token is absent, belongs to the lost
-    /// claim, or has expired. The default safely declines cleanup for legacy custom stores.
-    /// </summary>
-    Task<bool> TryAcquireTerminalArmingCompensationAsync(
-        Guid id,
-        Guid lostArmingToken,
-        Guid compensationToken,
-        DateTime now,
-        DateTime compensationUntil,
-        CancellationToken cancellationToken = default) => Task.FromResult(false);
-
-    /// <summary>
-    /// Extends a terminal-cleanup lease while external deletion is in flight. The exact token guard
-    /// prevents an old owner from renewing after another claimant has taken over.
-    /// The default safely reports lease loss for legacy custom stores.
-    /// </summary>
-    Task<bool> TryRenewArmingCompensationAsync(
-        Guid id,
-        Guid compensationToken,
-        DateTime compensationUntil,
-        CancellationToken cancellationToken = default) => Task.FromResult(false);
-
-    /// <summary>
-    /// Releases a terminal-cleanup lease using the exact compensation token. Status is intentionally
-    /// not part of the guard: a concurrent update may have moved the row back to Pending while retaining
-    /// the token, and must be allowed to arm after cleanup completes.
-    /// </summary>
-    Task<bool> TryReleaseArmingCompensationAsync(
-        Guid id,
-        Guid compensationToken,
-        CancellationToken cancellationToken = default) => Task.FromResult(false);
-
-    /// <summary>
     /// Clears the arming claim fields (<see cref="BackgroundJobInfo.ArmingToken"/> and
     /// <see cref="BackgroundJobInfo.ArmingUntil"/>) for rows whose arming claim has expired
     /// (<see cref="BackgroundJobInfo.ArmingUntil"/> &lt; <paramref name="now"/>), restoring the
