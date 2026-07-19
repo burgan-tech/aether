@@ -233,12 +233,14 @@ public interface IJobStore
 
     /// <summary>
     /// Clears <see cref="BackgroundJobInfo.ArmingToken"/>/<see cref="BackgroundJobInfo.ArmingUntil"/>
-    /// and transitions the job to <paramref name="to"/>, guarded on the arming token. Returns false if
-    /// the token no longer matches (another pod already acted on this row or the lease expired).
+    /// and transitions the job to <paramref name="to"/>, guarded on both the arming token and
+    /// <paramref name="expectedOriginalStatus"/>. Returns false if either no longer matches
+    /// (another pod or cancellation already acted on this row, or the lease expired).
     /// </summary>
     Task<bool> TryTransitionFromArmingAsync(
         Guid id,
         Guid armingToken,
+        BackgroundJobStatus expectedOriginalStatus,
         BackgroundJobStatus to,
         CancellationToken cancellationToken = default);
 

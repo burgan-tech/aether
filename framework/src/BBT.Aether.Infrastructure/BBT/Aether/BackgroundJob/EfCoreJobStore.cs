@@ -119,7 +119,10 @@ public class EfCoreJobStore<TDbContext> : IJobStore
             .Select(job => new BackgroundJobCancellationSnapshot(
                 job.HandlerName,
                 job.JobName,
-                job.Status))
+                job.Status)
+            {
+                ArmingToken = job.ArmingToken
+            })
             .SingleOrDefaultAsync(cancellationToken);
     }
 
@@ -436,14 +439,20 @@ public class EfCoreJobStore<TDbContext> : IJobStore
     }
 
     /// <inheritdoc/>
-    public async Task<bool> TryTransitionFromArmingAsync(Guid id, Guid armingToken,
-        BackgroundJobStatus to, CancellationToken cancellationToken = default)
+    public async Task<bool> TryTransitionFromArmingAsync(
+        Guid id,
+        Guid armingToken,
+        BackgroundJobStatus expectedOriginalStatus,
+        BackgroundJobStatus to,
+        CancellationToken cancellationToken = default)
     {
         using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await _dbContextProvider.GetDbContextAsync(cancellationToken);
         var now = DateTime.UtcNow;
         var affected = await dbContext.BackgroundJobs
-            .Where(j => j.Id == id && j.ArmingToken == armingToken)
+            .Where(j => j.Id == id
+                        && j.ArmingToken == armingToken
+                        && j.Status == expectedOriginalStatus)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(j => j.Status, to)
                 .SetProperty(j => j.ArmingToken, (Guid?)null)

@@ -9,4 +9,11 @@ namespace BBT.Aether.Domain.Repositories;
 public sealed record BackgroundJobCancellationSnapshot(
     string HandlerName,
     string JobName,
-    BackgroundJobStatus Status);
+    BackgroundJobStatus Status)
+{
+    /// <summary>
+    /// Current arming lease token, when present. Used to distinguish a terminal winner from a newer
+    /// arming lease without changing the snapshot's existing constructor/deconstruction contract.
+    /// </summary>
+    public System.Guid? ArmingToken { get; init; }
+}

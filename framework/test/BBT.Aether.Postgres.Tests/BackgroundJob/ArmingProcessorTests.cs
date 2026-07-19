@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -92,6 +93,97 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
         }
     }
 
+    private sealed class GatedJobScheduler : IJobScheduler
+    {
+        private readonly ConcurrentDictionary<string, byte> _entries = new();
+        private int _scheduleCallCount;
+        private int _deleteCallCount;
+
+        public bool GateSecondAfterCreate { get; set; }
+        public int? ThrowOnDeleteCall { get; set; }
+        public int DeleteCallCount => Volatile.Read(ref _deleteCallCount);
+        public TaskCompletionSource FirstScheduleEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowFirstSchedule { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource SecondScheduleCreated { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowSecondScheduleToReturn { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool HasEntry(string jobName) => _entries.ContainsKey(jobName);
+
+        public Task ScheduleAsync(
+            string handlerName,
+            string jobName,
+            string schedule,
+            ReadOnlyMemory<byte> payload,
+            JobScheduleFailurePolicy? failurePolicyOptions = null,
+            CancellationToken cancellationToken = default) =>
+            CompleteScheduleAsync(jobName, cancellationToken);
+
+        public Task ScheduleOneShotAsync(
+            string handlerName,
+            string jobName,
+            DateTime dueAtUtc,
+            ReadOnlyMemory<byte> payload,
+            JobScheduleFailurePolicy? failurePolicy = null,
+            CancellationToken cancellationToken = default) =>
+            CompleteScheduleAsync(jobName, cancellationToken);
+
+        private async Task CompleteScheduleAsync(string jobName, CancellationToken cancellationToken)
+        {
+            var call = Interlocked.Increment(ref _scheduleCallCount);
+            if (call == 1)
+            {
+                FirstScheduleEntered.TrySetResult();
+                await AllowFirstSchedule.Task.WaitAsync(cancellationToken);
+                _entries[jobName] = 0;
+                return;
+            }
+
+            _entries[jobName] = 0;
+            if (call == 2 && GateSecondAfterCreate)
+            {
+                SecondScheduleCreated.TrySetResult();
+                await AllowSecondScheduleToReturn.Task.WaitAsync(cancellationToken);
+            }
+        }
+
+        public Task DeleteAsync(
+            string handlerName,
+            string jobName,
+            CancellationToken cancellationToken = default)
+        {
+            var call = Interlocked.Increment(ref _deleteCallCount);
+            if (ThrowOnDeleteCall == call)
+                throw new InvalidOperationException("compensating delete boom");
+
+            _entries.TryRemove(jobName, out _);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingLogger : ILogger<BackgroundJobArmingProcessor>
+    {
+        private readonly ConcurrentQueue<(LogLevel Level, string Message)> _entries = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            _entries.Enqueue((logLevel, formatter(state, exception)));
+
+        public bool HasWarningContaining(string text) =>
+            _entries.Any(entry => entry.Level == LogLevel.Warning
+                                  && entry.Message.Contains(text, StringComparison.Ordinal));
+    }
+
     private IServiceProvider BuildProvider(FakeJobScheduler scheduler)
     {
         var services = new ServiceCollection();
@@ -105,6 +197,19 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
         return services.BuildServiceProvider();
     }
 
+    private IServiceProvider BuildProvider(IJobScheduler scheduler)
+    {
+        var services = new ServiceCollection();
+
+        services.AddAetherCore(_ => { });
+        services.AddAetherNpgsql<TestJobDbContext>(fx.ConnectionString);
+        services.AddScoped<IJobStore, global::BBT.Aether.BackgroundJob.EfCoreJobStore<TestJobDbContext>>();
+        services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
+        services.AddSingleton(scheduler);
+
+        return services.BuildServiceProvider();
+    }
+
     private BackgroundJobArmingProcessor BuildProcessor(IServiceProvider sp, out BackgroundJobOptions options,
         string? schema)
     {
@@ -114,6 +219,31 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
             sp.GetRequiredService<IClock>(),
             options,
             NullLogger<BackgroundJobArmingProcessor>.Instance);
+    }
+
+    private BackgroundJobArmingProcessor BuildProcessor(
+        IServiceProvider sp,
+        BackgroundJobOptions options,
+        ILogger<BackgroundJobArmingProcessor>? logger = null) =>
+        new(
+            sp.GetRequiredService<IServiceScopeFactory>(),
+            sp.GetRequiredService<IClock>(),
+            options,
+            logger ?? NullLogger<BackgroundJobArmingProcessor>.Instance);
+
+    private async Task<bool> CancelWaitingAsync(IServiceProvider sp, Guid id)
+    {
+        await using var scope = sp.CreateAsyncScope();
+        var services = scope.ServiceProvider;
+        using (services.GetRequiredService<ICurrentSchema>().Change(_schema))
+        {
+            await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+            var cancelled = await services.GetRequiredService<IJobStore>()
+                .TryCancelWaitingAsync(id, DateTime.UtcNow);
+            await uow.CommitAsync();
+            return cancelled;
+        }
     }
 
     private async Task ArrangeSchemaAsync(IServiceProvider sp)
@@ -323,6 +453,104 @@ public sealed class ArmingProcessorTests(PostgresFixture fx)
         var expectedNames = ids.Select(id => "job-" + id.ToString("N")).ToHashSet();
         var actualNames = allScheduledJobNames.ToHashSet();
         actualNames.SetEquals(expectedNames).ShouldBeTrue("every seeded job must be armed exactly once");
+    }
+
+    [Fact]
+    public async Task Arm_completion_after_cancellation_compensates_recreated_scheduler_entry()
+    {
+        var scheduler = new GatedJobScheduler();
+        var sp = BuildProvider(scheduler);
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        var job = NewJob(id, BackgroundJobStatus.Pending);
+        await SeedAsync(sp, job);
+
+        var options = new BackgroundJobOptions { Schema = _schema, ArmingBatchSize = 1 };
+        var processorTask = BuildProcessor(sp, options).RunAsync();
+        await scheduler.FirstScheduleEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        (await CancelWaitingAsync(sp, id)).ShouldBeTrue();
+        await scheduler.DeleteAsync(job.HandlerName, job.JobName);
+
+        scheduler.AllowFirstSchedule.TrySetResult();
+        await processorTask;
+
+        scheduler.HasEntry(job.JobName).ShouldBeFalse();
+        scheduler.DeleteCallCount.ShouldBe(2);
+        (await ReloadAsync(sp, id))!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+    }
+
+    [Fact]
+    public async Task Lost_old_claim_does_not_delete_newer_lease_owners_scheduler_entry()
+    {
+        var scheduler = new GatedJobScheduler { GateSecondAfterCreate = true };
+        var sp = BuildProvider(scheduler);
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        var job = NewJob(id, BackgroundJobStatus.Pending);
+        await SeedAsync(sp, job);
+
+        var expiredLeaseOptions = new BackgroundJobOptions
+        {
+            Schema = _schema,
+            ArmingBatchSize = 1,
+            ArmingLeaseDuration = TimeSpan.FromSeconds(-1)
+        };
+        var validLeaseOptions = new BackgroundJobOptions
+        {
+            Schema = _schema,
+            ArmingBatchSize = 1,
+            ArmingLeaseDuration = TimeSpan.FromSeconds(30)
+        };
+        var firstProcessor = BuildProcessor(sp, expiredLeaseOptions);
+        var secondProcessor = BuildProcessor(sp, validLeaseOptions);
+
+        var firstRun = firstProcessor.RunAsync();
+        await scheduler.FirstScheduleEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var secondRun = secondProcessor.RunAsync();
+        await scheduler.SecondScheduleCreated.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        scheduler.AllowFirstSchedule.TrySetResult();
+        await firstRun;
+
+        scheduler.HasEntry(job.JobName).ShouldBeTrue();
+        scheduler.DeleteCallCount.ShouldBe(0);
+
+        scheduler.AllowSecondScheduleToReturn.TrySetResult();
+        await secondRun;
+
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
+        reloaded.ArmingToken.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Compensation_failure_is_logged_and_cancelled_state_is_preserved()
+    {
+        var scheduler = new GatedJobScheduler { ThrowOnDeleteCall = 2 };
+        var logger = new RecordingLogger();
+        var sp = BuildProvider(scheduler);
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        var job = NewJob(id, BackgroundJobStatus.Pending);
+        await SeedAsync(sp, job);
+
+        var options = new BackgroundJobOptions { Schema = _schema, ArmingBatchSize = 1 };
+        var processorTask = BuildProcessor(sp, options, logger).RunAsync();
+        await scheduler.FirstScheduleEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        (await CancelWaitingAsync(sp, id)).ShouldBeTrue();
+        await scheduler.DeleteAsync(job.HandlerName, job.JobName);
+
+        scheduler.AllowFirstSchedule.TrySetResult();
+        await processorTask;
+
+        logger.HasWarningContaining("compensating").ShouldBeTrue();
+        (await ReloadAsync(sp, id))!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
     }
 
     [Fact]

@@ -129,21 +129,27 @@ public class BackgroundJobArmingProcessor(
                 }
 
                 // PHASE 3 — CONFIRM (armed → Scheduled) or ABORT (failed → original status).
-                // Both paths atomically clear ArmingToken/ArmingUntil, guarded on the arming token.
+                // Both paths atomically clear ArmingToken/ArmingUntil, guarded on the arming token and
+                // the status observed when the claim was acquired.
                 var targetStatus = armed ? BackgroundJobStatus.Scheduled : claim.OriginalStatus;
+                var inspectLostArmedClaim = false;
                 try
                 {
-                    await using var uow = uowManager.Begin(
-                        new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                    var transitioned = await jobStore.TryTransitionFromArmingAsync(
-                        job.Id, claim.ArmingToken, targetStatus, ct);
-                    await uow.CommitAsync(ct);
+                    bool transitioned;
+                    await using (var uow = uowManager.Begin(
+                        new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+                    {
+                        transitioned = await jobStore.TryTransitionFromArmingAsync(
+                            job.Id, claim.ArmingToken, claim.OriginalStatus, targetStatus, ct);
+                        await uow.CommitAsync(ct);
+                    }
 
                     if (!transitioned)
                     {
                         logger.LogDebug(
-                            "Job '{JobName}' (id {JobId}) token mismatch — another instance acted on it.",
+                            "Job '{JobName}' (id {JobId}) arming claim no longer matched — another instance or cancellation acted on it.",
                             job.JobName, job.Id);
+                        inspectLostArmedClaim = armed;
                     }
                 }
                 catch (Exception ex)
@@ -151,6 +157,13 @@ public class BackgroundJobArmingProcessor(
                     logger.LogWarning(ex,
                         "Failed to finalize arming for background job '{JobName}' (id {JobId}); the claim lease will expire and the reaper will reset it.",
                         job.JobName, job.Id);
+                    inspectLostArmedClaim = armed;
+                }
+
+                if (inspectLostArmedClaim)
+                {
+                    await CompensateTerminalArmingLossAsync(
+                        uowManager, jobStore, scheduler, job, claim.ArmingToken, ct);
                 }
             }
 
@@ -238,6 +251,52 @@ public class BackgroundJobArmingProcessor(
                         job.JobName, job.Id);
                 }
             }
+        }
+    }
+
+    private async Task CompensateTerminalArmingLossAsync(
+        IUnitOfWorkManager uowManager,
+        IJobStore jobStore,
+        IJobScheduler scheduler,
+        BackgroundJobInfo claimedJob,
+        Guid lostArmingToken,
+        CancellationToken cancellationToken)
+    {
+        BackgroundJobCancellationSnapshot? snapshot;
+        try
+        {
+            await using var readUow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+            snapshot = await jobStore.GetCancellationSnapshotAsync(claimedJob.Id, cancellationToken);
+            await readUow.CommitAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Failed to inspect lost arming claim for background job '{JobName}' (id {JobId}); compensating scheduler deletion was skipped.",
+                claimedJob.JobName, claimedJob.Id);
+            return;
+        }
+
+        var newerLeaseOwnsRow = snapshot?.ArmingToken is { } currentToken
+                                && currentToken != lostArmingToken;
+        var terminalWinner = snapshot?.Status is BackgroundJobStatus.Completed
+            or BackgroundJobStatus.Failed
+            or BackgroundJobStatus.Cancelled;
+
+        if (newerLeaseOwnsRow || !terminalWinner)
+            return;
+
+        try
+        {
+            await scheduler.DeleteAsync(
+                snapshot!.HandlerName, snapshot.JobName, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Failed compensating scheduler deletion for terminal background job '{JobName}' (id {JobId}); persisted state remains unchanged.",
+                snapshot!.JobName, claimedJob.Id);
         }
     }
 }

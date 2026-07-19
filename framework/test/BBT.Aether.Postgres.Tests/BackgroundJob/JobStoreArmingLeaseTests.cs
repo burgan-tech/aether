@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.EntityFrameworkCore.Modeling;
@@ -12,6 +14,7 @@ using BBT.Aether.Persistence;
 using BBT.Aether.Uow;
 using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using Shouldly;
@@ -163,7 +166,8 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
             {
                 await using var uow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                result = await store.TryTransitionFromArmingAsync(id, token, BackgroundJobStatus.Scheduled);
+                result = await store.TryTransitionFromArmingAsync(
+                    id, token, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled);
                 await uow.CommitAsync();
             }
         }
@@ -205,7 +209,8 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
             {
                 await using var uow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                result = await store.TryTransitionFromArmingAsync(id, wrongToken, BackgroundJobStatus.Scheduled);
+                result = await store.TryTransitionFromArmingAsync(
+                    id, wrongToken, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled);
                 await uow.CommitAsync();
             }
         }
@@ -241,7 +246,8 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
             {
                 await using var uow = uowManager.Begin(
                     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                result = await store.TryTransitionFromArmingAsync(id, token, BackgroundJobStatus.Retrying);
+                result = await store.TryTransitionFromArmingAsync(
+                    id, token, BackgroundJobStatus.Retrying, BackgroundJobStatus.Retrying);
                 await uow.CommitAsync();
             }
         }
@@ -315,6 +321,89 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
         return services.BuildServiceProvider();
     }
 
+    private IServiceProvider BuildProviderWithGatedFallbackLeaseStore(
+        FallbackCandidateReadGateInterceptor interceptor)
+    {
+        var services = new ServiceCollection();
+        services.AddAetherCore(_ => { });
+        services.AddAetherNpgsql<TestJobDbContext>(
+            fx.ConnectionString,
+            configure: (_, builder) => builder.AddInterceptors(interceptor));
+        services.AddScoped<IJobStore, global::BBT.Aether.BackgroundJob.EfCoreJobStore<TestJobDbContext>>();
+        services.AddScoped<IJobArmingLeaseStore,
+            global::BBT.Aether.BackgroundJob.EfCoreJobArmingLeaseStore<TestJobDbContext>>();
+        return services.BuildServiceProvider();
+    }
+
+    private sealed class FallbackCandidateReadGateInterceptor : DbCommandInterceptor
+    {
+        private int _candidateReadIntercepted;
+
+        public bool Enabled { get; set; }
+
+        public TaskCompletionSource CandidateRead { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource ContinueClaim { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command,
+            CommandExecutedEventData eventData,
+            DbDataReader result,
+            CancellationToken cancellationToken = default)
+        {
+            if (Enabled
+                && command.CommandText.TrimStart().StartsWith("SELECT", StringComparison.OrdinalIgnoreCase)
+                && command.CommandText.Contains("ArmingToken", StringComparison.Ordinal)
+                && command.CommandText.Contains("LIMIT", StringComparison.OrdinalIgnoreCase)
+                && Interlocked.CompareExchange(ref _candidateReadIntercepted, 1, 0) == 0)
+            {
+                CandidateRead.TrySetResult();
+                await ContinueClaim.Task.WaitAsync(cancellationToken);
+            }
+
+            return result;
+        }
+    }
+
+    [Fact]
+    public async Task EfCoreLeaseStore_does_not_claim_job_cancelled_after_candidate_read()
+    {
+        var interceptor = new FallbackCandidateReadGateInterceptor();
+        var sp = BuildProviderWithGatedFallbackLeaseStore(interceptor);
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Pending));
+        interceptor.Enabled = true;
+
+        var claimTask = ClaimBatchConcurrently(sp, "fallback-worker", batchSize: 1);
+        await interceptor.CandidateRead.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        await using (var cancelScope = sp.CreateAsyncScope())
+        {
+            var services = cancelScope.ServiceProvider;
+            using (services.GetRequiredService<ICurrentSchema>().Change(_schema))
+            {
+                await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                (await services.GetRequiredService<IJobStore>()
+                    .TryCancelWaitingAsync(id, DateTime.UtcNow)).ShouldBeTrue();
+                await uow.CommitAsync();
+            }
+        }
+
+        interceptor.ContinueClaim.TrySetResult();
+        var claims = await claimTask;
+
+        claims.ShouldBeEmpty();
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+        reloaded.ArmingToken.ShouldBeNull();
+        reloaded.ArmingUntil.ShouldBeNull();
+    }
+
     [Fact]
     public async Task EfCoreLeaseStore_claims_due_jobs_and_sets_token()
     {
@@ -356,6 +445,98 @@ public sealed class JobStoreArmingLeaseTests(PostgresFixture fx)
         reloaded!.ArmingToken.ShouldNotBeNull();
         reloaded.ArmingUntil.ShouldNotBeNull();
         reloaded.ArmingUntil!.Value.ShouldBeGreaterThan(DateTime.UtcNow);
+    }
+
+    [Fact]
+    public async Task TryTransitionFromArming_does_not_revive_cancelled_row_with_same_token()
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        var token = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(
+            id,
+            BackgroundJobStatus.Pending,
+            armingToken: token,
+            armingUntil: DateTime.UtcNow.AddSeconds(30)));
+
+        await using (var cancelScope = sp.CreateAsyncScope())
+        {
+            var services = cancelScope.ServiceProvider;
+            using (services.GetRequiredService<ICurrentSchema>().Change(_schema))
+            {
+                await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                await services.GetRequiredService<IJobStore>().UpdateStatusAsync(
+                    id, BackgroundJobStatus.Cancelled, DateTime.UtcNow);
+                await uow.CommitAsync();
+            }
+        }
+
+        bool transitioned;
+        await using (var confirmScope = sp.CreateAsyncScope())
+        {
+            var services = confirmScope.ServiceProvider;
+            using (services.GetRequiredService<ICurrentSchema>().Change(_schema))
+            {
+                await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                transitioned = await services.GetRequiredService<IJobStore>()
+                    .TryTransitionFromArmingAsync(
+                        id, token, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled);
+                await uow.CommitAsync();
+            }
+        }
+
+        transitioned.ShouldBeFalse();
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+    }
+
+    [Fact]
+    public async Task Cancellation_between_lease_claim_and_confirmation_leaves_job_cancelled()
+    {
+        var sp = BuildProviderWithNpgsqlLeaseStore();
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Pending));
+
+        var claim = (await ClaimBatchConcurrently(sp, "claiming-worker", batchSize: 1)).Single();
+
+        await using (var cancelScope = sp.CreateAsyncScope())
+        {
+            var services = cancelScope.ServiceProvider;
+            using (services.GetRequiredService<ICurrentSchema>().Change(_schema))
+            {
+                await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                (await services.GetRequiredService<IJobStore>()
+                    .TryCancelWaitingAsync(id, DateTime.UtcNow)).ShouldBeTrue();
+                await uow.CommitAsync();
+            }
+        }
+
+        await using (var confirmScope = sp.CreateAsyncScope())
+        {
+            var services = confirmScope.ServiceProvider;
+            using (services.GetRequiredService<ICurrentSchema>().Change(_schema))
+            {
+                await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                (await services.GetRequiredService<IJobStore>().TryTransitionFromArmingAsync(
+                    id,
+                    claim.ArmingToken,
+                    claim.OriginalStatus,
+                    BackgroundJobStatus.Scheduled)).ShouldBeFalse();
+                await uow.CommitAsync();
+            }
+        }
+
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+        reloaded.ArmingToken.ShouldBeNull();
     }
 
     private IServiceProvider BuildProviderWithNpgsqlLeaseStore()

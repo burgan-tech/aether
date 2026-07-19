@@ -63,9 +63,13 @@ public class EfCoreJobArmingLeaseStore<TDbContext>(
         var claims = new List<BackgroundJobArmingClaim>(candidates.Count);
         foreach (var job in candidates)
         {
-            // Per-row atomic claim: only succeeds if still unclaimed
+            // Per-row atomic claim: re-check the complete eligibility predicate because cancellation
+            // or another state transition may have won after the candidate read.
             var affected = await dbContext.BackgroundJobs
                 .Where(j => j.Id == job.Id
+                            && (j.Status == BackgroundJobStatus.Pending
+                                || (j.Status == BackgroundJobStatus.Retrying
+                                    && j.NextRetryAt != null && j.NextRetryAt <= now))
                             && (j.ArmingToken == null || j.ArmingUntil < now))
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(j => j.ArmingToken, armingToken)
