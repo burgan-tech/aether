@@ -78,6 +78,17 @@ public interface IBackgroundJobService
     Task UpdateAsync(Guid id, string newSchedule, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Atomically cancels a waiting background job and removes its scheduler entry after persistence commits.
+    /// Running and terminal jobs are left unchanged.
+    /// </summary>
+    /// <param name="id">The entity ID of the job to cancel.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>The classified cancellation outcome.</returns>
+    Task<BackgroundJobCancellationResult> CancelWaitingAsync(
+        Guid id,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Deletes a scheduled background job.
     /// Removes the job from the scheduler and updates the job status to Cancelled.
     /// </summary>

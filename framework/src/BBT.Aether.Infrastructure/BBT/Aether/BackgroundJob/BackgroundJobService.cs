@@ -323,6 +323,92 @@ public sealed class BackgroundJobService(
     }
 
     /// <inheritdoc/>
+    public async Task<BackgroundJobCancellationResult> CancelWaitingAsync(
+        Guid id,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        var existing = await jobStore.GetAsync(id, cancellationToken);
+        if (existing is null)
+            return BackgroundJobCancellationResult.NotFound;
+
+        var handlerName = existing.HandlerName;
+        var jobName = existing.JobName;
+
+        if (uowManager.Current is { } ambient)
+        {
+            var ambientResult = await TryCancelAndClassifyAsync(id, cancellationToken);
+            if (ambientResult == BackgroundJobCancellationResult.Cancelled)
+            {
+                ambient.OnCompleted(_ => TryDeleteSchedulerEntryAsync(
+                    handlerName, jobName, CancellationToken.None));
+            }
+
+            return ambientResult;
+        }
+
+        BackgroundJobCancellationResult result;
+        await using (var uow = uowManager.Begin(new UnitOfWorkOptions
+                     {
+                         Scope = UnitOfWorkScopeOption.RequiresNew,
+                         IsTransactional = true
+                     }))
+        {
+            result = await TryCancelAndClassifyAsync(id, cancellationToken);
+            await uow.CommitAsync(cancellationToken);
+        }
+
+        if (result == BackgroundJobCancellationResult.Cancelled)
+            await TryDeleteSchedulerEntryAsync(handlerName, jobName, cancellationToken);
+
+        return result;
+    }
+
+    private async Task<BackgroundJobCancellationResult> TryCancelAndClassifyAsync(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            if (await jobStore.TryCancelWaitingAsync(id, clock.UtcNow, cancellationToken))
+                return BackgroundJobCancellationResult.Cancelled;
+
+            var current = await jobStore.GetAsync(id, cancellationToken);
+            if (current is null)
+                return BackgroundJobCancellationResult.NotFound;
+            if (current.Status == BackgroundJobStatus.Running)
+                return BackgroundJobCancellationResult.SkippedRunning;
+            if (current.Status is BackgroundJobStatus.Completed
+                or BackgroundJobStatus.Failed
+                or BackgroundJobStatus.Cancelled)
+                return BackgroundJobCancellationResult.AlreadyTerminal;
+            // A concurrent waiting-to-waiting mutation won. Retry the atomic update once.
+        }
+
+        throw new InvalidOperationException(
+            $"Unable to classify waiting cancellation for job '{id}' after one retry.");
+    }
+
+    private async Task TryDeleteSchedulerEntryAsync(
+        string handlerName,
+        string jobName,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await jobScheduler.DeleteAsync(handlerName, jobName, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "Background job '{JobName}' was cancelled in persistence but could not be deleted from the scheduler",
+                jobName);
+        }
+    }
+
+    /// <inheritdoc/>
     public async Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken = default)
     {
         if (id == Guid.Empty)
