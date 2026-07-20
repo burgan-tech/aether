@@ -342,11 +342,24 @@ public sealed class CompositeUnitOfWork(
         // the retry buffer immediately after its outbox rows save successfully; if a later run
         // fails, retry resumes there without duplicating already-durable earlier runs and still
         // preserves A1,B1,A2 ordering.
-        foreach (var run in GetEventRuns())
+        var allRuns = GetEventRuns();
+        var processedEventCount = 0;
+        try
         {
-            await StageAndSaveEventRunAsync(run, cancellationToken);
-            foreach (var pendingEvent in run.Events)
-                _events.Remove(pendingEvent);
+            foreach (var run in allRuns)
+            {
+                await StageAndSaveEventRunAsync(run, cancellationToken);
+                processedEventCount += run.Events.Count;
+            }
+            _events.Clear();
+        }
+        catch
+        {
+            if (processedEventCount > 0)
+            {
+                _events.RemoveRange(0, processedEventCount);
+            }
+            throw;
         }
     }
 
