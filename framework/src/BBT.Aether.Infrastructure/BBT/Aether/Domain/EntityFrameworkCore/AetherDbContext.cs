@@ -12,6 +12,7 @@ using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.EntityFrameworkCore.Modeling;
 using BBT.Aether.Events;
 using BBT.Aether.Uow;
+using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 
@@ -23,6 +24,8 @@ public abstract class AetherDbContext<TDbContext>(
     : DbContext(options)
     where TDbContext : DbContext
 {
+    private readonly DbContextOptions<TDbContext> _options = options;
+
     /// <summary>
     /// Gets or sets the local transaction event enqueuer.
     /// Set by the owning UnitOfWork when the context is materialized; domain events collected during
@@ -48,6 +51,9 @@ public abstract class AetherDbContext<TDbContext>(
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        if (_options.FindExtension<AetherSchemaModelOptionsExtension>() is not null)
+            modelBuilder.HasDefaultSchema(AetherSchemaModel.Placeholder);
 
         foreach (var entityType in modelBuilder.Model.GetEntityTypes())
         {

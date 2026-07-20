@@ -39,12 +39,12 @@ public sealed class UnitOfWorkMiddlewareTests(PostgresFixture fx)
         var services = new ServiceCollection();
         services.AddSingleton<BBT.Aether.Clock.IClock, BBT.Aether.Clock.SystemClock>();
         services.AddSingleton<ICurrentSchema>(new StaticCurrentSchema(_schema));
-        services.AddSingleton<IAetherDbContextConfigurator<ProbeDbContext>>(
+        services.AddSingleton<IAetherDbContextConfigurator<ProbeDbContext>>(sp =>
             new AetherDbContextConfigurator<ProbeDbContext>(
                 fx.ConnectionString,
                 new NpgsqlAetherProvider(SchemaSwitchingMode.SessionSearchPath),
                 configure: (_, _) => { },
-                serviceProvider: null!));
+                serviceProvider: sp));
         var sp = services.BuildServiceProvider();
         return new UnitOfWorkManager(new AsyncLocalAmbientUowAccessor(), sp);
     }

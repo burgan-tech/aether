@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.MultiSchema;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -12,10 +13,17 @@ public sealed class NpgsqlAetherProvider(
     public DbConnection CreateConnection(string connectionString) => new NpgsqlConnection(connectionString);
 
     public void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,
-        string schema, SchemaScopeState state)
+        string schema, SchemaScopeState state) =>
+        ApplyShared(builder, sharedConnection, schema, state, new StaticCurrentSchema(schema));
+
+    public void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,
+        string schema, SchemaScopeState state, ICurrentSchema currentSchema)
     {
         builder.UseNpgsql(sharedConnection);
-        builder.AddInterceptors(new SearchPathCommandInterceptor(schema, state, mode));
+        builder.AddInterceptors(new SearchPathCommandInterceptor(schema, state, mode, currentSchema));
+
+        if (mode == SchemaSwitchingMode.QualifiedNames)
+            builder.UseAetherQualifiedNamesModel();
 
         if (mode == SchemaSwitchingMode.SessionSearchPath)
         {

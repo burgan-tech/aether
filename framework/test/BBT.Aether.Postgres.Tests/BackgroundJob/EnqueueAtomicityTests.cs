@@ -396,8 +396,8 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
     {
         // Regression for the id-based SaveAsync upsert: a Pending job is NOT matched by
         // GetByJobNameAsync (filtered to Scheduled||Running), so the old name-based upsert fell into the
-        // AddAsync branch and threw on the duplicate PK. The id-based lookup finds the tracked row and the
-        // reschedule succeeds for a job in ANY status.
+        // AddAsync branch and threw on the duplicate PK. The atomic id-based update reschedules the Pending
+        // row without attempting a duplicate insert.
         var scheduler = new FakeJobScheduler();
         var options = BuildOptions();
         var sp = BuildProvider(scheduler, options);
@@ -436,6 +436,67 @@ public sealed class EnqueueAtomicityTests(PostgresFixture fx)
         reloaded.ExpressionValue.ShouldBe("0 0 * * *");
         reloaded.Kind.ShouldBe(JobKind.Recurring);
         reloaded.NextRetryAt.ShouldNotBeNull();
+        scheduler.ScheduleCalls.ShouldBeEmpty();
+        scheduler.DeleteCalls.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Cancellation_winner_cannot_be_revived_by_concurrent_update()
+    {
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        var id = Guid.NewGuid();
+        await SeedAsync(sp, new BackgroundJobInfo(id, HandlerName, "job-update-cancel-race")
+        {
+            ExpressionValue = "@every 1m",
+            Payload = System.Text.Json.JsonDocument.Parse("{}").RootElement.Clone(),
+            Status = BackgroundJobStatus.Scheduled,
+            Kind = JobKind.Recurring,
+            MaxRetryCount = 3,
+        });
+
+        await using var cancellationScope = sp.CreateAsyncScope();
+        var cancellationServices = cancellationScope.ServiceProvider;
+        using (cancellationServices.GetRequiredService<ICurrentSchema>().Change(_schema))
+        {
+            await using var cancellationUow = cancellationServices.GetRequiredService<IUnitOfWorkManager>().Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+            var cancellationWon = await cancellationServices.GetRequiredService<IJobStore>()
+                .TryCancelWaitingAsync(id, DateTime.UtcNow);
+            cancellationWon.ShouldBeTrue();
+
+            Task updateTask;
+            using (ExecutionContext.SuppressFlow())
+            {
+                updateTask = Task.Run(async () =>
+                {
+                    await using var updateScope = sp.CreateAsyncScope();
+                    var updateServices = updateScope.ServiceProvider;
+                    using (updateServices.GetRequiredService<ICurrentSchema>().Change(_schema))
+                    {
+                        await updateServices.GetRequiredService<IBackgroundJobService>()
+                            .UpdateAsync(id, "@every 2m");
+                    }
+                });
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(250));
+            updateTask.IsCompleted.ShouldBeFalse(
+                "the real PostgreSQL update must be waiting on the cancellation transaction's row lock");
+
+            await cancellationUow.CommitAsync();
+
+            var exception = await Should.ThrowAsync<InvalidOperationException>(async () => await updateTask);
+            exception.Message.ShouldContain(nameof(BackgroundJobStatus.Cancelled));
+        }
+
+        var reloaded = await ReloadAsync(sp, id);
+        reloaded.ShouldNotBeNull();
+        reloaded!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+        reloaded.ExpressionValue.ShouldBe("@every 1m");
         scheduler.ScheduleCalls.ShouldBeEmpty();
         scheduler.DeleteCalls.ShouldBeEmpty();
     }

@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
 using BBT.Aether.Domain.EntityFrameworkCore;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -16,11 +17,25 @@ public class EfCoreInboxStore<TDbContext>(
     IAetherDbContextProvider<TDbContext> dbContextProvider,
     IEventSerializer eventSerializer,
     IClock clock,
-    AetherInboxOptions options) : IInboxStore
+    AetherInboxOptions options,
+    ICurrentSchema? currentSchema) : IInboxStore
     where TDbContext : DbContext, IHasEfCoreInbox
 {
+    /// <summary>
+    /// Backward-compatible constructor that preserves the former ambient-schema behavior.
+    /// </summary>
+    public EfCoreInboxStore(
+        IAetherDbContextProvider<TDbContext> dbContextProvider,
+        IEventSerializer eventSerializer,
+        IClock clock,
+        AetherInboxOptions options)
+        : this(dbContextProvider, eventSerializer, clock, options, null)
+    {
+    }
+
     public async Task<bool> HasProcessedAsync(string eventId, CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         return await dbContext.InboxMessages
             .AnyAsync(m => m.Id == eventId && m.Status == IncomingEventStatus.Processed, cancellationToken);
@@ -28,6 +43,7 @@ public class EfCoreInboxStore<TDbContext>(
 
     public async Task MarkAsProcessedAsync(string eventId, CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var message = await dbContext.InboxMessages
             .FirstOrDefaultAsync(m => m.Id == eventId, cancellationToken);
@@ -40,6 +56,7 @@ public class EfCoreInboxStore<TDbContext>(
 
     public async Task StorePendingAsync(CloudEventEnvelope envelope, CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var now = clock.UtcNow;
 
@@ -76,6 +93,7 @@ public class EfCoreInboxStore<TDbContext>(
 
     public async Task MarkAsFailedAsync(string eventId, CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var message = await dbContext.InboxMessages
             .FirstOrDefaultAsync(m => m.Id == eventId, cancellationToken);
@@ -102,6 +120,7 @@ public class EfCoreInboxStore<TDbContext>(
     public async Task<int> CleanupOldMessagesAsync(int batchSize, TimeSpan retentionPeriod,
         CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var cutoffDate = clock.UtcNow - retentionPeriod;
 
@@ -119,5 +138,12 @@ public class EfCoreInboxStore<TDbContext>(
         var count = oldMessages.Count;
         dbContext.InboxMessages.RemoveRange(oldMessages);
         return count;
+    }
+
+    private IDisposable BeginConfiguredSchemaScope()
+    {
+        return currentSchema is null || string.IsNullOrWhiteSpace(options.Schema)
+            ? global::BBT.Aether.NullDisposable.Instance
+            : currentSchema.Change(options.Schema);
     }
 }

@@ -31,7 +31,10 @@ public enum SchemaSwitchingMode
     /// <para>
     /// Intended for <c>IsTransactional = false</c> behind PgBouncer transaction pooling.
     /// </para>
-    /// <para><b>Not yet implemented.</b> Throws <see cref="System.NotSupportedException"/>.</para>
+    /// <para>
+    /// Schema-dependent raw SQL must use the explicit <c>{{schema}}</c> token; arbitrary SQL is
+    /// not parsed or automatically qualified.
+    /// </para>
     /// </summary>
     QualifiedNames,
 }

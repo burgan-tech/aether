@@ -139,7 +139,7 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task Required_nested_scope_dispose_does_not_close_shared_connection()
+    public async Task Required_nested_scope_commit_and_dispose_do_not_complete_root_or_close_shared_connection()
     {
         await ArrangeSchemaAsync();
         var sp = BuildProvider();
@@ -165,6 +165,12 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
             // Inner Required scope participates in the SAME root (does NOT own it).
             var inner = mgr.Begin(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.Required, IsTransactional = true });
+
+            // Committing a participating scope is logical-only: the owning root and its connection stay active.
+            await inner.CommitAsync();
+            inner.IsCompleted.ShouldBeTrue();
+            outer.IsCompleted.ShouldBeFalse();
+            conn.State.ShouldBe(ConnectionState.Open);
 
             // Disposing the non-owner inner scope must only restore ambient, NOT close the shared connection.
             await inner.DisposeAsync();
@@ -199,6 +205,36 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
             db.Database.GetDbConnection().State.ShouldBe(ConnectionState.Open);
             db.Database.CurrentTransaction.ShouldBeNull();
 
+            await uow.CommitAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Connection_uses_transaction_mode_captured_at_begin_after_input_options_mutate()
+    {
+        await ArrangeSchemaAsync();
+        var sp = BuildProvider();
+
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var mgr = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
+
+        using (currentSchema.Change(_schema))
+        {
+            var options = new UnitOfWorkOptions
+            {
+                Scope = UnitOfWorkScopeOption.RequiresNew,
+                IsTransactional = true
+            };
+            await using var uow = mgr.Begin(options);
+
+            options.IsTransactional = false;
+            uow.Options!.IsTransactional = false;
+            var db = await provider.GetDbContextAsync();
+
+            db.Database.CurrentTransaction.ShouldNotBeNull();
             await uow.CommitAsync();
         }
     }

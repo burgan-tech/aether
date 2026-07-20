@@ -8,6 +8,7 @@ using BBT.Aether.Events;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using BBT.Aether.Uow;
+using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
@@ -33,12 +34,13 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
         }
     }
 
-    private IServiceProvider BuildProvider()
+    private IServiceProvider BuildProvider(
+        SchemaSwitchingMode mode = SchemaSwitchingMode.TransactionLocal)
     {
         var services = new ServiceCollection();
         services.AddAetherCore(_ => { });
-        services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString);
-        services.AddAetherOutbox<TestDbContext>();
+        services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString, mode);
+        services.AddAetherOutbox<TestDbContext>(options => options.Schema = _schema);
         services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
         return services.BuildServiceProvider();
     }
@@ -59,7 +61,13 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
         await modelConn.OpenAsync();
         await using var ctx = ActivatorUtilities.CreateInstance<TestDbContext>(
             sp, configurator.BuildOptions(modelConn, _schema, new BBT.Aether.Uow.EntityFrameworkCore.SchemaScopeState()));
-        var script = ctx.Database.GenerateCreateScript();
+        var script = ctx.Database.GenerateCreateScript()
+            .Replace(AetherSchemaModel.QuotedPlaceholder, $"\"{_schema}\"", StringComparison.Ordinal)
+            .Replace(AetherSchemaModel.Placeholder, $"\"{_schema}\"", StringComparison.Ordinal)
+            .Replace(
+                $"CREATE SCHEMA \"{_schema}\";",
+                $"CREATE SCHEMA IF NOT EXISTS \"{_schema}\";",
+                StringComparison.Ordinal);
 
         await using var ddlConn = new NpgsqlConnection(fx.ConnectionString);
         await ddlConn.OpenAsync();
@@ -195,6 +203,37 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
             }
 
             leased.Count.ShouldBe(0);
+        }
+    }
+
+    [Theory]
+    [InlineData(SchemaSwitchingMode.TransactionLocal)]
+    [InlineData(SchemaSwitchingMode.SessionSearchPath)]
+    [InlineData(SchemaSwitchingMode.QualifiedNames)]
+    public async Task LeaseBatch_uses_qualified_relation_without_transaction(
+        SchemaSwitchingMode mode)
+    {
+        var sp = BuildProvider(mode);
+        await SetupSchemaAsync(sp);
+        await InsertPendingMessageAsync(sp);
+
+        await using var scope = sp.CreateAsyncScope();
+        var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+        var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var leaseStore = scope.ServiceProvider.GetRequiredService<IOutboxLeaseStore>();
+
+        using (currentSchema.Change(_schema))
+        await using (uowManager.Begin(new UnitOfWorkOptions
+                     {
+                         Scope = UnitOfWorkScopeOption.RequiresNew,
+                         IsTransactional = false
+                     }))
+        {
+            var leased = await leaseStore.LeaseBatchAsync(
+                10, "non-transactional-worker", TimeSpan.FromSeconds(30));
+
+            leased.Count.ShouldBe(1);
+            leased[0].LockedBy.ShouldBe("non-transactional-worker");
         }
     }
 }

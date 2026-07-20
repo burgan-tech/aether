@@ -102,7 +102,8 @@ public class BackgroundJobInfo : FullAuditedEntity<Guid>, IHasExtraProperties
     public Guid? RunningToken { get; set; }
 
     /// <summary>Opaque token set by the arming lease store when this job is claimed for arming.
-    /// Null when the job is not currently being armed. Used by <see cref="IJobStore.TryTransitionFromArmingAsync"/>
+    /// Null when the job is not currently being armed. Used by
+    /// <c>IJobArmingStore.TryTransitionFromArmingAsync</c>
     /// to guard confirm/abort transitions.</summary>
     public Guid? ArmingToken { get; set; }
 

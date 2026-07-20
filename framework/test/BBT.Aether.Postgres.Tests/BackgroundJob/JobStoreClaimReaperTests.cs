@@ -204,6 +204,127 @@ public sealed class JobStoreClaimReaperTests(PostgresFixture fx)
         won.ShouldBeFalse("a job that is not Scheduled cannot be claimed");
     }
 
+    [Theory]
+    [InlineData(BackgroundJobStatus.Pending)]
+    [InlineData(BackgroundJobStatus.Scheduled)]
+    [InlineData(BackgroundJobStatus.Retrying)]
+    public async Task TryCancelWaiting_cancels_waiting_status(BackgroundJobStatus initial)
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+        var id = Guid.NewGuid();
+        var handledAt = DateTime.UtcNow;
+        await SeedAsync(sp, NewJob(id, initial));
+
+        await RunInUowAsync(sp, async store =>
+            (await store.TryCancelWaitingAsync(id, handledAt)).ShouldBeTrue());
+
+        var job = await ReloadAsync(sp, id);
+        job!.Status.ShouldBe(BackgroundJobStatus.Cancelled);
+        job.HandledTime.ShouldNotBeNull();
+        job.HandledTime.Value.ShouldBe(handledAt, TimeSpan.FromSeconds(1));
+        job.RunningSince.ShouldBeNull();
+        job.RunningToken.ShouldBeNull();
+        job.ArmingToken.ShouldBeNull();
+        job.ArmingUntil.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task TryCancelWaiting_preserves_running_claim()
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+        var id = Guid.NewGuid();
+        var token = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Scheduled));
+
+        await RunInUowAsync(sp, async store =>
+        {
+            (await store.TryClaimAsync(id, DateTime.UtcNow, token)).ShouldBeTrue();
+            (await store.TryCancelWaitingAsync(id, DateTime.UtcNow)).ShouldBeFalse();
+        });
+
+        var job = await ReloadAsync(sp, id);
+        job!.Status.ShouldBe(BackgroundJobStatus.Running);
+        job.RunningToken.ShouldBe(token);
+        job.RunningSince.ShouldNotBeNull();
+    }
+
+    [Theory]
+    [InlineData(BackgroundJobStatus.Completed)]
+    [InlineData(BackgroundJobStatus.Failed)]
+    [InlineData(BackgroundJobStatus.Cancelled)]
+    public async Task TryCancelWaiting_preserves_terminal_status(BackgroundJobStatus initial)
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+        var id = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(id, initial));
+
+        await RunInUowAsync(sp, async store =>
+            (await store.TryCancelWaitingAsync(id, DateTime.UtcNow)).ShouldBeFalse());
+
+        (await ReloadAsync(sp, id))!.Status.ShouldBe(initial);
+    }
+
+    [Theory]
+    [InlineData(BackgroundJobStatus.Running)]
+    [InlineData(BackgroundJobStatus.Completed)]
+    public async Task Cancellation_snapshot_bypasses_tracked_waiting_entity_after_concurrent_transition(
+        BackgroundJobStatus concurrentStatus)
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+        var id = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Pending));
+
+        await using var scope = sp.CreateAsyncScope();
+        var services = scope.ServiceProvider;
+        using var schema = services.GetRequiredService<ICurrentSchema>().Change(_schema);
+        await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+            new UnitOfWorkOptions
+            {
+                Scope = UnitOfWorkScopeOption.RequiresNew,
+                IsTransactional = true
+            });
+        var store = services.GetRequiredService<IJobStore>();
+        var tracked = await store.GetAsync(id);
+        tracked.ShouldNotBeNull();
+        tracked!.Status.ShouldBe(BackgroundJobStatus.Pending);
+
+        await RunInUowAsync(sp, concurrentStore =>
+            concurrentStore.UpdateStatusAsync(id, concurrentStatus, DateTime.UtcNow));
+
+        (await store.TryCancelWaitingAsync(id, DateTime.UtcNow)).ShouldBeFalse();
+        tracked.Status.ShouldBe(BackgroundJobStatus.Pending,
+            "ExecuteUpdate and the concurrent UoW do not refresh the first context's tracked entity");
+
+        var snapshot = await store.GetCancellationSnapshotAsync(id);
+        snapshot.ShouldNotBeNull();
+        snapshot!.Status.ShouldBe(concurrentStatus);
+        await uow.CommitAsync();
+    }
+
+    [Fact]
+    public async Task Claim_and_waiting_cancellation_have_exactly_one_winner()
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+        var id = Guid.NewGuid();
+        await SeedAsync(sp, NewJob(id, BackgroundJobStatus.Scheduled));
+
+        var results = await Task.WhenAll(
+            RunInNewUowAsync(sp, store =>
+                store.TryClaimAsync(id, DateTime.UtcNow, Guid.NewGuid())),
+            RunInNewUowAsync(sp, store =>
+                store.TryCancelWaitingAsync(id, DateTime.UtcNow)));
+
+        results.Count(won => won).ShouldBe(1);
+        var status = (await ReloadAsync(sp, id))!.Status;
+        new[] { BackgroundJobStatus.Running, BackgroundJobStatus.Cancelled }
+            .ShouldContain(status);
+    }
+
     [Fact]
     public async Task GetStaleRunning_returns_only_timed_out()
     {
@@ -300,5 +421,23 @@ public sealed class JobStoreClaimReaperTests(PostgresFixture fx)
             await action(store);
             await uow.CommitAsync();
         }
+    }
+
+    private async Task<T> RunInNewUowAsync<T>(
+        IServiceProvider sp,
+        Func<IJobStore, Task<T>> action)
+    {
+        await using var scope = sp.CreateAsyncScope();
+        var services = scope.ServiceProvider;
+        using var schema = services.GetRequiredService<ICurrentSchema>().Change(_schema);
+        await using var uow = services.GetRequiredService<IUnitOfWorkManager>().Begin(
+            new UnitOfWorkOptions
+            {
+                Scope = UnitOfWorkScopeOption.RequiresNew,
+                IsTransactional = true
+            });
+        var result = await action(services.GetRequiredService<IJobStore>());
+        await uow.CommitAsync();
+        return result;
     }
 }

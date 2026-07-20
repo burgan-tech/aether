@@ -9,7 +9,9 @@ public class UnitOfWorkOptions
 {
     /// <summary>
     /// Gets or sets whether this unit of work should use transactions.
-    /// Default is false (reserve pattern - transaction can be escalated later).
+    /// Default is false. The root transaction mode is fixed when the unit of work begins and
+    /// cannot be escalated by a nested <c>Required</c> scope; use <c>RequiresNew</c> when a nested
+    /// operation requires a transaction that its outer unit of work does not provide.
     /// </summary>
     public bool IsTransactional { get; set; } = false;
 
@@ -28,4 +30,3 @@ public class UnitOfWorkOptions
     /// <summary>Upper bound on distinct (DbContextType, Schema) contexts in one UnitOfWork. Guardrail.</summary>
     public int MaxDbContextCount { get; set; } = 16;
 }
-

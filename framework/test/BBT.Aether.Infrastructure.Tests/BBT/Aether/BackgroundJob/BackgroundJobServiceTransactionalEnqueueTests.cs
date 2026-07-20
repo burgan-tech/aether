@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
@@ -33,6 +34,7 @@ public class BackgroundJobServiceTransactionalEnqueueTests
     private readonly IClock _clock = Substitute.For<IClock>();
     private readonly ICurrentSchema _currentSchema = Substitute.For<ICurrentSchema>();
     private readonly IEventSerializer _eventSerializer = Substitute.For<IEventSerializer>();
+    private readonly ILogger<BackgroundJobService> _logger = Substitute.For<ILogger<BackgroundJobService>>();
     private readonly BackgroundJobOptions _options = new() { MaxRetryCount = 7 };
     private readonly BackgroundJobService _sut;
 
@@ -44,8 +46,7 @@ public class BackgroundJobServiceTransactionalEnqueueTests
         _eventSerializer.Serialize(Arg.Any<object>()).Returns(new byte[] { 1, 2, 3 });
         _sut = new BackgroundJobService(
             _jobStore, _jobScheduler, _uowManager, _guidGenerator, _clock,
-            _currentSchema, _eventSerializer, _options,
-            Substitute.For<ILogger<BackgroundJobService>>());
+            _currentSchema, _eventSerializer, _options, _logger);
     }
 
     [Fact]
@@ -165,6 +166,31 @@ public class BackgroundJobServiceTransactionalEnqueueTests
     }
 
     [Fact]
+    public async Task EnqueueAsync_Directly_SchedulerAndRecoveryFail_LogsReconciliationRequired()
+    {
+        _uowManager.Current.Returns((IUnitOfWork?)null);
+        _uowManager.Begin(Arg.Any<UnitOfWorkOptions>()).Returns(_ => Substitute.For<IUnitOfWork>());
+        _jobScheduler.ScheduleAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+                Arg.Any<ReadOnlyMemory<byte>>(), Arg.Any<JobScheduleFailurePolicy?>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("scheduler offline"));
+        _jobStore.TryTransitionStatusAsync(
+                Arg.Any<Guid>(), BackgroundJobStatus.Scheduled, BackgroundJobStatus.Pending,
+                Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("database offline"));
+
+        await _sut.EnqueueAsync(
+            "handler", "job-direct-recovery-fail", new { X = 1 }, "@every 5s",
+            directly: true, cancellationToken: CancellationToken.None);
+
+        HasLog(
+                LogLevel.Error,
+                "Failed to roll back job 'job-direct-recovery-fail' to Pending; row may remain Scheduled " +
+                "without a scheduler entry, the arming poller will not claim it, and reconciliation or manual " +
+                "intervention is required")
+            .ShouldBeTrue();
+    }
+
+    [Fact]
     public async Task EnqueueAsync_Ambient_Directly_SavesAsScheduledAndDefersArmToOnCompleted()
     {
         // Arrange — ambient UoW active; directly:true must register an OnCompleted callback and NOT arm
@@ -187,6 +213,10 @@ public class BackgroundJobServiceTransactionalEnqueueTests
         // Assert — saved as Scheduled; callback registered; scheduler not yet called
         saved.ShouldNotBeNull();
         saved!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
+        HasLog(
+                LogLevel.Information,
+                "Enqueued Scheduled job 'handler'/'job-amb-direct' into ambient UoW. Id: " + id)
+            .ShouldBeTrue();
         ambientUow.Received(1).OnCompleted(Arg.Any<Func<IUnitOfWork, Task>>());
         await _jobScheduler.DidNotReceiveWithAnyArgs().ScheduleAsync(default!, default!, default!, default);
         onCompleted.ShouldNotBeNull();
@@ -199,5 +229,17 @@ public class BackgroundJobServiceTransactionalEnqueueTests
             Arg.Any<JobScheduleFailurePolicy?>(), Arg.Any<CancellationToken>());
         await _jobStore.DidNotReceive().TryTransitionStatusAsync(
             id, BackgroundJobStatus.Pending, BackgroundJobStatus.Scheduled, Arg.Any<CancellationToken>());
+    }
+
+    private bool HasLog(LogLevel level, string message)
+    {
+        return _logger.ReceivedCalls().Any(call =>
+        {
+            var arguments = call.GetArguments();
+            return arguments.Length >= 3
+                   && arguments[0] is LogLevel actualLevel
+                   && actualLevel == level
+                   && string.Equals(arguments[2]?.ToString(), message, StringComparison.Ordinal);
+        });
     }
 }

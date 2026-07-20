@@ -22,8 +22,13 @@ public sealed class AsyncLocalAmbientUowAccessor : IAmbientUnitOfWorkAccessor
     {
         var uow = Current;
 
-        // Walk the outer chain and skip completed or disposed UoWs
-        while (uow != null && (uow.IsCompleted || uow.IsDisposed))
+        // Walk the outer chain and skip completed or disposed UoWs. A Required participant keeps
+        // its own logical completion state, so also treat it as inactive when its shared root is
+        // terminal.
+        while (uow != null &&
+               (uow.IsCompleted ||
+                uow.IsDisposed ||
+                uow is UnitOfWorkScope { IsRootTerminal: true }))
         {
             uow = uow.Outer;
         }
@@ -31,4 +36,3 @@ public sealed class AsyncLocalAmbientUowAccessor : IAmbientUnitOfWorkAccessor
         return uow;
     }
 }
-

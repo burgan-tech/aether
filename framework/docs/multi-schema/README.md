@@ -6,7 +6,7 @@ Aether supports running a single application against many PostgreSQL **schemas**
 tenant, module, or data partition) without baking the schema into the EF Core model. The
 active schema is an **immutable working context** selected via a nested, auto-restoring
 scope, and a Unit of Work isolates each schema-bound `DbContext` on a single shared
-connection by applying a `search_path` strategy before every command.
+connection by either applying a `search_path` strategy or qualifying every mapped relation.
 
 The strategy is explicit and pool-topology-aware: pick a `SchemaSwitchingMode` that matches
 how your connection pool is configured (see [Schema switching modes](#schema-switching-modes)).
@@ -14,8 +14,8 @@ how your connection pool is configured (see [Schema switching modes](#schema-swi
 ## Provider support
 
 Multi-schema (per-request schema switching via `ICurrentSchema.Change`) is supported **only on the
-PostgreSQL provider** (`BBT.Aether.Npgsql`), which applies `SET LOCAL search_path` per command on the
-shared transaction.
+PostgreSQL provider** (`BBT.Aether.Npgsql`), which supports transaction-local and session-level
+`search_path` strategies as well as runtime-qualified relation names.
 
 **SQL Server (`BBT.Aether.SqlServer`) is single-schema.** It always uses the schema fixed in the EF
 model (`HasDefaultSchema` / schema-qualified `ToTable`). On SQL Server, `ICurrentSchema.Change(...)`
@@ -25,7 +25,8 @@ Applications requiring true multi-schema isolation must use PostgreSQL.
 ## Database providers
 
 `BBT.Aether.Infrastructure` is **provider-agnostic** — it has no `Npgsql` dependency. The Unit
-of Work owns a single shared `DbConnection` / `DbTransaction` and talks to an
+of Work owns a single shared `DbConnection` and, when `IsTransactional = true`, a single shared
+`DbTransaction`. It talks to an
 [`IAetherDatabaseProvider`](../../src/BBT.Aether.Infrastructure/BBT/Aether/Uow/EntityFrameworkCore/IAetherDatabaseProvider.cs)
 seam (connection creation, binding options to the shared connection, and the per-schema
 strategy). Pick a provider package:
@@ -76,9 +77,12 @@ using (currentSchema.Change("flow_a"))
 The scope flows across `await` boundaries (`AsyncLocal`) and restores the previous value on
 dispose. Out-of-order disposal throws `InvalidOperationException` ("Schema scope corrupted").
 
-> There is no `ICurrentSchema.Set()`, no `IsResolved` flag, no session-level
-> `SET search_path`, and no `NpgsqlSchemaConnectionInterceptor`. Earlier designs used those;
-> they have been removed. Schema is applied per command on the shared transaction (see below).
+> The obsolete `ICurrentSchema.Set()` / `IsResolved` API and
+> `NpgsqlSchemaConnectionInterceptor` have been removed. There is no single SQL mechanism shared
+> by every mode: `TransactionLocal` applies transaction-local state per command,
+> `SessionSearchPath` deliberately uses session-level `SET` / `RESET search_path`, and
+> `QualifiedNames` qualifies relations without changing `search_path`. See
+> [Schema switching modes](#schema-switching-modes) for the mode-specific contract.
 
 ### Schema-name formatting and validation
 
@@ -89,7 +93,7 @@ name is what `Name` returns and what ends up on the connection.
 
 Before a name is interpolated into `SET LOCAL search_path`, it is validated and quoted by
 `PostgreSqlIdentifier.QuoteSchema(...)` (regex `^[a-zA-Z_][a-zA-Z0-9_]*$`). An invalid name
-throws `InvalidOperationException: Invalid PostgreSQL schema name: <name>`. Schema names
+throws `InvalidOperationException: Invalid PostgreSQL identifier: <name>`. Schema names
 cannot be passed as SQL parameters, so this validate-then-quote step is the injection guard.
 
 ## Schema switching modes
@@ -100,13 +104,14 @@ second argument to `AddAetherNpgsql` (default `TransactionLocal`):
 ```csharp
 services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.TransactionLocal);
 services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.SessionSearchPath);
+services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.QualifiedNames);
 ```
 
 | Mode | Command issued | Requires transaction | Pool topology |
 |------|---------------|----------------------|---------------|
 | `TransactionLocal` | `SET LOCAL search_path TO "<schema>", public` before every command | **Yes** (`IsTransactional = true`) | PgBouncer transaction pooling ✅, native pool ✅ |
 | `SessionSearchPath` | `SET search_path TO "<schema>", public` once + `RESET search_path` at UoW dispose | No (`IsTransactional = false`) | Native Npgsql pool only ✅ |
-| `QualifiedNames` | _(not yet implemented — throws `NotSupportedException`)_ | No | PgBouncer session pooling (future) |
+| `QualifiedNames` | Rewrites EF model placeholders and explicit raw-SQL `{{schema}}` tokens to `"<schema>"` | No | PgBouncer transaction/session pooling ✅, native pool ✅ |
 
 **Choosing a mode:**
 
@@ -122,8 +127,9 @@ services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.Sess
   **Do not use with PgBouncer transaction pooling** — the backend may switch between commands
   and the session-level `SET` would apply to a different tenant's queries.
 
-- **`QualifiedNames`:** Planned for PgBouncer transaction pooling without a per-command
-  transaction. Not yet implemented.
+- **`QualifiedNames`:** Use when queries must be schema-safe without connection state, including
+  non-transactional work behind PgBouncer transaction pooling. EF-generated relations are
+  qualified at command execution; no `SET`, `SET LOCAL`, or `RESET search_path` is emitted.
 
 ## How schema isolation works
 
@@ -160,13 +166,25 @@ The `SET` is always run as its own command (same connection) rather than concate
 the command text, because concatenation would add an extra result set and break EF's
 rows-affected accounting for INSERT/UPDATE batches.
 
+### `QualifiedNames`
+
+Schema-agnostic mappings receive one tenant-independent model placeholder. Immediately before
+execution the interceptor replaces that placeholder with the validated schema bound to the
+`DbContext`; the EF model cache therefore does not grow per tenant. A context resolved under
+`flow_a` remains bound to `flow_a` even if the ambient scope later changes.
+
+Repository and service instances may be reused across schema scopes because each repository
+operation resolves the appropriate context. A resolved `DbContext`, `DbSet`, or `IQueryable`
+must not cross schema scopes. Executing one under a different current schema fails before
+database access; resolve it again inside the new `Change(...)` scope.
+
 > Result buffering: a single Npgsql connection cannot have two active readers. Do not stream
 > (e.g. `AsAsyncEnumerable` without materializing) across interleaved schema-bound contexts
 > within one Unit of Work — EF Core buffers by default, so the normal case is fine.
 
 ## EF mappings are schema-agnostic
 
-Map tables with **no schema argument** — schema is resolved at runtime via search_path:
+Map tables with **no schema argument** — schema is resolved at runtime by the selected mode:
 
 ```csharp
 protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -185,7 +203,7 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 **Why:** EF Core caches one compiled model per `DbContext` type. If the schema were part of
 the mapping, you would need a distinct model (and cache entry) per schema, and a context
 could only ever talk to one schema. Leaving tables unqualified means the same compiled model
-serves every schema, and `search_path` selects the schema at execution time.
+serves every schema, and the selected mode supplies the schema at execution time.
 
 ## Usage
 
@@ -240,6 +258,45 @@ await using (var uow = unitOfWorkManager.Begin(
 }
 ```
 
+### Qualified names and raw SQL
+
+```csharp
+services.AddAetherNpgsql<MyDbContext>(
+    connectionString,
+    SchemaSwitchingMode.QualifiedNames);
+
+await using var uow = uowManager.Begin(new UnitOfWorkOptions
+{
+    Scope = UnitOfWorkScopeOption.RequiresNew,
+    IsTransactional = true
+});
+
+using (currentSchema.Change("tenant_a"))
+{
+    await repository.GetListAsync();
+}
+
+using (currentSchema.Change("tenant_b"))
+{
+    // The same injected repository/service instance can be reused here.
+    var rows = await repository.GetListAsync();
+    var db = await dbContextProvider.GetDbContextAsync();
+
+    await db.Database.ExecuteSqlRawAsync(
+        "UPDATE {{schema}}.\"orders\" SET \"Status\" = {0}",
+        status);
+}
+
+await uow.CommitAsync();
+```
+
+Schema-dependent `FromSqlRaw` and `ExecuteSqlRaw` statements must put the exact `{{schema}}`
+token at every runtime relation reference. The token is replaced only in PostgreSQL SQL code;
+occurrences inside string literals (including escape strings), quoted identifiers, line or
+nested block comments, and dollar-quoted bodies are preserved. Parameters remain parameters.
+Schema-independent SQL such as `SELECT 1` needs no token. Other switching modes reject a real
+`{{schema}}` token and instead use their documented `search_path` contract.
+
 If `currentSchema.Name` is null when a context is requested, the provider throws
 `InvalidOperationException: Current schema is not set.`
 
@@ -268,7 +325,8 @@ app.MapControllers();
 
 ## PgBouncer (transaction pooling)
 
-**Only `TransactionLocal` mode is safe under PgBouncer transaction pooling.**
+Both `TransactionLocal` and `QualifiedNames` are safe under PgBouncer transaction pooling.
+`QualifiedNames` does not depend on backend session state and can run without a transaction.
 
 `SET LOCAL` is transaction-scoped: when the transaction ends and the connection returns to the
 pool, the `search_path` is gone — it never leaks into a connection later handed to another
@@ -279,7 +337,7 @@ request. This is asserted directly by
 `SessionSearchPath` mode issues a session-level `SET`, which **cannot** be used with
 PgBouncer transaction pooling — the backend may switch between commands and the schema set by
 one request would be visible to another. Use `SessionSearchPath` only with the native Npgsql
-pool (direct connections or PgBouncer session pooling).
+pool or a backend connection whose session is pinned for the whole UoW.
 
 Rules for `TransactionLocal` under PgBouncer transaction pooling:
 
@@ -295,14 +353,16 @@ Rules for `TransactionLocal` under PgBouncer transaction pooling:
 
 SQL Server is supported via `BBT.Aether.SqlServer` (`SqlServerAetherProvider`), but only as a
 **single-schema** provider. It supplies the shared connection/transaction and binds
-`UseSqlServer`, but does **not** switch schema per command — SQL Server has no
-transaction-scoped `SET LOCAL search_path` equivalent.
+`UseSqlServer`, but does **not** implement the PostgreSQL provider's runtime relation
+qualification or schema-switching mechanisms.
 
 - **Single-schema only.** Bind the schema in the model — `modelBuilder.HasDefaultSchema("x")`
   or schema-qualified `ToTable("orders", "x")`. There is no runtime per-command schema switching.
 - **Runtime cross-schema-in-one-transaction is PostgreSQL-only.** The multi-schema flow above
   (entering several `currentSchema.Change(...)` scopes and writing across schemas in one
-  transaction) relies on the transaction-scoped `SET LOCAL search_path` that SQL Server lacks.
+  transaction) is provided by PostgreSQL's `TransactionLocal`, `SessionSearchPath`, and
+  `QualifiedNames` modes. The SQL Server provider has no equivalent runtime relation
+  rewriting/schema-switching support.
 - **Outbox/Inbox is not yet supported on SQL Server.** Processing currently uses
   PostgreSQL-specific lease SQL (`FOR UPDATE SKIP LOCKED`, in `EfCoreOutboxStore` /
   `EfCoreInboxStore`). SQL Server support is a follow-up.

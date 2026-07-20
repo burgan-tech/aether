@@ -33,11 +33,9 @@ public class NpgsqlInboxLeaseStore<TDbContext>(
     {
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var entityType = dbContext.Model.FindEntityType(typeof(BBT.Aether.Domain.Events.InboxMessage))!;
-        var tableName = entityType.GetTableName();
-        var schema = entityType.GetSchema();
-        var fullTableName = string.IsNullOrEmpty(schema)
-            ? $"\"{tableName}\""
-            : $"\"{schema}\".\"{tableName}\"";
+        var schema = currentSchema.Name
+            ?? throw new InvalidOperationException("Current schema is not set.");
+        var fullTableName = PostgreSqlRelationName.For(entityType, schema);
 
         var connection = dbContext.Database.GetDbConnection();
         var now = clock.UtcNow;
@@ -47,17 +45,6 @@ public class NpgsqlInboxLeaseStore<TDbContext>(
             await connection.OpenAsync(cancellationToken);
 
         var dbTransaction = dbContext.Database.CurrentTransaction?.GetDbTransaction();
-
-        // When the entity has no baked-in schema (search_path mode), issue SET LOCAL search_path
-        // so that the raw ADO.NET command lands in the correct schema. EF's command interceptor
-        // normally does this for EF commands; we replicate it here for the raw UPDATE … RETURNING.
-        if (string.IsNullOrEmpty(schema) && !string.IsNullOrEmpty(currentSchema.Name))
-        {
-            await using var setCmd = connection.CreateCommand();
-            setCmd.Transaction = dbTransaction;
-            setCmd.CommandText = $"SET LOCAL search_path TO \"{currentSchema.Name}\";";
-            await setCmd.ExecuteNonQueryAsync(cancellationToken);
-        }
 
         await using var command = connection.CreateCommand();
         command.Transaction = dbTransaction;

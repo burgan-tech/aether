@@ -35,6 +35,18 @@ public interface IJobStore
     /// </returns>
     /// <exception cref="ArgumentException">Thrown when id is empty.</exception>
     Task<BackgroundJobInfo?> GetAsync(Guid id, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads the current persisted cancellation fields without consulting a tracked entity instance.
+    /// Use this after a failed set-based cancellation update so concurrent Running or terminal transitions
+    /// are classified from fresh database state.
+    /// </summary>
+    /// <param name="id">The unique entity identifier of the job.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>The current cancellation snapshot, or null when the job does not exist.</returns>
+    Task<BackgroundJobCancellationSnapshot?> GetCancellationSnapshotAsync(
+        Guid id,
+        CancellationToken cancellationToken = default);
     
     /// <summary>
     /// Retrieves active background job information by the job name (external scheduler identifier).
@@ -153,6 +165,15 @@ public interface IJobStore
     Task<bool> TryClaimAsync(Guid id, DateTime nowUtc, Guid runningToken, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Atomically cancels a Pending, Scheduled, or Retrying job.
+    /// Running and terminal jobs are not changed.
+    /// </summary>
+    Task<bool> TryCancelWaitingAsync(
+        Guid id,
+        DateTime handledTimeUtc,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Atomically records a terminal outcome (Completed/Failed/Cancelled) for a Running job, guarded on the
     /// claim token: updates only when <c>Status==Running &amp;&amp; RunningToken==runningToken</c>. Clears
     /// RunningSince/RunningToken. Returns true iff a row was updated (false ⇒ the claim was lost — the job is
@@ -211,9 +232,8 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Clears <see cref="BackgroundJobInfo.ArmingToken"/>/<see cref="BackgroundJobInfo.ArmingUntil"/>
-    /// and transitions the job to <paramref name="to"/>, guarded on the arming token. Returns false if
-    /// the token no longer matches (another pod already acted on this row or the lease expired).
+    /// Legacy arming transition contract. Existing store implementers continue to implement this
+    /// token-guarded overload; new framework code uses the status-guarded overload below.
     /// </summary>
     Task<bool> TryTransitionFromArmingAsync(
         Guid id,
@@ -234,4 +254,3 @@ public interface IJobStore
         int batchSize,
         CancellationToken cancellationToken = default);
 }
-

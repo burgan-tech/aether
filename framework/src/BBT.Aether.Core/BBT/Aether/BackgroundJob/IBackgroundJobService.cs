@@ -13,10 +13,11 @@ public interface IBackgroundJobService
 {
     /// <summary>
     /// Enqueues a background job with the specified parameters and schedule.
-    /// Creates a new job entity, persists it, and schedules it with the underlying scheduler.
+    /// Creates and persists a new job entity. The poller normally schedules it; direct arming is optional.
     /// The job row is persisted atomically with the caller's ambient unit of work when one is active
-    /// (a rollback discards it); otherwise a short transaction is opened and committed. The arming poller
-    /// arms it after commit, or — when <paramref name="directly"/> is true — it is armed immediately.
+    /// (a rollback discards it); otherwise a short transaction is opened and committed. The default path is
+    /// armed later by the poller; when <paramref name="directly"/> is true, scheduler arming is attempted
+    /// only after persistence commits.
     /// </summary>
     /// <typeparam name="TPayload">The type of the job payload.</typeparam>
     /// <param name="handlerName">The name of the handler type to execute (e.g., "SendEmail", "GenerateReport").</param>
@@ -26,12 +27,12 @@ public interface IBackgroundJobService
     /// <param name="metadata">Additional metadata associated with the job (optional).</param>
     /// <param name="failurePolicyOptions">Retry/failure policy for the scheduled job (optional).</param>
     /// <param name="directly">
-    /// When <c>true</c>, the scheduler is armed inline immediately after the job row is durably committed
-    /// (and the row is flipped Pending → Scheduled), instead of waiting for the arming poller. In the
-    /// ambient case arming is deferred to the ambient UoW's <c>OnCompleted</c> so it only fires after the
-    /// caller's commit. The arming poller remains the backstop: if the inline arm fails it is logged and
-    /// the poller arms the row on its next pass. When <c>false</c> (default), arming is left entirely to
-    /// the poller.
+    /// When <c>true</c>, the row is initially persisted as Scheduled and scheduler arming is attempted after
+    /// persistence commits, instead of waiting for the arming poller. In the ambient case the attempt runs
+    /// from the UoW's <c>OnCompleted</c> callback; otherwise it runs after enqueue's own UoW commits. If the
+    /// scheduler call fails, recovery from Scheduled to Pending is best-effort. A process crash, cancellation,
+    /// or recovery failure can leave the row Scheduled without a scheduler entry. When <c>false</c> (default),
+    /// the row is persisted as Pending and durable arming is left to the poller.
     /// </param>
     /// <param name="jobId">
     /// Optional caller-supplied entity id for the created job. When provided, <c>BackgroundJobInfo.Id</c>
@@ -60,13 +61,14 @@ public interface IBackgroundJobService
         string schedule,
         Dictionary<string, object>? metadata = null,
         JobScheduleFailurePolicy? failurePolicyOptions = null,
-        bool directly = true,
+        bool directly = false,
         Guid? jobId = null,
         BBT.Aether.Domain.Entities.JobKind? kind = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Updates the schedule of an existing background job.
+    /// Atomically updates the schedule of a Pending, Scheduled, or Retrying background job.
+    /// Running and terminal jobs are immutable and are not returned to Pending.
     /// </summary>
     /// <param name="id">The entity ID of the job to update.</param>
     /// <param name="newSchedule">The new schedule expression for the job.</param>
@@ -75,6 +77,17 @@ public interface IBackgroundJobService
     /// <exception cref="ArgumentException">Thrown when id is empty.</exception>
     /// <exception cref="InvalidOperationException">Thrown when the job is not found or cannot be updated.</exception>
     Task UpdateAsync(Guid id, string newSchedule, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically cancels a waiting background job and removes its scheduler entry after persistence commits.
+    /// Running and terminal jobs are left unchanged.
+    /// </summary>
+    /// <param name="id">The entity ID of the job to cancel.</param>
+    /// <param name="cancellationToken">Token to monitor for cancellation requests.</param>
+    /// <returns>The classified cancellation outcome.</returns>
+    Task<BackgroundJobCancellationResult> CancelWaitingAsync(
+        Guid id,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Deletes a scheduled background job.

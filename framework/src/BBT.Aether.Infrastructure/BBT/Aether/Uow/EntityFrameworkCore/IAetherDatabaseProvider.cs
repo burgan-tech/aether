@@ -1,4 +1,5 @@
 using System.Data.Common;
+using BBT.Aether.MultiSchema;
 using Microsoft.EntityFrameworkCore;
 
 namespace BBT.Aether.Uow.EntityFrameworkCore;
@@ -13,5 +14,14 @@ public interface IAetherDatabaseProvider
     DbConnection CreateConnection(string connectionString);
     void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,
         string schema, SchemaScopeState state);
+
+    /// <summary>
+    /// Applies a shared connection with access to the runtime schema accessor. The default keeps
+    /// providers compiled against the original four-argument contract source-compatible; providers
+    /// that need runtime schema checks can override this overload.
+    /// </summary>
+    void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,
+        string schema, SchemaScopeState state, ICurrentSchema currentSchema) =>
+        ApplyShared(builder, sharedConnection, schema, state);
     void ApplyConnectionString(DbContextOptionsBuilder builder, string connectionString);
 }
