@@ -25,9 +25,21 @@ namespace BBT.Aether.BackgroundJob;
 public class NpgsqlJobArmingLeaseStore<TDbContext>(
     IAetherDbContextProvider<TDbContext> dbContextProvider,
     ICurrentSchema currentSchema,
-    IClock clock) : IJobArmingLeaseStore
+    IClock clock,
+    BackgroundJobOptions? options) : IJobArmingLeaseStore
     where TDbContext : DbContext, IHasEfCoreBackgroundJobs
 {
+    /// <summary>
+    /// Backward-compatible constructor that preserves the former ambient-schema behavior.
+    /// </summary>
+    public NpgsqlJobArmingLeaseStore(
+        IAetherDbContextProvider<TDbContext> dbContextProvider,
+        ICurrentSchema currentSchema,
+        IClock clock)
+        : this(dbContextProvider, currentSchema, clock, null)
+    {
+    }
+
     /// <inheritdoc/>
     public async Task<IReadOnlyList<BackgroundJobArmingClaim>> ClaimBatchAsync(
         int batchSize,
@@ -35,13 +47,12 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
         TimeSpan leaseDuration,
         CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var entityType = dbContext.Model.FindEntityType(typeof(BackgroundJobInfo))!;
-        var tableName = entityType.GetTableName();
-        var schema = entityType.GetSchema();
-        var fullTableName = string.IsNullOrEmpty(schema)
-            ? $"\"{tableName}\""
-            : $"\"{schema}\".\"{tableName}\"";
+        var schema = currentSchema.Name
+            ?? throw new InvalidOperationException("Current schema is not set.");
+        var fullTableName = PostgreSqlRelationName.For(entityType, schema);
 
         var connection = dbContext.Database.GetDbConnection();
         var now = clock.UtcNow;
@@ -52,17 +63,6 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
             await connection.OpenAsync(cancellationToken);
 
         var dbTransaction = dbContext.Database.CurrentTransaction?.GetDbTransaction();
-
-        // SET LOCAL is transaction-scoped; Phase 1 always runs inside IsTransactional=true, so
-        // dbTransaction is guaranteed non-null here. If called outside a transaction SET LOCAL
-        // would silently widen to SET SESSION (connection pool leak) — callers must not do that.
-        if (string.IsNullOrEmpty(schema) && !string.IsNullOrEmpty(currentSchema.Name))
-        {
-            await using var setCmd = connection.CreateCommand();
-            setCmd.Transaction = dbTransaction;
-            setCmd.CommandText = $"SET LOCAL search_path TO \"{currentSchema.Name}\";";
-            await setCmd.ExecuteNonQueryAsync(cancellationToken);
-        }
 
         await using var command = connection.CreateCommand();
         command.Transaction = dbTransaction;
@@ -125,6 +125,13 @@ public class NpgsqlJobArmingLeaseStore<TDbContext>(
         }
 
         return claims;
+    }
+
+    private IDisposable BeginConfiguredSchemaScope()
+    {
+        return string.IsNullOrWhiteSpace(options?.Schema)
+            ? global::BBT.Aether.NullDisposable.Instance
+            : currentSchema.Change(options.Schema);
     }
 
     private static void AddParameter(DbCommand command, string name, object value)

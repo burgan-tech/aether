@@ -7,6 +7,7 @@ using BBT.Aether.Clock;
 using BBT.Aether.Domain.Entities;
 using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.Repositories;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -20,9 +21,21 @@ namespace BBT.Aether.BackgroundJob;
 /// </summary>
 public class EfCoreJobArmingLeaseStore<TDbContext>(
     IAetherDbContextProvider<TDbContext> dbContextProvider,
-    IClock clock) : IJobArmingLeaseStore
+    IClock clock,
+    BackgroundJobOptions options,
+    ICurrentSchema? currentSchema) : IJobArmingLeaseStore
     where TDbContext : DbContext, IHasEfCoreBackgroundJobs
 {
+    /// <summary>
+    /// Backward-compatible constructor that preserves the former ambient-schema behavior.
+    /// </summary>
+    public EfCoreJobArmingLeaseStore(
+        IAetherDbContextProvider<TDbContext> dbContextProvider,
+        IClock clock)
+        : this(dbContextProvider, clock, new BackgroundJobOptions { Schema = null }, null)
+    {
+    }
+
     /// <inheritdoc/>
     public async Task<IReadOnlyList<BackgroundJobArmingClaim>> ClaimBatchAsync(
         int batchSize,
@@ -30,6 +43,7 @@ public class EfCoreJobArmingLeaseStore<TDbContext>(
         TimeSpan leaseDuration,
         CancellationToken cancellationToken = default)
     {
+        using var schemaScope = BeginConfiguredSchemaScope();
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var now = clock.UtcNow;
         var armingUntil = now.Add(leaseDuration);
@@ -49,9 +63,13 @@ public class EfCoreJobArmingLeaseStore<TDbContext>(
         var claims = new List<BackgroundJobArmingClaim>(candidates.Count);
         foreach (var job in candidates)
         {
-            // Per-row atomic claim: only succeeds if still unclaimed
+            // Per-row atomic claim: re-check the complete eligibility predicate because cancellation
+            // or another state transition may have won after the candidate read.
             var affected = await dbContext.BackgroundJobs
                 .Where(j => j.Id == job.Id
+                            && (j.Status == BackgroundJobStatus.Pending
+                                || (j.Status == BackgroundJobStatus.Retrying
+                                    && j.NextRetryAt != null && j.NextRetryAt <= now))
                             && (j.ArmingToken == null || j.ArmingUntil < now))
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(j => j.ArmingToken, armingToken)
@@ -64,5 +82,12 @@ public class EfCoreJobArmingLeaseStore<TDbContext>(
         }
 
         return claims;
+    }
+
+    private IDisposable BeginConfiguredSchemaScope()
+    {
+        return currentSchema is null || string.IsNullOrWhiteSpace(options.Schema)
+            ? global::BBT.Aether.NullDisposable.Instance
+            : currentSchema.Change(options.Schema);
     }
 }

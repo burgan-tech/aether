@@ -164,8 +164,8 @@ public sealed class BackgroundJobService(
                 ambient.OnCompleted(_ => ArmNowAsync(handlerName, jobName, schedule, payloadBytes,
                     failurePolicyOptions, effectiveJobId, CancellationToken.None));
             logger.LogInformation(
-                "Enqueued Pending job '{HandlerName}'/'{JobName}' into ambient UoW. Id: {Id}",
-                handlerName, jobName, effectiveJobId);
+                "Enqueued {Status} job '{HandlerName}'/'{JobName}' into ambient UoW. Id: {Id}",
+                jobInfo.Status, handlerName, jobName, effectiveJobId);
             activity?.SetStatus(ActivityStatusCode.Ok);
             return effectiveJobId;
         }
@@ -225,7 +225,8 @@ public sealed class BackgroundJobService(
             catch (Exception rollbackEx)
             {
                 logger.LogError(rollbackEx,
-                    "Failed to roll back job '{JobName}' to Pending; arming poller will arm it on next visibility-timeout pass",
+                    "Failed to roll back job '{JobName}' to Pending; row may remain Scheduled without a scheduler entry, " +
+                    "the arming poller will not claim it, and reconciliation or manual intervention is required",
                     jobName);
                 if (rollbackUow != null)
                     await rollbackUow.RollbackAsync(ct);
@@ -257,23 +258,22 @@ public sealed class BackgroundJobService(
 
         logger.LogInformation("Updating job with entity id '{Id}' to new schedule '{NewSchedule}'", id, newSchedule);
 
+        if (jobStore is not IJobRescheduleStore rescheduleStore)
+        {
+            var capabilityException = new NotSupportedException(
+                $"Job store '{jobStore.GetType().Name}' does not support atomic waiting-job rescheduling.");
+            RecordException(activity, capabilityException);
+            throw capabilityException;
+        }
+
+        var kind = InferKind(newSchedule);
+        var nextRetryAt = clock.UtcNow;
+
         if (uowManager.Current is { })
         {
-            var jobInfo = await jobStore.GetAsync(id, cancellationToken);
-            if (jobInfo == null)
-            {
-                var notFoundEx = new InvalidOperationException($"Job with id '{id}' not found.");
-                RecordException(activity, notFoundEx);
-                throw notFoundEx;
-            }
-
-            activity?.SetTag("job.handler_name", jobInfo.HandlerName);
-            activity?.SetTag("job.name", jobInfo.JobName);
-            jobInfo.ExpressionValue = newSchedule;
-            jobInfo.Kind = InferKind(newSchedule);
-            jobInfo.Status = BackgroundJobStatus.Pending;
-            jobInfo.NextRetryAt = clock.UtcNow;
-            await jobStore.SaveAsync(jobInfo, cancellationToken);
+            var result = await rescheduleStore.TryRescheduleWaitingAsync(
+                id, newSchedule, kind, nextRetryAt, cancellationToken);
+            EnsureRescheduled(id, result, activity);
             logger.LogInformation("Successfully updated job with entity id '{Id}'", id);
             activity?.SetStatus(ActivityStatusCode.Ok);
             return;
@@ -283,28 +283,9 @@ public sealed class BackgroundJobService(
             new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
         try
         {
-            // Load job from store
-            var jobInfo = await jobStore.GetAsync(id, cancellationToken);
-            if (jobInfo == null)
-            {
-                throw new InvalidOperationException($"Job with id '{id}' not found.");
-            }
-
-            activity?.SetTag("job.handler_name", jobInfo.HandlerName);
-            activity?.SetTag("job.name", jobInfo.JobName);
-
-            // Reschedule by handing the row back to the arming poller: set the new schedule, recompute the
-            // kind, mark it Pending and due now. The poller re-arms it in the scheduler (overwrite: true,
-            // so the new schedule replaces the old). We do NOT call the scheduler here and we do NOT touch
-            // Payload — it already holds the original envelope with the original schema context, which the
-            // poller reuses. This avoids the previous bugs: wrong-schema re-wrap, double-wrapping the
-            // payload, losing the failure policy, and the delete/reschedule race.
-            jobInfo.ExpressionValue = newSchedule;
-            jobInfo.Kind = InferKind(newSchedule);
-            jobInfo.Status = BackgroundJobStatus.Pending;
-            jobInfo.NextRetryAt = clock.UtcNow;
-
-            await jobStore.SaveAsync(jobInfo, cancellationToken);
+            var result = await rescheduleStore.TryRescheduleWaitingAsync(
+                id, newSchedule, kind, nextRetryAt, cancellationToken);
+            EnsureRescheduled(id, result, activity);
 
             // Commit transaction
             await uow.CommitAsync(cancellationToken);
@@ -318,6 +299,111 @@ public sealed class BackgroundJobService(
             RecordException(activity, ex);
             await uow.RollbackAsync(cancellationToken);
             throw;
+        }
+    }
+
+    private static void EnsureRescheduled(
+        Guid id,
+        BackgroundJobRescheduleResult result,
+        Activity? activity)
+    {
+        if (result.Succeeded)
+            return;
+
+        var exception = result.CurrentStatus is null
+            ? new InvalidOperationException($"Job with id '{id}' not found.")
+            : new InvalidOperationException(
+                $"Job with id '{id}' cannot be rescheduled from status '{result.CurrentStatus}'. " +
+                "Only Pending, Scheduled, or Retrying jobs can be rescheduled.");
+        RecordException(activity, exception);
+        throw exception;
+    }
+
+    /// <inheritdoc/>
+    public async Task<BackgroundJobCancellationResult> CancelWaitingAsync(
+        Guid id,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+            throw new ArgumentException("Id cannot be empty.", nameof(id));
+
+        if (uowManager.Current is { } ambient)
+        {
+            var existing = await jobStore.GetCancellationSnapshotAsync(id, cancellationToken);
+            if (existing is null)
+                return BackgroundJobCancellationResult.NotFound;
+
+            var ambientResult = await TryCancelAndClassifyAsync(id, cancellationToken);
+            if (ambientResult == BackgroundJobCancellationResult.Cancelled)
+            {
+                ambient.OnCompleted(_ => TryDeleteSchedulerEntryAsync(
+                    existing.HandlerName, existing.JobName, CancellationToken.None));
+            }
+
+            return ambientResult;
+        }
+
+        BackgroundJobCancellationSnapshot? snapshot;
+        BackgroundJobCancellationResult result;
+        await using (var uow = uowManager.Begin(new UnitOfWorkOptions
+                     {
+                         Scope = UnitOfWorkScopeOption.RequiresNew,
+                         IsTransactional = true
+                     }))
+        {
+            snapshot = await jobStore.GetCancellationSnapshotAsync(id, cancellationToken);
+            result = snapshot is null
+                ? BackgroundJobCancellationResult.NotFound
+                : await TryCancelAndClassifyAsync(id, cancellationToken);
+            await uow.CommitAsync(cancellationToken);
+        }
+
+        if (result == BackgroundJobCancellationResult.Cancelled)
+            await TryDeleteSchedulerEntryAsync(
+                snapshot!.HandlerName, snapshot.JobName, CancellationToken.None);
+
+        return result;
+    }
+
+    private async Task<BackgroundJobCancellationResult> TryCancelAndClassifyAsync(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            if (await jobStore.TryCancelWaitingAsync(id, clock.UtcNow, cancellationToken))
+                return BackgroundJobCancellationResult.Cancelled;
+
+            var current = await jobStore.GetCancellationSnapshotAsync(id, cancellationToken);
+            if (current is null)
+                return BackgroundJobCancellationResult.NotFound;
+            if (current.Status == BackgroundJobStatus.Running)
+                return BackgroundJobCancellationResult.SkippedRunning;
+            if (current.Status is BackgroundJobStatus.Completed
+                or BackgroundJobStatus.Failed
+                or BackgroundJobStatus.Cancelled)
+                return BackgroundJobCancellationResult.AlreadyTerminal;
+            // A concurrent waiting-to-waiting mutation won. Retry the atomic update once.
+        }
+
+        throw new InvalidOperationException(
+            $"Unable to classify waiting cancellation for job '{id}' after one retry.");
+    }
+
+    private async Task TryDeleteSchedulerEntryAsync(
+        string handlerName,
+        string jobName,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await jobScheduler.DeleteAsync(handlerName, jobName, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "Background job '{JobName}' was cancelled in persistence but could not be deleted from the scheduler",
+                jobName);
         }
     }
 

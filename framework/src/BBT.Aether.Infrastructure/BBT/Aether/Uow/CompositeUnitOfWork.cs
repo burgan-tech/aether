@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.Domain.Services;
 using BBT.Aether.Events;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow.EntityFrameworkCore;
 using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
@@ -15,12 +16,16 @@ using Microsoft.Extensions.DependencyInjection;
 namespace BBT.Aether.Uow;
 
 /// <summary>
-/// Root unit of work backed by a single shared <see cref="DbConnection"/> and a single
+/// Root unit of work backed by a single shared <see cref="DbConnection"/> and, when
+/// <see cref="UnitOfWorkOptions.IsTransactional"/> is <see langword="true"/>, a single shared
 /// <see cref="DbTransaction"/>. Hands out lazily-created schema-bound <see cref="DbContext"/>
-/// instances keyed by (DbContextType, Schema). Each created context enlists on the shared
-/// transaction via <c>UseTransactionAsync</c> and is bound to its schema by the configured
-/// database provider, so schema isolation is a provider concern.
-/// Dispatches domain events after successful commit, preserving the outbox / direct-publish pipeline.
+/// instances keyed by (DbContextType, Schema). Each created context enlists via
+/// <c>UseTransactionAsync</c> only when the shared transaction exists and is bound to its schema
+/// by the configured database provider, so schema isolation is a provider concern.
+/// Domain events remain buffered until <see cref="CommitAsync"/>. Transactional roots preserve
+/// the outbox / direct-publish commit ordering; non-transactional roots dispatch during
+/// <see cref="CommitAsync"/>, without atomicity between auto-committed business writes and event
+/// delivery.
 /// </summary>
 public sealed class CompositeUnitOfWork(
     IServiceProvider serviceProvider,
@@ -29,19 +34,22 @@ public sealed class CompositeUnitOfWork(
     : IEfCoreUnitOfWork, ITransactionalRoot
 {
     private readonly Dictionary<DbContextKey, DbContext> _contexts = new();
-    private readonly List<DomainEventEnvelope> _events = new();
+    private readonly List<PendingDomainEvent> _events = new();
     private readonly List<Func<IUnitOfWork, Task>> _completedHandlers = new();
     private readonly List<Func<IUnitOfWork, Exception?, Task>> _failedHandlers = new();
     private readonly List<Action<IUnitOfWork>> _disposedHandlers = new();
 
     private readonly SchemaScopeState _schemaState = new();
+    private readonly ICurrentSchema? _currentSchema = serviceProvider.GetService<ICurrentSchema>();
 
     private DbConnection? _connection;
     private DbTransaction? _transaction;
     private UnitOfWorkOptions _options = new();
+    private bool _effectiveIsTransactional;
     private bool _isInitialized;
     private bool _isDisposed;
     private bool _failedHandlersInvoked;
+    private bool _transactionCommitted;
     private Exception? _exception;
 
     /// <summary>
@@ -67,6 +75,12 @@ public sealed class CompositeUnitOfWork(
     /// <inheritdoc />
     public bool IsDisposed => _isDisposed;
 
+    /// <summary>
+    /// Gets the transaction mode captured when this root was initialized. Later mutations of the
+    /// caller-owned options object cannot change the root's transaction semantics.
+    /// </summary>
+    internal bool EffectiveIsTransactional => _effectiveIsTransactional;
+
     /// <inheritdoc />
     public UnitOfWorkOptions? Options { get; private set; }
 
@@ -74,9 +88,10 @@ public sealed class CompositeUnitOfWork(
     public IUnitOfWork? Outer { get; private set; }
 
     /// <summary>
-    /// Initializes the unit of work. Does NOT open the connection here — the connection and
-    /// transaction are opened lazily on the first <see cref="GetDbContextAsync{TDbContext}"/>
-    /// call, so an empty unit of work costs nothing.
+    /// Initializes the unit of work. Does NOT open the connection here — the connection is opened
+    /// lazily on the first <see cref="GetDbContextAsync{TDbContext}"/> call. A transaction is opened
+    /// at that point only when <see cref="UnitOfWorkOptions.IsTransactional"/> is
+    /// <see langword="true"/>, so an empty unit of work costs nothing.
     /// </summary>
     public Task InitializeAsync(UnitOfWorkOptions options, CancellationToken cancellationToken = default)
     {
@@ -86,7 +101,8 @@ public sealed class CompositeUnitOfWork(
 
     /// <summary>
     /// Synchronously initializes the unit of work. Because initialization does no real async work
-    /// (it only sets fields; the connection/transaction open lazily on first DbContext creation),
+    /// (it only sets fields; the connection and optional transaction open lazily on first
+    /// DbContext creation),
     /// this lets a caller begin a unit of work in its own execution frame — which is required for
     /// ambient (AsyncLocal) propagation to flow into the caller's continuations.
     /// </summary>
@@ -97,6 +113,7 @@ public sealed class CompositeUnitOfWork(
             throw new InvalidOperationException("CompositeUnitOfWork has already been initialized.");
         }
 
+        _effectiveIsTransactional = options.IsTransactional;
         _options = options;
         Options = options;
         _isInitialized = true;
@@ -105,6 +122,8 @@ public sealed class CompositeUnitOfWork(
     /// <inheritdoc />
     public void SetOuter(IUnitOfWork? outer)
     {
+        ThrowIfTerminal("change the outer scope of");
+        UnitOfWorkOuterChainGuard.Validate(this, outer);
         Outer = outer;
     }
 
@@ -113,10 +132,19 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     public void Abort()
     {
+        if (IsCompleted || _isDisposed)
+        {
+            return;
+        }
+
         IsAborted = true;
     }
 
-    /// <inheritdoc />
+    /// <summary>
+    /// Gets or creates the context bound to <paramref name="schema"/>. The first context opens the
+    /// shared connection and, for a transactional root, the shared transaction. The context
+    /// enlists only when that transaction exists.
+    /// </summary>
     public async Task<TDbContext> GetDbContextAsync<TDbContext>(string schema, CancellationToken cancellationToken = default)
         where TDbContext : DbContext
     {
@@ -147,7 +175,7 @@ public sealed class CompositeUnitOfWork(
             // Reset schema state whenever a fresh connection is established.
             _schemaState.Current = null;
 
-            if (_options.IsTransactional)
+            if (_effectiveIsTransactional)
             {
                 _transaction = await _connection.BeginTransactionAsync(
                     _options.IsolationLevel ?? IsolationLevel.ReadCommitted, cancellationToken);
@@ -164,7 +192,7 @@ public sealed class CompositeUnitOfWork(
 
         if (context is AetherDbContext<TDbContext> aether)
         {
-            aether.LocalEventEnqueuer = new BufferEnqueuer(_events);
+            aether.LocalEventEnqueuer = new BufferEnqueuer(schema, _events);
         }
 
         _contexts[key] = context;
@@ -172,15 +200,15 @@ public sealed class CompositeUnitOfWork(
     }
 
     /// <summary>
-    /// Ensures that the shared transaction is started. In the new model the transaction is
-    /// always opened together with the connection on first DbContext creation, so this is a
-    /// no-op once a context has been created. No-op if not initialized.
+    /// Preserves the compatibility contract for callers that request a transaction. Transactional
+    /// roots open their shared transaction with the connection on first DbContext creation;
+    /// non-transactional roots are not escalated. This method is therefore a no-op.
     /// </summary>
     public Task EnsureTransactionAsync(IsolationLevel? isolationLevel = null,
         CancellationToken cancellationToken = default)
     {
-        // The connection and transaction are opened lazily and together on the first
-        // GetDbContextAsync call. There is nothing to escalate here.
+        // A transactional root opens its transaction lazily with the connection. A
+        // non-transactional root deliberately has nothing to escalate here.
         return Task.CompletedTask;
     }
 
@@ -190,23 +218,28 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
     {
+        ThrowIfTerminal("save changes in");
+
         if (!_isInitialized)
         {
             return;
         }
 
-        foreach (var context in _contexts.Values)
+        foreach (var (key, context) in _contexts)
         {
-            if (context.ChangeTracker.HasChanges())
-            {
+            if (!context.ChangeTracker.HasChanges()) continue;
+
+            using (CurrentSchema.Change(key.Schema))
                 await context.SaveChangesAsync(cancellationToken);
-            }
         }
     }
 
     /// <summary>
-    /// Commits the shared transaction, then dispatches domain events.
-    /// Throws if the unit of work has been aborted. No-op if not initialized.
+    /// Completes this root using its configured transaction and event-dispatch strategy. A
+    /// transactional root commits its shared transaction with the required outbox/direct-publish
+    /// ordering. A non-transactional root dispatches buffered events only from this method, after
+    /// pending business changes have auto-committed; those writes and event delivery are not
+    /// atomic. Throws if the unit of work has been aborted. No-op if not initialized.
     /// </summary>
     public async Task CommitAsync(CancellationToken cancellationToken = default)
     {
@@ -223,13 +256,27 @@ public sealed class CompositeUnitOfWork(
 
         try
         {
-            await SaveChangesAsync(cancellationToken);
+            // A PublishWithFallback retry can enter here after the physical database transaction
+            // committed but delivery and its fallback both failed. At that point CommitAsync is a
+            // delivery retry only: the completed transaction must never be saved/committed again.
+            if (!_transactionCommitted)
+                await SaveChangesAsync(cancellationToken);
+
+            if (_events.Count > 0 && eventDispatcher is null)
+            {
+                throw new InvalidOperationException(
+                    "Cannot commit pending domain events because IDomainEventDispatcher is not registered.");
+            }
+
+            var strategy = domainEventOptions?.DispatchStrategy ?? DomainEventDispatchStrategy.AlwaysUseOutbox;
 
             // There may be no connection/transaction if nothing was read or written.
-            if (_transaction is not null)
+            if (_transactionCommitted)
             {
-                var strategy = domainEventOptions?.DispatchStrategy ?? DomainEventDispatchStrategy.AlwaysUseOutbox;
-
+                await PublishWithFallbackAsync(cancellationToken);
+            }
+            else if (_transaction is not null)
+            {
                 if (strategy == DomainEventDispatchStrategy.AlwaysUseOutbox)
                 {
                     await CommitWithOutboxAsync(cancellationToken);
@@ -239,13 +286,19 @@ public sealed class CompositeUnitOfWork(
                     await CommitWithDirectPublishAsync(cancellationToken);
                 }
             }
-            else if ((domainEventOptions?.DispatchNonTransactionalEventsToOutbox ?? false)
-                     && _events.Count > 0
-                     && eventDispatcher is not null)
+            else if (_events.Count > 0)
             {
-                await CommitWithoutTransactionAsync(cancellationToken);
+                if (strategy == DomainEventDispatchStrategy.AlwaysUseOutbox)
+                {
+                    await CommitWithoutTransactionAsync(cancellationToken);
+                }
+                else
+                {
+                    await PublishWithFallbackAsync(cancellationToken);
+                }
             }
 
+            _exception = null;
             IsCompleted = true;
             await InvokeCompletedHandlersAsync();
         }
@@ -262,23 +315,18 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     private async Task CommitWithOutboxAsync(CancellationToken cancellationToken)
     {
-        if (_events.Any() && eventDispatcher != null)
+        if (_events.Count > 0)
         {
-            await eventDispatcher.DispatchEventsAsync(_events, cancellationToken);
-
-            // Persist outbox rows written by the dispatcher into the shared transaction.
-            await SaveChangesAsync(cancellationToken);
-
-            _events.Clear();
+            await StageAndSaveOutboxEventsAsync(cancellationToken);
         }
 
         await _transaction!.CommitAsync(cancellationToken);
+        _events.Clear();
     }
 
     /// <summary>
     /// Dispatches buffered domain events for a non-transactional unit of work (no shared
-    /// transaction was opened). Enabled only via
-    /// <see cref="AetherDomainEventOptions.DispatchNonTransactionalEventsToOutbox"/>.
+    /// transaction was opened).
     /// <para>
     /// The business data has already been durably persisted by the earlier (auto-save) writes, so
     /// there is nothing to co-commit here: the events are dispatched with the configured
@@ -290,13 +338,92 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     private async Task CommitWithoutTransactionAsync(CancellationToken cancellationToken)
     {
-        await eventDispatcher!.DispatchEventsAsync(_events, cancellationToken);
+        // Auto-commit makes each contiguous schema run independently durable. Remove a run from
+        // the retry buffer immediately after its outbox rows save successfully; if a later run
+        // fails, retry resumes there without duplicating already-durable earlier runs and still
+        // preserves A1,B1,A2 ordering.
+        var allRuns = GetEventRuns();
+        var processedEventCount = 0;
+        try
+        {
+            foreach (var run in allRuns)
+            {
+                await StageAndSaveEventRunAsync(run, cancellationToken);
+                processedEventCount += run.Events.Count;
+            }
+            _events.Clear();
+        }
+        catch
+        {
+            if (processedEventCount > 0)
+            {
+                _events.RemoveRange(0, processedEventCount);
+            }
+            throw;
+        }
+    }
 
-        // Persist any outbox rows written by the dispatcher. Without a shared transaction each
-        // SaveChanges auto-commits; a single outbox INSERT is atomic on its own.
-        await SaveChangesAsync(cancellationToken);
+    private async Task StageAndSaveEventRunAsync(
+        (string Schema, List<PendingDomainEvent> Events) run,
+        CancellationToken cancellationToken)
+    {
+        var trackedEntityStates = CaptureTrackedEntityStates();
+        try
+        {
+            using (CurrentSchema.Change(run.Schema))
+                await eventDispatcher!.DispatchEventsAsync(
+                    run.Events.Select(x => x.Envelope).ToList(), cancellationToken);
+            await SaveChangesAsync(cancellationToken);
+        }
+        catch
+        {
+            DetachNewOutboxStagingEntities(trackedEntityStates);
+            throw;
+        }
+    }
 
-        _events.Clear();
+    private async Task StageAndSaveOutboxEventsAsync(CancellationToken cancellationToken)
+    {
+        var trackedEntityStates = CaptureTrackedEntityStates();
+        try
+        {
+            await ForEachEventRunAsync(eventDispatcher!.DispatchEventsAsync, cancellationToken);
+
+            // Persist outbox rows written by the dispatcher. In a transactional UoW this remains
+            // part of the shared transaction; without one, the context save auto-commits.
+            await SaveChangesAsync(cancellationToken);
+        }
+        catch
+        {
+            DetachNewOutboxStagingEntities(trackedEntityStates);
+            throw;
+        }
+    }
+
+    private Dictionary<DbContext, List<(object Entity, EntityState State)>> CaptureTrackedEntityStates() =>
+        _contexts.Values.ToDictionary(
+            context => context,
+            context => context.ChangeTracker.Entries()
+                .Select(entry => (entry.Entity, entry.State))
+                .ToList());
+
+    private static void DetachNewOutboxStagingEntities(
+        IReadOnlyDictionary<DbContext, List<(object Entity, EntityState State)>> trackedEntityStates)
+    {
+        foreach (var (context, previousEntries) in trackedEntityStates)
+        {
+            var newOutboxEntries = context.ChangeTracker.Entries()
+                .Where(entry =>
+                    entry.State == EntityState.Added &&
+                    entry.Entity is Domain.Events.OutboxMessage &&
+                    previousEntries.All(previous => !ReferenceEquals(previous.Entity, entry.Entity)))
+                .ToList();
+
+            foreach (var entry in newOutboxEntries)
+            {
+                entry.State = EntityState.Detached;
+            }
+        }
     }
 
     /// <summary>
@@ -305,20 +432,23 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     private async Task CommitWithDirectPublishAsync(CancellationToken cancellationToken)
     {
-        // Snapshot events before commit; the contexts will be committed and cleared.
-        var allEvents = _events.ToList();
-
         // Step 1: Commit the shared transaction (business data is now persisted).
         await _transaction!.CommitAsync(cancellationToken);
+        _transactionCommitted = true;
 
         // Step 2: Publish events directly after commit.
-        if (allEvents.Any() && eventDispatcher != null)
+        await PublishWithFallbackAsync(cancellationToken);
+    }
+
+    private async Task PublishWithFallbackAsync(CancellationToken cancellationToken)
+    {
+        foreach (var run in GetEventRuns())
         {
+            using var schemaScope = CurrentSchema.Change(run.Schema);
             try
             {
-                await eventDispatcher.PublishDirectlyAsync(allEvents, cancellationToken);
-
-                _events.Clear();
+                await eventDispatcher!.PublishDirectlyAsync(
+                    run.Events.Select(x => x.Envelope).ToList(), cancellationToken);
             }
             catch (Exception ex)
             {
@@ -326,9 +456,9 @@ public sealed class CompositeUnitOfWork(
                 // in a new scope. This ensures business data is not lost even if publish fails.
                 try
                 {
-                    await eventDispatcher.WriteToOutboxInNewScopeAsync(allEvents, cancellationToken);
-
-                    _events.Clear();
+                    await eventDispatcher!.WriteToOutboxInNewScopeAsync(
+                        run.Schema,
+                        run.Events.Select(x => x.Envelope).ToList(), cancellationToken);
                 }
                 catch (Exception outboxEx)
                 {
@@ -340,12 +470,47 @@ public sealed class CompositeUnitOfWork(
                         ex, outboxEx);
                 }
             }
+
+            foreach (var pendingEvent in run.Events)
+                _events.Remove(pendingEvent);
         }
     }
 
+    private async Task ForEachEventRunAsync(
+        Func<IReadOnlyList<DomainEventEnvelope>, CancellationToken, Task> action,
+        CancellationToken cancellationToken)
+    {
+        foreach (var run in GetEventRuns())
+        {
+            using (CurrentSchema.Change(run.Schema))
+                await action(run.Events.Select(x => x.Envelope).ToList(), cancellationToken);
+        }
+    }
+
+    private List<(string Schema, List<PendingDomainEvent> Events)> GetEventRuns()
+    {
+        var runs = new List<(string Schema, List<PendingDomainEvent> Events)>();
+        foreach (var pendingEvent in _events)
+        {
+            if (runs.Count == 0 ||
+                !string.Equals(runs[^1].Schema, pendingEvent.Schema, StringComparison.Ordinal))
+            {
+                runs.Add((pendingEvent.Schema, new List<PendingDomainEvent>()));
+            }
+
+            runs[^1].Events.Add(pendingEvent);
+        }
+
+        return runs;
+    }
+
+    private ICurrentSchema CurrentSchema => _currentSchema
+        ?? throw new InvalidOperationException(
+            "Cannot save or dispatch schema-bound data because ICurrentSchema is not registered.");
+
     /// <summary>
-    /// Rolls back the shared transaction. Exceptions during rollback are swallowed.
-    /// No-op if not initialized.
+    /// Rolls back the shared transaction when one exists. A non-transactional root has no database
+    /// transaction to roll back. Exceptions during rollback are swallowed. No-op if not initialized.
     /// </summary>
     public async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
@@ -373,8 +538,8 @@ public sealed class CompositeUnitOfWork(
     }
 
     /// <summary>
-    /// Disposes the unit of work, rolling back if not completed, then disposing all
-    /// materialized contexts, the transaction, and the connection.
+    /// Disposes the unit of work, rolling back an existing transaction if not completed, then
+    /// disposing all materialized contexts, the optional transaction, and the connection.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -465,10 +630,11 @@ public sealed class CompositeUnitOfWork(
     }
 
     /// <summary>
-    /// Registers a handler to be invoked after successful commit.
+    /// Registers a handler to be invoked after the unit of work completes successfully.
     /// </summary>
     public IDisposable OnCompleted(Func<IUnitOfWork, Task> handler)
     {
+        ThrowIfCannotRegisterHandler();
         _completedHandlers.Add(handler);
         return new AetherSubscription<Func<IUnitOfWork, Task>>(_completedHandlers, handler);
     }
@@ -478,6 +644,7 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     public IDisposable OnFailed(Func<IUnitOfWork, Exception?, Task> handler)
     {
+        ThrowIfCannotRegisterHandler();
         _failedHandlers.Add(handler);
         return new AetherSubscription<Func<IUnitOfWork, Exception?, Task>>(_failedHandlers, handler);
     }
@@ -487,8 +654,27 @@ public sealed class CompositeUnitOfWork(
     /// </summary>
     public IDisposable OnDisposed(Action<IUnitOfWork> handler)
     {
+        ThrowIfCannotRegisterHandler();
         _disposedHandlers.Add(handler);
         return new AetherSubscription<Action<IUnitOfWork>>(_disposedHandlers, handler);
+    }
+
+    private void ThrowIfCannotRegisterHandler()
+    {
+        if (IsCompleted || _isDisposed)
+        {
+            throw new InvalidOperationException(
+                "Cannot register handlers on a completed or disposed unit of work.");
+        }
+    }
+
+    private void ThrowIfTerminal(string operation)
+    {
+        if (IsCompleted || _isDisposed)
+        {
+            throw new InvalidOperationException(
+                $"Cannot {operation} a completed or disposed unit of work.");
+        }
     }
 
     private async Task InvokeCompletedHandlersAsync()
@@ -552,15 +738,16 @@ public sealed class CompositeUnitOfWork(
     /// Routes events collected by a DbContext during SaveChanges into the unit of work's
     /// shared event buffer, deduplicating by reference.
     /// </summary>
-    private sealed class BufferEnqueuer(List<DomainEventEnvelope> buffer) : ILocalTransactionEventEnqueuer
+    private sealed class BufferEnqueuer(string schema, List<PendingDomainEvent> buffer)
+        : ILocalTransactionEventEnqueuer
     {
         public void EnqueueEvents(IEnumerable<DomainEventEnvelope> events)
         {
             foreach (var evt in events)
             {
-                if (!buffer.Contains(evt))
+                if (buffer.All(x => !ReferenceEquals(x.Envelope, evt)))
                 {
-                    buffer.Add(evt);
+                    buffer.Add(new PendingDomainEvent(schema, evt));
                 }
             }
         }

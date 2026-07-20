@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -64,6 +65,9 @@ public sealed class DbContextConfiguratorTests(PostgresFixture fx)
 
     private sealed class MinimalServiceProvider : IServiceProvider
     {
-        public object? GetService(Type serviceType) => null;
+        private readonly ICurrentSchema _currentSchema = new StaticCurrentSchema("public");
+
+        public object? GetService(Type serviceType) =>
+            serviceType == typeof(ICurrentSchema) ? _currentSchema : null;
     }
 }

@@ -17,6 +17,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     private readonly IUnitOfWork? _previousAmbient;
     private readonly bool _ownsRoot;
     private IUnitOfWork? _outer;
+    private bool _participantCompleted;
     private bool _isDisposed;
 
     /// <param name="root">The composite unit of work this scope delegates to.</param>
@@ -36,6 +37,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
         _accessor = accessor;
         _ownsRoot = ownsRoot;
         _previousAmbient = accessor.Current;
+        _outer = _previousAmbient;
 
         // Set this scope as the ambient unit of work
         accessor.Current = this;
@@ -54,26 +56,51 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     public bool IsAborted => _root.IsAborted;
 
     /// <inheritdoc />
-    public bool IsCompleted => _root.IsCompleted;
+    public bool IsCompleted => _ownsRoot ? _root.IsCompleted : _participantCompleted;
 
     /// <inheritdoc />
     public bool IsDisposed => _isDisposed;
 
     /// <summary>
-    /// Gets the root composite unit of work.
-    /// Made public to allow aspects to access the root for transaction escalation.
+    /// Gets the root composite unit of work for manager-owned participant coordination.
     /// </summary>
-    public CompositeUnitOfWork Root => _root;
+    internal CompositeUnitOfWork SharedRoot => _root;
+
+    /// <summary>
+    /// Gets the root composite unit of work for an owning scope.
+    /// </summary>
+    /// <remarks>
+    /// Retained for source and binary compatibility. A participating <c>Required</c> scope cannot
+    /// expose the shared root because doing so would bypass its logical commit/rollback boundary.
+    /// </remarks>
+    [Obsolete("Direct root access is supported only for owning scopes. Use IUnitOfWork APIs instead.")]
+    public CompositeUnitOfWork Root => _ownsRoot
+        ? _root
+        : throw new InvalidOperationException(
+            "A participating Required unit of work is not an owning scope and cannot expose the shared root.");
+
+    /// <summary>
+    /// Gets whether the shared root can no longer be used, independently of this participant's
+    /// local completion state.
+    /// </summary>
+    internal bool IsRootTerminal => _root.IsCompleted || _root.IsDisposed;
 
     /// <inheritdoc />
     public void SetOuter(IUnitOfWork? outer)
     {
+        ThrowIfCannotWork();
+        UnitOfWorkOuterChainGuard.Validate(this, outer);
         _outer = outer;
     }
 
     /// <inheritdoc />
     public void Abort()
     {
+        if (!_ownsRoot && (_participantCompleted || _isDisposed || IsRootTerminal))
+        {
+            return;
+        }
+
         _root.Abort();
     }
 
@@ -81,12 +108,15 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     public Task<TDbContext> GetDbContextAsync<TDbContext>(string schema, CancellationToken cancellationToken = default)
         where TDbContext : DbContext
     {
+        ThrowIfCannotWork();
         return _root.GetDbContextAsync<TDbContext>(schema, cancellationToken);
     }
 
     /// <inheritdoc />
     public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
     {
+        ThrowIfCannotWork();
+
         // Delegate to root
         await _root.SaveChangesAsync(cancellationToken);
     }
@@ -94,14 +124,47 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public async Task CommitAsync(CancellationToken cancellationToken = default)
     {
-        await _root.CommitAsync(cancellationToken);
+        if (!_ownsRoot && (_participantCompleted || _isDisposed || IsRootTerminal))
+        {
+            return;
+        }
+
+        if (_ownsRoot)
+        {
+            await _root.CommitAsync(cancellationToken);
+        }
+        else
+        {
+            _participantCompleted = true;
+        }
     }
 
     /// <inheritdoc />
     public async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
-        // Delegate to root
-        await _root.RollbackAsync(cancellationToken);
+        if (!_ownsRoot && (_participantCompleted || _isDisposed || IsRootTerminal))
+        {
+            return;
+        }
+
+        if (_ownsRoot)
+        {
+            await _root.RollbackAsync(cancellationToken);
+        }
+        else
+        {
+            _root.Abort();
+            _participantCompleted = true;
+        }
+    }
+
+    private void ThrowIfCannotWork()
+    {
+        if (_isDisposed || IsRootTerminal || (!_ownsRoot && _participantCompleted))
+        {
+            throw new InvalidOperationException(
+                "Cannot perform work in a completed or disposed unit of work.");
+        }
     }
 
     /// <inheritdoc />
@@ -130,6 +193,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public IDisposable OnCompleted(Func<IUnitOfWork, Task> handler)
     {
+        ThrowIfCannotRegisterHandler();
         // Forward to root so hooks fire once when root completes
         return _root.OnCompleted(handler);
     }
@@ -137,6 +201,7 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public IDisposable OnFailed(Func<IUnitOfWork, Exception?, Task> handler)
     {
+        ThrowIfCannotRegisterHandler();
         // Forward to root so hooks fire once when root fails
         return _root.OnFailed(handler);
     }
@@ -144,8 +209,17 @@ public sealed class UnitOfWorkScope : IEfCoreUnitOfWork
     /// <inheritdoc />
     public IDisposable OnDisposed(Action<IUnitOfWork> handler)
     {
+        ThrowIfCannotRegisterHandler();
         // Forward to root so hooks fire once when root is disposed
         return _root.OnDisposed(handler);
     }
-}
 
+    private void ThrowIfCannotRegisterHandler()
+    {
+        if (_isDisposed || IsRootTerminal || (!_ownsRoot && _participantCompleted))
+        {
+            throw new InvalidOperationException(
+                "Cannot register handlers on a completed or disposed unit of work.");
+        }
+    }
+}

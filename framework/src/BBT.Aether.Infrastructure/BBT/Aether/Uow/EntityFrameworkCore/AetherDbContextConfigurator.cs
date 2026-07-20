@@ -1,6 +1,8 @@
 using System;
 using System.Data.Common;
+using BBT.Aether.MultiSchema;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace BBT.Aether.Uow.EntityFrameworkCore;
 
@@ -18,7 +20,12 @@ public sealed class AetherDbContextConfigurator<TDbContext>(
     {
         var builder = new DbContextOptionsBuilder<TDbContext>();
         configure(serviceProvider, builder);
-        provider.ApplyShared(builder, sharedConnection, schema, state);
+        provider.ApplyShared(
+            builder,
+            sharedConnection,
+            schema,
+            state,
+            serviceProvider.GetRequiredService<ICurrentSchema>());
         return builder.Options;
     }
 }

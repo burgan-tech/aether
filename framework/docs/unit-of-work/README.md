@@ -3,10 +3,11 @@
 ## Overview
 
 A Unit of Work (UoW) groups all database work for one logical operation so it commits or
-rolls back together. In Aether the UoW is backed by a **single shared `DbConnection` and a
-single `DbTransaction`**: every `DbContext` it hands out enlists on that one transaction.
-This is what makes multi-schema work atomic — writes to several schemas in one UoW commit as a
-unit. See [Multi-Schema Support](../multi-schema/README.md) for the schema-isolation details.
+rolls back together. In Aether the UoW is backed by a **single shared `DbConnection`** and,
+when transactional, a single `DbTransaction`: every
+`DbContext` it hands out uses that shared boundary. Transactional multi-schema writes commit
+atomically. A non-transactional UoW has no business/outbox atomicity guarantee. See
+[Multi-Schema Support](../multi-schema/README.md) for the schema-isolation details.
 
 ### Database providers
 
@@ -61,7 +62,9 @@ await using (var uow = unitOfWorkManager.Begin(
 ```
 
 Contexts are cached by `(DbContextType, Schema)`, so requesting the same pair twice returns
-the same instance.
+the same instance. Repository/service instances may be reused after `ICurrentSchema.Change`,
+because repository operations resolve the appropriate context. A resolved `DbContext`,
+`DbSet`, or `IQueryable` remains bound to its original schema and must not cross scopes.
 
 ## `Begin` (synchronous) vs `BeginAsync`
 
@@ -124,11 +127,15 @@ public class UnitOfWorkOptions
 
 - **`IsTransactional`** — `true` opens a `DbTransaction` on the shared connection before the
   first context is handed out; `false` runs without a transaction. The default is `false` on
-  the struct, but the **HTTP middleware default is `true`** (see [HTTP middleware](#http-middleware)).
-  This flag is meaningful: a non-transactional UoW never calls `BeginTransaction`, which is
-  required for `SessionSearchPath` mode and lighter-weight read-only flows.
+  the options object, but the **HTTP middleware default is `true`** (see
+  [HTTP middleware](#http-middleware)).
+  This flag is meaningful: a non-transactional UoW never calls `BeginTransaction`. The root's
+  effective transaction mode is fixed when it begins; an inner `Required` scope cannot
+  escalate it later. Use `RequiresNew` when the inner operation needs its own transaction.
 - **`Scope`** — `Required` (join an existing UoW or create one), `RequiresNew` (always an
-  independent UoW), or `Suppress` (non-transactional).
+  independent UoW), or `Suppress` (temporarily clear ambient UoW coordination and create no
+  replacement UoW). To create a real non-transactional UoW, use `Required` or `RequiresNew`
+  together with `IsTransactional = false`.
 - **`IsolationLevel`** — applied when the shared transaction is opened (defaults to
   `ReadCommitted`). Ignored when `IsTransactional = false`.
 - **`MaxDbContextCount`** — guardrail on the number of distinct `(DbContextType, Schema)`
@@ -138,9 +145,15 @@ public class UnitOfWorkOptions
 
 ```csharp
 [UnitOfWork(Scope = UnitOfWorkScopeOption.Required)]     // join or create (default)
-[UnitOfWork(Scope = UnitOfWorkScopeOption.RequiresNew)]  // independent transaction
-[UnitOfWork(Scope = UnitOfWorkScopeOption.Suppress)]     // non-transactional
+[UnitOfWork(Scope = UnitOfWorkScopeOption.RequiresNew)]  // independent UoW; transaction is configured separately
+[UnitOfWork(Scope = UnitOfWorkScopeOption.Suppress)]     // clear ambient UoW; no UoW is created
+[UnitOfWork(Scope = UnitOfWorkScopeOption.Required, IsTransactional = false)] // real non-transactional UoW
 ```
+
+A participating `Required` scope does not own the shared root. Its `CommitAsync` is a logical
+completion only; the owning outer scope performs the physical commit and disposal. Participant
+rollback aborts the root, so a later outer commit cannot succeed. A transactional `Required`
+scope cannot join a non-transactional root and fails with guidance to use `RequiresNew`.
 
 ## Registration
 
@@ -150,6 +163,9 @@ services.AddAetherNpgsql<MyDbContext>(connectionString);
 
 // PostgreSQL — non-transactional SessionSearchPath mode (native Npgsql pool, no PgBouncer)
 services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.SessionSearchPath);
+
+// PostgreSQL — qualified relations, no search_path state (transaction optional)
+services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.QualifiedNames);
 
 // SQL Server (BBT.Aether.SqlServer) — single-schema
 services.AddAetherSqlServer<MyDbContext>(connectionString);
@@ -212,7 +228,7 @@ app.UseUnitOfWorkMiddleware();
 
 ## Commit pipeline
 
-`CommitAsync` runs the following on the single shared transaction:
+For a transactional root, `CommitAsync` runs the following on the single shared transaction:
 
 1. **SaveChanges** across every materialized context that has pending changes.
 2. **Domain-event dispatch.** With the default `AlwaysUseOutbox` strategy, raised domain events
@@ -237,6 +253,21 @@ This is exercised end-to-end by
 an event raised by an aggregate lands in the outbox in the same transaction as the business
 data, and a rollback discards both.
 
+For a non-transactional root, `SaveChangesAsync` persists business changes and transfers
+domain events into the UoW buffer together with their producing schema. It does not dispatch
+them. `CommitAsync` performs the schema-bound outbox/direct-dispatch step:
+
+```text
+Non-transactional SaveChanges -> business write plus schema-bound event buffer
+Non-transactional Commit      -> schema-grouped outbox or direct dispatch
+```
+
+This timing applies without an opt-in flag. Dispatch/outbox failures propagate from
+`CommitAsync`, and successful events are cleared only after their delivery path succeeds.
+Because there is no shared transaction, a process failure can occur after a business write
+but before its outbox write. Aether guarantees commit-boundary dispatch, not atomicity between
+non-transactional business and outbox writes.
+
 ## Guardrail errors
 
 | Message | When |
@@ -244,8 +275,10 @@ data, and a rollback discards both.
 | `Current schema is not set.` | A context is requested with no active `currentSchema.Change(...)` scope. |
 | `No active UnitOfWork.` | A context is requested with no ambient UoW (common when using `BeginAsync` where the ambient does not propagate to the caller — use `Begin`). |
 | `UnitOfWork DbContext limit exceeded. Limit: N` | More than `MaxDbContextCount` distinct `(Type, Schema)` contexts in one UoW. |
-| `Invalid PostgreSQL schema name: X` | The active schema name fails the PostgreSQL identifier check before a `SET` command. |
-| `TransactionLocal mode requires IsTransactional = true.` | `SchemaSwitchingMode.TransactionLocal` was used with `IsTransactional = false`. Either set `IsTransactional = true` or switch to `SessionSearchPath` mode. |
+| `Invalid PostgreSQL identifier: X` | The active schema name fails PostgreSQL identifier validation before it enters command text. |
+| `SchemaSwitchingMode.TransactionLocal requires a transaction, but none is active.` | `SchemaSwitchingMode.TransactionLocal` was used without an active transaction. Set `IsTransactional = true`, or switch to `SessionSearchPath` or `QualifiedNames` as appropriate for the pool mode. |
+| `A transactional Required UnitOfWork cannot join a non-transactional outer UnitOfWork.` | The inner operation requested a transaction that the existing root cannot acquire; use `RequiresNew`. |
+| `DbContext is bound to schema 'A', but current schema is 'B'.` | A QualifiedNames context/query crossed schema scopes; resolve it again in the current scope. |
 
 ## Programmatic helpers
 
@@ -280,7 +313,8 @@ public class Order : AuditedAggregateRoot<Guid>
 2. **Keep transactions short** and make **no external service calls** inside an open
    transaction (required for PgBouncer transaction pooling — see Multi-Schema docs).
 3. **Use `RequiresNew` deliberately** for independent operations (e.g. lease/audit writes).
-4. **Don't qualify tables with a schema** in EF mappings — schema is resolved at runtime.
+4. **Don't put tenant schemas in EF mappings** — schema is resolved at runtime.
+5. **Reuse repositories, not resolved EF objects**, when switching the current schema.
 
 ## Related Features
 

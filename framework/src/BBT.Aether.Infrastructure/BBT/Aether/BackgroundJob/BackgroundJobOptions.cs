@@ -33,9 +33,9 @@ public class BackgroundJobOptions
         Handlers.Add(new JobHandlerRegistration(name, handlerType));
     }
 
-    /// <summary>The database schema whose background jobs this arming processor handles. The processor
-    /// opens a UnitOfWork bound to this schema each run. If null/empty it logs a warning and does nothing.
-    /// For multi-schema deployments run one processor instance per schema.</summary>
+    /// <summary>The immutable application-level fixed persistence schema for the dedicated background-job
+    /// DbContext. Request-time tenant schema changes do not redirect job storage. Null or blank preserves
+    /// the legacy ambient-schema fallback.</summary>
     public string? Schema { get; set; } = "sys_queues";
 
     /// <summary>Default maximum framework retry attempts for one-shot jobs (used by enqueue/dispatcher).</summary>
@@ -86,4 +86,3 @@ public class JobHandlerRegistration
     /// </summary>
     public Type HandlerType { get; }
 }
-

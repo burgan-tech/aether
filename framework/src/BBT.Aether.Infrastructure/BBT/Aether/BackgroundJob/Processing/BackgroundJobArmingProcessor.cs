@@ -57,6 +57,15 @@ public class BackgroundJobArmingProcessor(
         var currentSchema = sp.GetRequiredService<ICurrentSchema>();
         var uowManager = sp.GetRequiredService<IUnitOfWorkManager>();
         var jobStore = sp.GetRequiredService<IJobStore>();
+        if (jobStore is not IJobArmingStore armingStore)
+        {
+            logger.LogError(
+                "Background-job store '{StoreType}' does not implement {Capability}; skipping arming before any external scheduler side effect.",
+                jobStore.GetType().FullName,
+                nameof(IJobArmingStore));
+            return;
+        }
+
         var leaseStore = sp.GetRequiredService<IJobArmingLeaseStore>();
         var scheduler = sp.GetRequiredService<IJobScheduler>();
 
@@ -129,21 +138,27 @@ public class BackgroundJobArmingProcessor(
                 }
 
                 // PHASE 3 — CONFIRM (armed → Scheduled) or ABORT (failed → original status).
-                // Both paths atomically clear ArmingToken/ArmingUntil, guarded on the arming token.
+                // Both paths atomically clear ArmingToken/ArmingUntil, guarded on the arming token and
+                // the status observed when the claim was acquired.
                 var targetStatus = armed ? BackgroundJobStatus.Scheduled : claim.OriginalStatus;
+                var inspectLostArmedClaim = false;
                 try
                 {
-                    await using var uow = uowManager.Begin(
-                        new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
-                    var transitioned = await jobStore.TryTransitionFromArmingAsync(
-                        job.Id, claim.ArmingToken, targetStatus, ct);
-                    await uow.CommitAsync(ct);
+                    bool transitioned;
+                    await using (var uow = uowManager.Begin(
+                        new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+                    {
+                        transitioned = await armingStore.TryTransitionFromArmingAsync(
+                            job.Id, claim.ArmingToken, claim.OriginalStatus, targetStatus, ct);
+                        await uow.CommitAsync(ct);
+                    }
 
                     if (!transitioned)
                     {
                         logger.LogDebug(
-                            "Job '{JobName}' (id {JobId}) token mismatch — another instance acted on it.",
+                            "Job '{JobName}' (id {JobId}) arming claim no longer matched — another instance or cancellation acted on it.",
                             job.JobName, job.Id);
+                        inspectLostArmedClaim = armed;
                     }
                 }
                 catch (Exception ex)
@@ -151,6 +166,13 @@ public class BackgroundJobArmingProcessor(
                     logger.LogWarning(ex,
                         "Failed to finalize arming for background job '{JobName}' (id {JobId}); the claim lease will expire and the reaper will reset it.",
                         job.JobName, job.Id);
+                    inspectLostArmedClaim = armed;
+                }
+
+                if (inspectLostArmedClaim)
+                {
+                    await CompensateTerminalArmingLossAsync(
+                        uowManager, jobStore, armingStore, scheduler, job, claim.ArmingToken, ct);
                 }
             }
 
@@ -238,6 +260,189 @@ public class BackgroundJobArmingProcessor(
                         job.JobName, job.Id);
                 }
             }
+        }
+    }
+
+    private async Task CompensateTerminalArmingLossAsync(
+        IUnitOfWorkManager uowManager,
+        IJobStore jobStore,
+        IJobArmingStore armingStore,
+        IJobScheduler scheduler,
+        BackgroundJobInfo claimedJob,
+        Guid lostArmingToken,
+        CancellationToken cancellationToken)
+    {
+        BackgroundJobCancellationSnapshot? snapshot;
+        try
+        {
+            await using var readUow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+            snapshot = await jobStore.GetCancellationSnapshotAsync(claimedJob.Id, cancellationToken);
+            await readUow.CommitAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Failed to inspect lost arming claim for background job '{JobName}' (id {JobId}); compensating scheduler deletion was skipped.",
+                claimedJob.JobName, claimedJob.Id);
+            return;
+        }
+
+        var terminalWinner = snapshot?.Status is BackgroundJobStatus.Completed
+            or BackgroundJobStatus.Failed
+            or BackgroundJobStatus.Cancelled;
+
+        if (!terminalWinner)
+            return;
+
+        var compensationToken = Guid.NewGuid();
+        var now = clock.UtcNow;
+        var compensationLeaseDuration = options.ArmingLeaseDuration > TimeSpan.Zero
+            ? options.ArmingLeaseDuration
+            : TimeSpan.FromSeconds(30);
+        bool acquired;
+        try
+        {
+            await using var acquireUow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+            acquired = await armingStore.TryAcquireTerminalArmingCompensationAsync(
+                claimedJob.Id,
+                lostArmingToken,
+                compensationToken,
+                now,
+                now.Add(compensationLeaseDuration),
+                cancellationToken);
+            await acquireUow.CommitAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Failed to acquire compensating scheduler-cleanup lease for background job '{JobName}' (id {JobId}); deletion was skipped.",
+                snapshot!.JobName, claimedJob.Id);
+            return;
+        }
+
+        if (!acquired)
+            return;
+
+        using var deleteCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var renewalTask = RenewCompensationLeaseUntilCancelledAsync(
+            uowManager,
+            armingStore,
+            claimedJob,
+            compensationToken,
+            compensationLeaseDuration,
+            deleteCancellation);
+        try
+        {
+            await scheduler.DeleteAsync(
+                snapshot!.HandlerName, snapshot.JobName, deleteCancellation.Token);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Failed compensating scheduler deletion for terminal background job '{JobName}' (id {JobId}); persisted state remains unchanged.",
+                snapshot!.JobName, claimedJob.Id);
+        }
+        finally
+        {
+            try
+            {
+                try
+                {
+                    await deleteCancellation.CancelAsync();
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Failed to stop compensation-lease renewal for background job '{JobName}' (id {JobId}); release will still be attempted.",
+                        snapshot!.JobName, claimedJob.Id);
+                }
+
+                try
+                {
+                    await renewalTask;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Compensation-lease renewal ended with an error for background job '{JobName}' (id {JobId}); release will still be attempted.",
+                        snapshot!.JobName, claimedJob.Id);
+                }
+            }
+            finally
+            {
+                try
+                {
+                    await using var releaseUow = uowManager.Begin(
+                        new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                    var released = await armingStore.TryReleaseArmingCompensationAsync(
+                        claimedJob.Id, compensationToken, CancellationToken.None);
+                    await releaseUow.CommitAsync(CancellationToken.None);
+
+                    if (!released)
+                    {
+                        logger.LogWarning(
+                            "Compensating scheduler-cleanup lease for background job '{JobName}' (id {JobId}) was no longer owned during release.",
+                            snapshot!.JobName, claimedJob.Id);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Failed to release compensating scheduler-cleanup lease for background job '{JobName}' (id {JobId}); the arming reaper will recover it after expiry.",
+                        snapshot!.JobName, claimedJob.Id);
+                }
+            }
+        }
+    }
+
+    private async Task RenewCompensationLeaseUntilCancelledAsync(
+        IUnitOfWorkManager uowManager,
+        IJobArmingStore armingStore,
+        BackgroundJobInfo claimedJob,
+        Guid compensationToken,
+        TimeSpan leaseDuration,
+        CancellationTokenSource deleteCancellation)
+    {
+        var renewalInterval = TimeSpan.FromTicks(
+            Math.Max(TimeSpan.TicksPerMillisecond, leaseDuration.Ticks / 3));
+
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(renewalInterval, deleteCancellation.Token);
+                var renewalNow = clock.UtcNow;
+                await using var renewUow = uowManager.Begin(
+                    new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+                var renewed = await armingStore.TryRenewArmingCompensationAsync(
+                    claimedJob.Id,
+                    compensationToken,
+                    renewalNow.Add(leaseDuration),
+                    deleteCancellation.Token);
+                await renewUow.CommitAsync(deleteCancellation.Token);
+
+                if (renewed)
+                    continue;
+
+                logger.LogWarning(
+                    "Lost compensating scheduler-cleanup lease for background job '{JobName}' (id {JobId}); cancelling the stale delete.",
+                    claimedJob.JobName, claimedJob.Id);
+                await deleteCancellation.CancelAsync();
+                return;
+            }
+        }
+        catch (OperationCanceledException) when (deleteCancellation.IsCancellationRequested)
+        {
+            // Normal shutdown: delete completed, caller cancelled, or ownership was lost.
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Failed to renew compensating scheduler-cleanup lease for background job '{JobName}' (id {JobId}); cancelling the stale delete.",
+                claimedJob.JobName, claimedJob.Id);
+            await deleteCancellation.CancelAsync();
         }
     }
 }

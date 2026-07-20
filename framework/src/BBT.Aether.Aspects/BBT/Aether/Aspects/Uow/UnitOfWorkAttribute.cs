@@ -1,5 +1,6 @@
 using System;
 using System.Data;
+using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Uow;
 using Microsoft.Extensions.DependencyInjection;
@@ -56,32 +57,33 @@ public class UnitOfWorkAttribute : AetherMethodInterceptionAspect
         var uowManager = serviceProvider.GetRequiredService<IUnitOfWorkManager>();
         var options = CreateOptions();
 
-        // Participate in an existing ambient UnitOfWork (e.g. the request UoW the middleware owns, or an
-        // outer aspect). The OWNER commits/rolls back; we only run the method and let exceptions propagate.
-        if (options.Scope == UnitOfWorkScopeOption.Required && uowManager.Current is not null)
-        {
-            try
-            {
-                await args.ProceedAsync();
-                await OnAfterAsync(args);
-            }
-            catch (Exception ex)
-            {
-                await OnExceptionAsync(args, ex);
-                throw; // owner rolls back
-            }
-
-            return;
-        }
-
-        // Own a UnitOfWork (RequiresNew, Suppress, or Required with no ambient — e.g. non-HTTP paths). Use the
-        // synchronous Begin so the unit of work is ambient in this frame and flows into ProceedAsync.
+        // Always route scope creation through the manager. For an ambient Required UoW the manager returns
+        // a non-owning participant: commit is logical-only, while rollback aborts the shared root. This also
+        // enforces transaction-mode compatibility instead of silently bypassing it.
         await using var uow = uowManager.Begin(options);
+        await ExecuteWithinUnitOfWorkAsync(
+            uow,
+            async () => await args.ProceedAsync(),
+            args,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Executes the intercepted body and success hook before completing the UoW participant.
+    /// Keeping the hook inside the rollback boundary is essential for nested Required scopes:
+    /// once a participant commits logically, its rollback intentionally becomes a no-op.
+    /// </summary>
+    protected async Task ExecuteWithinUnitOfWorkAsync(
+        IUnitOfWork uow,
+        Func<Task> proceed,
+        MethodInterceptionArgs args,
+        CancellationToken cancellationToken)
+    {
         try
         {
-            await args.ProceedAsync();
-            await uow.CommitAsync(cancellationToken);
+            await proceed();
             await OnAfterAsync(args);
+            await uow.CommitAsync(cancellationToken);
         }
         catch (Exception ex)
         {

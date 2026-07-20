@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
 using BBT.Aether.Domain.EntityFrameworkCore;
+using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow;
 using BBT.Aether.Uow.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
@@ -57,12 +58,13 @@ public sealed class PgBouncerSearchPathTests(PostgresFixture fx)
     {
         var services = new ServiceCollection();
         services.AddSingleton<IClock, SystemClock>();
-        services.AddSingleton<IAetherDbContextConfigurator<ProbeDbContext>>(
+        services.AddSingleton<ICurrentSchema>(new StaticCurrentSchema());
+        services.AddSingleton<IAetherDbContextConfigurator<ProbeDbContext>>(sp =>
             new AetherDbContextConfigurator<ProbeDbContext>(
                 fx.ConnectionString,
                 new NpgsqlAetherProvider(),
                 configure: (_, _) => { },
-                serviceProvider: null!));
+                serviceProvider: sp));
         return services.BuildServiceProvider();
     }
 

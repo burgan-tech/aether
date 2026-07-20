@@ -5,17 +5,14 @@ using System.Threading.Tasks;
 namespace BBT.Aether.Uow;
 
 /// <summary>
-/// Represents a root Unit of Work that supports lazy transaction escalation.
-/// Allows a reserved (non-transactional) UoW to be escalated to transactional mode.
+/// Represents a root Unit of Work that can ensure its configured transaction is started lazily.
 /// </summary>
 public interface ITransactionalRoot
 {
     /// <summary>
-    /// Ensures that a transaction is started for this Unit of Work if not already started.
-    /// This allows lazy escalation from a reserved (non-transactional) UoW to a transactional one.
+    /// Ensures that the transaction configured when this Unit of Work began is started, if needed.
     /// </summary>
     /// <param name="isolationLevel">Optional isolation level for the transaction</param>
     /// <param name="cancellationToken">Cancellation token</param>
     Task EnsureTransactionAsync(IsolationLevel? isolationLevel = null, CancellationToken cancellationToken = default);
 }
-

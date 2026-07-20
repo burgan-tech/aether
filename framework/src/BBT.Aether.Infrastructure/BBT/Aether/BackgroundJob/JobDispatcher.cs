@@ -84,9 +84,12 @@ public class JobDispatcher(
         try
         {
             await InvokeHandlerAsync(scope.ServiceProvider, c.HandlerName, argsPayload, cancellationToken);
-            await RecordSuccessAsync(scope, c, jobName, activity, cancellationToken);
-            logger.LogInformation("Successfully completed handler '{HandlerName}' for job id '{JobId}'", c.HandlerName,
-                c.JobId);
+            var recorded = await RecordSuccessAsync(scope, c, jobName, activity, cancellationToken);
+            if (recorded)
+            {
+                logger.LogInformation("Successfully completed handler '{HandlerName}' for job id '{JobId}'",
+                    c.HandlerName, c.JobId);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -187,7 +190,7 @@ public class JobDispatcher(
     /// <summary>
     /// Phase 3 (success): records completion in a short UoW and, for one-shot jobs, removes them from the scheduler.
     /// </summary>
-    private async Task RecordSuccessAsync(
+    private async Task<bool> RecordSuccessAsync(
         AsyncServiceScope scope,
         JobClaim claim,
         string jobName,
@@ -213,7 +216,7 @@ public class JobDispatcher(
         {
             logger.LogWarning("Claim for job id '{JobId}' was lost before success could be recorded; skipping", claim.JobId);
             activity?.SetTag("job.status", "claim-lost");
-            return;
+            return false;
         }
 
         activity?.SetTag("job.status", claim.Kind == JobKind.Recurring ? "scheduled" : "completed");
@@ -221,6 +224,8 @@ public class JobDispatcher(
 
         if (claim.Kind == JobKind.OneShot)
             await TryDeleteFromSchedulerAsync(jobScheduler, claim.HandlerName, jobName, cancellationToken); // recurring stays armed
+
+        return true;
     }
 
     /// <summary>

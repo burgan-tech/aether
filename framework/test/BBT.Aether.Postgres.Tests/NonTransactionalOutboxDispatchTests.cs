@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Domain.EntityFrameworkCore;
@@ -19,11 +20,8 @@ using Xunit;
 namespace BBT.Aether.Postgres.Tests;
 
 /// <summary>
-/// Validates <see cref="AetherDomainEventOptions.DispatchNonTransactionalEventsToOutbox"/>: when a
-/// unit of work runs WITHOUT a shared transaction (IsTransactional=false — the per-step / autoSave
-/// style used by long-running workflows), buffered domain events are normally dropped on commit
-/// because there is no transaction to co-commit them. The flag opts such flows into flushing their
-/// events to the outbox on commit (at-least-once, not atomic with the business writes).
+/// Validates that a non-transactional unit of work buffers domain events at save time and flushes
+/// them to the outbox only at its commit boundary.
 /// <para>
 /// Mirrors <see cref="OutboxWithinSharedTransactionTests"/>'s harness: a real
 /// <see cref="DomainEventDispatchStrategy.AlwaysUseOutbox"/> pipeline with a real outbox store; only
@@ -36,19 +34,23 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
     private readonly string _schema = "flow_ntx_" + Guid.NewGuid().ToString("N");
 
     [EventName("OrderCreated", version: 1)]
-    private sealed class OrderCreatedEvent(Guid orderId) : IDistributedEvent
+    private sealed class OrderCreatedEvent(Guid orderId, int sequence) : IDistributedEvent
     {
         public Guid OrderId { get; } = orderId;
+        public int Sequence { get; } = sequence;
     }
 
     private sealed class Order : AggregateRoot<Guid>
     {
         private Order() { }
 
-        public Order(Guid id, string customer) : base(id)
+        public Order(Guid id, string customer, int eventCount = 1) : base(id)
         {
             Customer = customer;
-            AddDistributedEvent(new OrderCreatedEvent(id));
+            for (var sequence = 1; sequence <= eventCount; sequence++)
+            {
+                AddDistributedEvent(new OrderCreatedEvent(id, sequence));
+            }
         }
 
         public string Customer { get; private set; } = string.Empty;
@@ -87,6 +89,48 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
             => Task.CompletedTask;
     }
 
+    private sealed class FailSecondOutboxStageController
+    {
+        public bool Enabled { get; init; }
+        public int Calls { get; set; }
+    }
+
+    private sealed class FailSecondOutboxStageEventBus(
+        ITopicNameStrategy topicNameStrategy,
+        IEventSerializer eventSerializer,
+        IOutboxStore outboxStore,
+        AetherEventBusOptions eventBusOptions,
+        ICurrentSchema currentSchema,
+        FailSecondOutboxStageController controller) : IDistributedEventBus
+    {
+        private readonly NoopEventBus _inner = new(
+            topicNameStrategy, eventSerializer, outboxStore, eventBusOptions, currentSchema);
+
+        public Task PublishAsync<TEvent>(TEvent payload, string? subject = null,
+            CancellationToken cancellationToken = default) where TEvent : class =>
+            _inner.PublishAsync(payload, subject, cancellationToken);
+
+        public Task PublishAsync<TEvent>(TEvent payload, string? subject = null, bool useOutbox = true,
+            CancellationToken cancellationToken = default) where TEvent : class =>
+            _inner.PublishAsync(payload, subject, useOutbox, cancellationToken);
+
+        public Task PublishAsync(IDistributedEvent @event, EventMetadata metadata, string? subject = null,
+            bool useOutbox = true, CancellationToken cancellationToken = default)
+        {
+            controller.Calls++;
+            if (controller.Enabled && controller.Calls == 2)
+            {
+                return Task.FromException(new InvalidOperationException("second outbox stage failed"));
+            }
+
+            return _inner.PublishAsync(@event, metadata, subject, useOutbox, cancellationToken);
+        }
+
+        public Task PublishEnvelopeAsync(byte[] serializedEnvelope, string topicName, string pubSubName,
+            CancellationToken cancellationToken = default) =>
+            _inner.PublishEnvelopeAsync(serializedEnvelope, topicName, pubSubName, cancellationToken);
+    }
+
     private sealed class SimpleTopicNameStrategy : ITopicNameStrategy
     {
         public string GetTopicName(Type eventType)
@@ -96,23 +140,22 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
         }
     }
 
-    private IServiceProvider BuildProvider(bool dispatchNonTransactional)
+    private IServiceProvider BuildProvider(bool failSecondOutboxStage = false)
     {
         var services = new ServiceCollection();
 
         services.AddAetherCore(_ => { });
         // Session search-path mode so a non-transactional UoW is usable (TransactionLocal, the
-        // default, requires a transaction). This mirrors a deployment that runs non-transactional,
-        // per-step/autoSave transitions — exactly the flows the new flag targets.
+        // default, requires a transaction).
         services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString, SchemaSwitchingMode.SessionSearchPath);
-        services.AddAetherDomainEvents<TestDbContext>(o =>
-            o.DispatchNonTransactionalEventsToOutbox = dispatchNonTransactional);
-        services.AddAetherOutbox<TestDbContext>();
+        services.AddAetherDomainEvents<TestDbContext>();
+        services.AddAetherOutbox<TestDbContext>(options => options.Schema = _schema);
 
         services.AddSingleton(new AetherEventBusOptions { DefaultSource = "urn:test:orders" });
         services.AddSingleton<ITopicNameStrategy, SimpleTopicNameStrategy>();
         services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
-        services.AddScoped<IDistributedEventBus, NoopEventBus>();
+        services.AddSingleton(new FailSecondOutboxStageController { Enabled = failSecondOutboxStage });
+        services.AddScoped<IDistributedEventBus, FailSecondOutboxStageEventBus>();
 
         return services.BuildServiceProvider();
     }
@@ -158,8 +201,12 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
         return (long)(await cmd.ExecuteScalarAsync())!;
     }
 
-    private async Task RunNonTransactionalAsync(IServiceProvider sp)
+    [Fact]
+    public async Task NonTransactional_SaveChanges_buffers_and_Commit_writes_outbox()
     {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+
         await using var scope = sp.CreateAsyncScope();
         var ssp = scope.ServiceProvider;
         var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
@@ -168,44 +215,52 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
 
         using (currentSchema.Change(_schema))
         {
-            // No transaction: the per-step / autoSave style. Business data is auto-committed by
-            // SaveChanges; there is no shared transaction to co-commit events with.
             await using var uow = uowManager.Begin(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
 
             var ctx = await provider.GetDbContextAsync();
             ctx.Set<Order>().Add(new Order(Guid.NewGuid(), "Alice"));
 
-            // Persist business data (and let the sink buffer the aggregate's event).
             await uow.SaveChangesAsync();
 
+            (await CountAsync("orders")).ShouldBe(1);
+            (await CountAsync("OutboxMessages")).ShouldBe(0);
+
             await uow.CommitAsync();
+
+            (await CountAsync("OutboxMessages")).ShouldBe(1);
         }
     }
 
     [Fact]
-    public async Task Flag_On_NonTransactional_Commit_Writes_Event_To_Outbox()
+    public async Task NonTransactional_failed_second_stage_retries_without_duplicate_outbox_rows()
     {
-        var sp = BuildProvider(dispatchNonTransactional: true);
+        await using var sp = (ServiceProvider)BuildProvider(failSecondOutboxStage: true);
         await ArrangeSchemaAsync(sp);
 
-        await RunNonTransactionalAsync(sp);
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
 
-        (await CountAsync("orders")).ShouldBe(1);
-        (await CountAsync("OutboxMessages")).ShouldBe(1);
-    }
+        using (currentSchema.Change(_schema))
+        {
+            await using var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
 
-    [Fact]
-    public async Task Flag_Off_NonTransactional_Commit_Drops_Event_Historical_Behavior()
-    {
-        var sp = BuildProvider(dispatchNonTransactional: false);
-        await ArrangeSchemaAsync(sp);
+            var ctx = await provider.GetDbContextAsync();
+            ctx.Set<Order>().Add(new Order(Guid.NewGuid(), "Alice", eventCount: 2));
+            await uow.SaveChangesAsync();
 
-        await RunNonTransactionalAsync(sp);
+            await Should.ThrowAsync<InvalidOperationException>(() => uow.CommitAsync());
+            uow.IsCompleted.ShouldBeFalse();
+            (await CountAsync("OutboxMessages")).ShouldBe(0);
 
-        // Business data is committed, but without a transaction and with the flag off the buffered
-        // event is not dispatched — the historical behavior the flag preserves by default.
-        (await CountAsync("orders")).ShouldBe(1);
-        (await CountAsync("OutboxMessages")).ShouldBe(0);
+            await uow.CommitAsync();
+            uow.IsCompleted.ShouldBeTrue();
+        }
+
+        (await CountAsync("OutboxMessages")).ShouldBe(2);
     }
 }

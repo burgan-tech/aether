@@ -32,6 +32,7 @@
 
     <ItemGroup>
         <ProjectReference Include="..\..\src\BBT.Aether.Infrastructure\BBT.Aether.Infrastructure.csproj" />
+        <ProjectReference Include="..\..\src\BBT.Aether.Aspects\BBT.Aether.Aspects.csproj" />
     </ItemGroup>
 
 </Project>
