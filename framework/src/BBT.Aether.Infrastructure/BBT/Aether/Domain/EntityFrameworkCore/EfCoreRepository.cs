@@ -105,8 +105,11 @@ public class EfCoreRepository<TDbContext, TEntity> : RepositoryBase<TEntity>, IE
 
         if (context.Set<TEntity>().Local.All(e => e != entity))
         {
-            context.Set<TEntity>().Attach(entity);
-            context.Update(entity);
+            // Update must receive the entity while it is still detached: only then does EF walk
+            // the whole graph and mark owned dependents (e.g. value objects in split tables)
+            // Modified. Attaching first would track the root as Unchanged, so a subsequent
+            // Update would touch the root entry only and silently skip owned-type columns.
+            context.Set<TEntity>().Update(entity);
         }
 
         if (ShouldSaveChanges(saveChanges))
