@@ -163,11 +163,11 @@ public sealed class CompositeUnitOfWork(
             return (TDbContext)existing;
         }
 
-        if (_contexts.Count >= _options.MaxDbContextCount)
-        {
-            throw new InvalidOperationException(
-                $"UnitOfWork DbContext limit exceeded. Limit: {_options.MaxDbContextCount}");
-        }
+        // if (_contexts.Count >= _options.MaxDbContextCount)
+        // {
+        //     throw new InvalidOperationException(
+        //         $"UnitOfWork DbContext limit exceeded. Limit: {_options.MaxDbContextCount}");
+        // }
 
         var configurator = serviceProvider.GetRequiredService<IAetherDbContextConfigurator<TDbContext>>();
 
