@@ -17,4 +17,12 @@ public interface IAetherDbContextConfigurator<TDbContext>
 
     /// <summary>Builds options that use the given already-open shared connection, bound to the given schema.</summary>
     DbContextOptions<TDbContext> BuildOptions(DbConnection sharedConnection, string schema, SchemaScopeState state);
+
+    /// <summary>
+    /// Builds options bound to the given schema where EF Core owns the connection lifecycle:
+    /// the context opens a pooled connection per operation and returns it immediately, instead
+    /// of enlisting on a UnitOfWork-held shared connection. Used by non-transactional units of
+    /// work.
+    /// </summary>
+    DbContextOptions<TDbContext> BuildOwnedOptions(string schema);
 }

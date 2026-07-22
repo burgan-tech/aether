@@ -35,7 +35,7 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
     }
 
     private IServiceProvider BuildProvider(
-        SchemaSwitchingMode mode = SchemaSwitchingMode.TransactionLocal)
+        SchemaSwitchingMode mode = SchemaSwitchingMode.QualifiedNames)
     {
         var services = new ServiceCollection();
         services.AddAetherCore(_ => { });
@@ -207,8 +207,6 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
     }
 
     [Theory]
-    [InlineData(SchemaSwitchingMode.TransactionLocal)]
-    [InlineData(SchemaSwitchingMode.SessionSearchPath)]
     [InlineData(SchemaSwitchingMode.QualifiedNames)]
     public async Task LeaseBatch_uses_qualified_relation_without_transaction(
         SchemaSwitchingMode mode)

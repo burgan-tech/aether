@@ -49,7 +49,7 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
             base.OnModelCreating(modelBuilder);
             modelBuilder.Entity<Thing>(e =>
             {
-                e.ToTable("things"); // NO schema - resolved at runtime via SET LOCAL search_path
+                e.ToTable("things"); // NO schema - rewritten at runtime to the qualified schema name
                 e.HasKey(t => t.Id);
                 e.Property(t => t.Name).IsRequired();
             });
@@ -66,14 +66,6 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
         // DbContext + UnitOfWork wiring (configurator, UoW manager, ambient accessor, provider).
         services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString);
 
-        return services.BuildServiceProvider();
-    }
-
-    private IServiceProvider BuildSessionSearchPathProvider()
-    {
-        var services = new ServiceCollection();
-        services.AddAetherCore(_ => { });
-        services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString, SchemaSwitchingMode.SessionSearchPath);
         return services.BuildServiceProvider();
     }
 
@@ -184,10 +176,10 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task SessionSearchPath_opens_connection_without_transaction()
+    public async Task NonTransactional_context_leaves_connection_management_to_ef_core()
     {
         await ArrangeSchemaAsync();
-        var sp = BuildSessionSearchPathProvider();
+        var sp = BuildProvider();
 
         await using var scope = sp.CreateAsyncScope();
         var ssp = scope.ServiceProvider;
@@ -202,8 +194,13 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
 
             var db = await provider.GetDbContextAsync();
 
-            db.Database.GetDbConnection().State.ShouldBe(ConnectionState.Open);
+            // Requesting the context must NOT open a physical connection: EF Core rents one
+            // per operation and returns it to the pool immediately afterwards.
+            db.Database.GetDbConnection().State.ShouldBe(ConnectionState.Closed);
             db.Database.CurrentTransaction.ShouldBeNull();
+
+            (await db.Set<Thing>().CountAsync()).ShouldBe(0);
+            db.Database.GetDbConnection().State.ShouldBe(ConnectionState.Closed);
 
             await uow.CommitAsync();
         }
@@ -240,10 +237,10 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task SessionSearchPath_two_queries_share_same_connection()
+    public async Task NonTransactional_same_schema_reuses_the_same_context()
     {
         await ArrangeSchemaAsync();
-        var sp = BuildSessionSearchPathProvider();
+        var sp = BuildProvider();
 
         await using var scope = sp.CreateAsyncScope();
         var ssp = scope.ServiceProvider;
@@ -267,7 +264,7 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task TransactionLocal_still_opens_transaction()
+    public async Task Transactional_opens_shared_connection_and_transaction()
     {
         await ArrangeSchemaAsync();
         var sp = BuildProvider();
@@ -293,32 +290,7 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task TransactionLocal_throws_when_used_without_transaction()
-    {
-        await ArrangeSchemaAsync();
-        var sp = BuildProvider();
-
-        await using var scope = sp.CreateAsyncScope();
-        var ssp = scope.ServiceProvider;
-        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
-        var mgr = ssp.GetRequiredService<IUnitOfWorkManager>();
-        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
-
-        using (currentSchema.Change(_schema))
-        {
-            await using var uow = mgr.Begin(
-                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
-
-            await Should.ThrowAsync<InvalidOperationException>(async () =>
-            {
-                var db = await provider.GetDbContextAsync();
-                await db.Set<Thing>().CountAsync();
-            });
-        }
-    }
-
-    [Fact]
-    public async Task SessionSearchPath_search_path_reset_prevents_pool_leakage()
+    public async Task Schema_does_not_leak_across_units_of_work()
     {
         var schemaA = "leak_a_" + Guid.NewGuid().ToString("N");
         var schemaB = "leak_b_" + Guid.NewGuid().ToString("N");
@@ -338,7 +310,7 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
             await cmd.ExecuteNonQueryAsync();
         }
 
-        var sp = BuildSessionSearchPathProvider();
+        var sp = BuildProvider();
         await using var scope = sp.CreateAsyncScope();
         var ssp = scope.ServiceProvider;
         var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
@@ -361,7 +333,7 @@ public sealed class UnitOfWorkDisposalTests(PostgresFixture fx)
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false });
             var dbB = await provider.GetDbContextAsync();
             (await dbB.Set<Thing>().CountAsync())
-                .ShouldBe(0, "search_path from the previous UoW must not leak into this one");
+                .ShouldBe(0, "schema binding from the previous UoW must not leak into this one");
             await uowB.CommitAsync();
         }
     }

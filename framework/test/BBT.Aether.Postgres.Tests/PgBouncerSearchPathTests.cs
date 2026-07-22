@@ -14,11 +14,10 @@ using Xunit;
 namespace BBT.Aether.Postgres.Tests;
 
 /// <summary>
-/// Proves the core PgBouncer-safety guarantee: the UnitOfWork applies the per-command search_path
-/// via <c>SET LOCAL</c>, which is transaction-scoped. When the transaction ends and the connection
-/// is returned to the pool, that search_path must NOT leak into a connection later handed to another
-/// request. The assertion is about the ABSENCE of the leak regardless of whether Npgsql hands back
-/// the same physical connection.
+/// Proves the core PgBouncer-safety guarantee: qualified-names schema targeting never touches
+/// the connection's <c>search_path</c>, so no schema state can leak into a connection later
+/// handed to another request. The assertion is about the ABSENCE of the leak regardless of
+/// whether Npgsql hands back the same physical connection.
 /// </summary>
 [Collection("postgres")]
 public sealed class PgBouncerSearchPathTests(PostgresFixture fx)
@@ -58,7 +57,7 @@ public sealed class PgBouncerSearchPathTests(PostgresFixture fx)
     {
         var services = new ServiceCollection();
         services.AddSingleton<IClock, SystemClock>();
-        services.AddSingleton<ICurrentSchema>(new StaticCurrentSchema());
+        services.AddSingleton<ICurrentSchema>(new StaticCurrentSchema(_schema));
         services.AddSingleton<IAetherDbContextConfigurator<ProbeDbContext>>(sp =>
             new AetherDbContextConfigurator<ProbeDbContext>(
                 fx.ConnectionString,
@@ -69,20 +68,20 @@ public sealed class PgBouncerSearchPathTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task Set_local_does_not_leak_to_a_fresh_connection()
+    public async Task Schema_state_does_not_leak_to_a_fresh_connection()
     {
         await ArrangeSchemaAsync();
         var sp = BuildProvider();
 
-        // Run a full UoW that materializes a context for the test schema and executes a command,
-        // so SET LOCAL search_path actually runs inside the transaction.
+        // Run a full UoW that materializes a context for the test schema and executes commands,
+        // so the qualified-names rewrite actually runs inside the transaction.
         var uow = new CompositeUnitOfWork(sp);
         await uow.InitializeAsync(new UnitOfWorkOptions { IsTransactional = true });
 
         var ctx = await uow.GetDbContextAsync<ProbeDbContext>(_schema);
         ctx.Set<Thing>().Add(new Thing { Id = Guid.NewGuid(), Name = "x" });
         await uow.SaveChangesAsync();
-        (await ctx.Set<Thing>().CountAsync()).ShouldBe(1); // forces a read -> SET LOCAL applied
+        (await ctx.Set<Thing>().CountAsync()).ShouldBe(1); // forces a read through the interceptor
 
         await uow.CommitAsync();
         await uow.DisposeAsync(); // returns the connection to the pool
@@ -95,7 +94,7 @@ public sealed class PgBouncerSearchPathTests(PostgresFixture fx)
         cmd.CommandText = "SHOW search_path";
         var searchPath = (string)(await cmd.ExecuteScalarAsync())!;
 
-        // The SET LOCAL stayed inside the UoW transaction and never mutated session/pooled state.
+        // Qualified names never mutate session/pooled search_path state.
         searchPath.ShouldNotContain(_schema);
     }
 }

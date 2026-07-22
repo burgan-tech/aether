@@ -71,9 +71,14 @@ public sealed class DomainEventFailureTests
         public DbContextOptions<TestDbContext> BuildOptions(
             DbConnection sharedConnection,
             string schema,
-            SchemaScopeState state) => new DbContextOptionsBuilder<TestDbContext>()
-            .UseInMemoryDatabase($"domain-events-{Guid.NewGuid():N}")
-            .Options;
+            SchemaScopeState state) => BuildInMemoryOptions();
+
+        public DbContextOptions<TestDbContext> BuildOwnedOptions(string schema) => BuildInMemoryOptions();
+
+        private static DbContextOptions<TestDbContext> BuildInMemoryOptions() =>
+            new DbContextOptionsBuilder<TestDbContext>()
+                .UseInMemoryDatabase($"domain-events-{Guid.NewGuid():N}")
+                .Options;
     }
 
     private sealed class StubDbConnection : DbConnection

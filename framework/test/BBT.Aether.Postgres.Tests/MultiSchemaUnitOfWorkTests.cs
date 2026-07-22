@@ -124,10 +124,11 @@ public sealed class MultiSchemaUnitOfWorkTests(PostgresFixture fx)
     }
 
     [Fact]
-    public async Task Schema_isolation_via_search_path()
+    public async Task Schema_isolation_via_qualified_names()
     {
         await ArrangeSchemasAsync();
         var sp = BuildProvider();
+        var currentSchema = sp.GetRequiredService<ICurrentSchema>();
 
         var uow = new CompositeUnitOfWork(sp);
         await uow.InitializeAsync(new UnitOfWorkOptions { IsTransactional = true });
@@ -141,9 +142,11 @@ public sealed class MultiSchemaUnitOfWorkTests(PostgresFixture fx)
 
         await uow.SaveChangesAsync();
 
-        // Each context only sees its own schema's rows via SET LOCAL search_path.
-        (await a.Set<Thing>().CountAsync()).ShouldBe(2);
-        (await b.Set<Thing>().CountAsync()).ShouldBe(1);
+        // Each context only sees its own schema's rows via qualified relation names.
+        using (currentSchema.Change(_schemaA))
+            (await a.Set<Thing>().CountAsync()).ShouldBe(2);
+        using (currentSchema.Change(_schemaB))
+            (await b.Set<Thing>().CountAsync()).ShouldBe(1);
 
         await uow.CommitAsync();
         await uow.DisposeAsync();
@@ -152,10 +155,11 @@ public sealed class MultiSchemaUnitOfWorkTests(PostgresFixture fx)
     [Fact]
     public async Task Same_schema_reads_stay_correct_after_cross_schema_switch()
     {
-        // Proves the SET-skip optimization does not break correctness: consecutive same-schema
-        // reads, and a flow_a read after touching flow_b, all resolve to the right schema.
+        // Consecutive same-schema reads, and a flow_a read after touching flow_b, all resolve
+        // to the right schema because every command carries its qualified relation name.
         await ArrangeSchemasAsync();
         var sp = BuildProvider();
+        var currentSchema = sp.GetRequiredService<ICurrentSchema>();
 
         var uow = new CompositeUnitOfWork(sp);
         await uow.InitializeAsync(new UnitOfWorkOptions { IsTransactional = true });
@@ -169,17 +173,25 @@ public sealed class MultiSchemaUnitOfWorkTests(PostgresFixture fx)
 
         await uow.SaveChangesAsync();
 
-        // Two consecutive same-schema reads on flow_a (second one exercises the skip path).
-        (await a.Set<Thing>().CountAsync()).ShouldBe(2);
-        (await a.Set<Thing>().CountAsync()).ShouldBe(2);
+        // Two consecutive same-schema reads on flow_a.
+        using (currentSchema.Change(_schemaA))
+        {
+            (await a.Set<Thing>().CountAsync()).ShouldBe(2);
+            (await a.Set<Thing>().CountAsync()).ShouldBe(2);
+        }
 
-        // Cross-schema switch to flow_b, then back to flow_a must re-apply flow_a's search_path.
-        (await b.Set<Thing>().CountAsync()).ShouldBe(1);
-        (await a.Set<Thing>().CountAsync()).ShouldBe(2);
+        // Cross-schema switch to flow_b, then back to flow_a must stay correct.
+        using (currentSchema.Change(_schemaB))
+            (await b.Set<Thing>().CountAsync()).ShouldBe(1);
+        using (currentSchema.Change(_schemaA))
+            (await a.Set<Thing>().CountAsync()).ShouldBe(2);
 
         // And consecutive flow_b reads after the switch back also stay correct.
-        (await b.Set<Thing>().CountAsync()).ShouldBe(1);
-        (await b.Set<Thing>().CountAsync()).ShouldBe(1);
+        using (currentSchema.Change(_schemaB))
+        {
+            (await b.Set<Thing>().CountAsync()).ShouldBe(1);
+            (await b.Set<Thing>().CountAsync()).ShouldBe(1);
+        }
 
         await uow.CommitAsync();
         await uow.DisposeAsync();
@@ -234,18 +246,21 @@ public sealed class MultiSchemaUnitOfWorkTests(PostgresFixture fx)
         await ArrangeSchemasAsync();
         var sp = BuildProvider();
 
+        var currentSchema = sp.GetRequiredService<ICurrentSchema>();
         var failedHandlerCalls = 0;
         var uow = new CompositeUnitOfWork(sp);
         await uow.InitializeAsync(new UnitOfWorkOptions { IsTransactional = true });
         uow.OnFailed((_, _) => { failedHandlerCalls++; return Task.CompletedTask; });
 
-        // Force the commit to throw at SaveChanges: seed a row via raw SQL (same transaction; search_path
-        // resolves the unqualified table to this context's schema), then add an EF row with the same PK so
-        // the commit-time INSERT hits a unique violation. (Adding two tracked entities with the same key
-        // would instead throw at tracking time, before commit.)
+        // Force the commit to throw at SaveChanges: seed a row via raw SQL (same transaction; the
+        // {{schema}} token qualifies the table to this context's schema), then add an EF row with the
+        // same PK so the commit-time INSERT hits a unique violation. (Adding two tracked entities with
+        // the same key would instead throw at tracking time, before commit.)
         var a = await uow.GetDbContextAsync<ProbeDbContext>(_schemaA);
         var dupId = Guid.NewGuid();
-        await a.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO things (\"Id\", \"Name\") VALUES ({dupId}, 'seed')");
+        using (currentSchema.Change(_schemaA))
+            await a.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO {{schema}}.things (\"Id\", \"Name\") VALUES ({dupId}, 'seed')");
         a.Set<Thing>().Add(new Thing { Id = dupId, Name = "dup" });
 
         await Should.ThrowAsync<Exception>(async () => await uow.CommitAsync()); // sets _exception, rethrows
