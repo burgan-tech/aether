@@ -1,14 +1,18 @@
 using System.Data.Common;
-using System.Threading;
-using System.Threading.Tasks;
 using BBT.Aether.MultiSchema;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
 namespace BBT.Aether.Uow.EntityFrameworkCore;
 
-public sealed class NpgsqlAetherProvider(
-    SchemaSwitchingMode mode = SchemaSwitchingMode.TransactionLocal) : IAetherDatabaseProvider
+/// <summary>
+/// PostgreSQL provider for the multi-schema Unit of Work. Schema targeting always uses
+/// <see cref="SchemaSwitchingMode.QualifiedNames"/>: SQL is rewritten to fully-qualified
+/// <c>"schema"."table"</c> names, so no connection-level state is required and contexts can
+/// run either on the UnitOfWork's shared transactional connection or on EF Core-owned pooled
+/// connections.
+/// </summary>
+public sealed class NpgsqlAetherProvider : IAetherDatabaseProvider
 {
     public DbConnection CreateConnection(string connectionString) => new NpgsqlConnection(connectionString);
 
@@ -20,24 +24,23 @@ public sealed class NpgsqlAetherProvider(
         string schema, SchemaScopeState state, ICurrentSchema currentSchema)
     {
         builder.UseNpgsql(sharedConnection);
-        builder.AddInterceptors(new SearchPathCommandInterceptor(schema, state, mode, currentSchema));
+        ApplySchemaBinding(builder, schema, currentSchema);
+    }
 
-        if (mode == SchemaSwitchingMode.QualifiedNames)
-            builder.UseAetherQualifiedNamesModel();
-
-        if (mode == SchemaSwitchingMode.SessionSearchPath)
-        {
-            // Register once per UoW (??= is idempotent across multiple DbContext creations).
-            // CompositeUnitOfWork calls this before disposing the connection.
-            state.Cleanup ??= static async (conn, ct) =>
-            {
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = "RESET search_path";
-                await cmd.ExecuteNonQueryAsync(ct);
-            };
-        }
+    public void ApplyOwned(DbContextOptionsBuilder builder, string connectionString,
+        string schema, ICurrentSchema currentSchema)
+    {
+        builder.UseNpgsql(connectionString);
+        ApplySchemaBinding(builder, schema, currentSchema);
     }
 
     public void ApplyConnectionString(DbContextOptionsBuilder builder, string connectionString)
         => builder.UseNpgsql(connectionString);
+
+    private static void ApplySchemaBinding(DbContextOptionsBuilder builder, string schema,
+        ICurrentSchema currentSchema)
+    {
+        builder.AddInterceptors(new QualifiedNamesCommandInterceptor(schema, currentSchema));
+        builder.UseAetherQualifiedNamesModel();
+    }
 }

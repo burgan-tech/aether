@@ -254,7 +254,10 @@ public sealed class JobDispatcherTests(PostgresFixture fx)
         await modelConn.OpenAsync();
         await using var ctx = ActivatorUtilities.CreateInstance<TestJobDbContext>(
             sp, configurator.BuildOptions(modelConn, _schema, new BBT.Aether.Uow.EntityFrameworkCore.SchemaScopeState()));
-        var script = ctx.Database.GenerateCreateScript();
+        var script = ctx.Database.GenerateCreateScript()
+            .Replace("\"__aether_schema__\"", $"\"{_schema}\"", StringComparison.Ordinal)
+            .Replace("__aether_schema__", $"\"{_schema}\"", StringComparison.Ordinal)
+            .Replace($"CREATE SCHEMA \"{_schema}\";", $"CREATE SCHEMA IF NOT EXISTS \"{_schema}\";", StringComparison.Ordinal);
 
         await using var ddlConn = new NpgsqlConnection(fx.ConnectionString);
         await ddlConn.OpenAsync();

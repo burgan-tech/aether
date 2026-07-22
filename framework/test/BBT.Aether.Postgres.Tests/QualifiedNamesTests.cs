@@ -108,10 +108,8 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
     public void Quoted_placeholder_rewrite_does_not_rewrite_schema_contents()
     {
         const string schema = "tenant___aether_schema___archive";
-        var interceptor = new SearchPathCommandInterceptor(
+        var interceptor = new QualifiedNamesCommandInterceptor(
             schema,
-            new SchemaScopeState(),
-            SchemaSwitchingMode.QualifiedNames,
             new StaticCurrentSchema(schema));
         using var command = new NpgsqlCommand(
             "SELECT * FROM \"__aether_schema__\".\"things\"");
@@ -126,9 +124,8 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
     public void Model_placeholders_are_rewritten_only_in_SQL_code_regions()
     {
         const string schema = "tenant";
-        var interceptor = new SearchPathCommandInterceptor(
-            schema, new SchemaScopeState(), SchemaSwitchingMode.QualifiedNames,
-            new StaticCurrentSchema(schema));
+        var interceptor = new QualifiedNamesCommandInterceptor(
+            schema, new StaticCurrentSchema(schema));
         using var command = new NpgsqlCommand(
             """
             SELECT '__aether_schema__', '"__aether_schema__"', E'__aether_schema__ \\'
@@ -158,10 +155,8 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
     public void Raw_SQL_tokens_are_rewritten_only_in_SQL_code_regions()
     {
         const string schema = "tenant";
-        var interceptor = new SearchPathCommandInterceptor(
+        var interceptor = new QualifiedNamesCommandInterceptor(
             schema,
-            new SchemaScopeState(),
-            SchemaSwitchingMode.QualifiedNames,
             new StaticCurrentSchema(schema));
         using var command = new NpgsqlCommand(
             """
@@ -194,10 +189,8 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
     public void Raw_SQL_token_after_ordinary_string_ending_in_backslash_is_rewritten()
     {
         const string schema = "tenant";
-        var interceptor = new SearchPathCommandInterceptor(
+        var interceptor = new QualifiedNamesCommandInterceptor(
             schema,
-            new SchemaScopeState(),
-            SchemaSwitchingMode.QualifiedNames,
             new StaticCurrentSchema(schema));
         using var command = new NpgsqlCommand(
             """
@@ -216,10 +209,8 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
     public void Raw_SQL_tokens_in_escape_string_with_escaped_quote_and_backslash_are_protected()
     {
         const string schema = "tenant";
-        var interceptor = new SearchPathCommandInterceptor(
+        var interceptor = new QualifiedNamesCommandInterceptor(
             schema,
-            new SchemaScopeState(),
-            SchemaSwitchingMode.QualifiedNames,
             new StaticCurrentSchema(schema));
         using var command = new NpgsqlCommand(
             """
@@ -236,27 +227,6 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
             , e'escaped quote \'{{schema}} and backslash \\{schema}'
             , "tenant"."things"
             """);
-    }
-
-    [Fact]
-    public void Raw_SQL_tokens_in_protected_regions_are_not_rejected_outside_qualified_names_mode()
-    {
-        const string schema = "tenant";
-        var state = new SchemaScopeState { Current = schema };
-        var interceptor = new SearchPathCommandInterceptor(
-            schema,
-            state,
-            SchemaSwitchingMode.SessionSearchPath,
-            new StaticCurrentSchema(schema));
-        using var command = new NpgsqlCommand(
-            """
-            SELECT '{schema}', "{{schema}}"
-            -- {schema}
-            /* outer {{schema}} /* nested {schema} */ */
-            , $$ SELECT '{schema}' $$, $tag$ {{schema}} $tag$
-            """);
-
-        Should.NotThrow(() => interceptor.ReaderExecuting(command, null!, default));
     }
 
     [Fact]
@@ -333,33 +303,12 @@ public sealed class QualifiedNamesTests(PostgresFixture fx)
     {
         var commandCount = _commands.CommandTexts.Count;
 
-        var exception = Should.Throw<Exception>(() => new SearchPathCommandInterceptor(
+        var exception = Should.Throw<Exception>(() => new QualifiedNamesCommandInterceptor(
             schema,
-            new SchemaScopeState(),
-            SchemaSwitchingMode.QualifiedNames,
             new StaticCurrentSchema(schema)));
 
         (exception is ArgumentException or InvalidOperationException).ShouldBeTrue();
         _commands.CommandTexts.Count.ShouldBe(commandCount);
-    }
-
-    [Theory]
-    [InlineData(SchemaSwitchingMode.TransactionLocal)]
-    [InlineData(SchemaSwitchingMode.SessionSearchPath)]
-    public void Raw_SQL_token_is_rejected_outside_qualified_names_mode(SchemaSwitchingMode mode)
-    {
-        const string schema = "tenant";
-        var interceptor = new SearchPathCommandInterceptor(
-            schema,
-            new SchemaScopeState(),
-            mode,
-            new StaticCurrentSchema(schema));
-        using var command = new NpgsqlCommand("SELECT * FROM {{schema}}.\"things\"");
-
-        var exception = Should.Throw<InvalidOperationException>(() =>
-            interceptor.ReaderExecuting(command, null!, default));
-
-        exception.Message.ShouldContain("QualifiedNames");
     }
 
     private sealed class Thing : AggregateRoot<Guid>
