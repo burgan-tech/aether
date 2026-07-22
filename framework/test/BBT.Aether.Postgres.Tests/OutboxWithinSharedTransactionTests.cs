@@ -65,7 +65,7 @@ public sealed class OutboxWithinSharedTransactionTests(PostgresFixture fx)
             base.OnModelCreating(modelBuilder);
             modelBuilder.Entity<Order>(e =>
             {
-                e.ToTable("orders"); // NO schema - resolved at runtime via SET LOCAL search_path
+                e.ToTable("orders"); // NO schema - rewritten at runtime to the qualified schema name
                 e.HasKey(o => o.Id);
                 e.Property(o => o.Customer).IsRequired();
             });
@@ -127,9 +127,8 @@ public sealed class OutboxWithinSharedTransactionTests(PostgresFixture fx)
 
     /// <summary>
     /// Creates the schema, then creates the `orders` and `OutboxMessages` tables using EF Core's own
-    /// GenerateCreateScript() (so the DDL matches the entity shapes exactly). The script is executed
-    /// against a setup connection whose search_path points at the test schema, so the unqualified
-    /// CREATE TABLE statements land in the right schema.
+    /// GenerateCreateScript() (so the DDL matches the entity shapes exactly), with the model's
+    /// schema placeholder rewritten to the test schema.
     /// </summary>
     private async Task ArrangeSchemaAsync(IServiceProvider sp)
     {
@@ -148,7 +147,10 @@ public sealed class OutboxWithinSharedTransactionTests(PostgresFixture fx)
         await modelConn.OpenAsync();
         await using var ctx = ActivatorUtilities.CreateInstance<TestDbContext>(
             sp, configurator.BuildOptions(modelConn, _schema, new BBT.Aether.Uow.EntityFrameworkCore.SchemaScopeState()));
-        var script = ctx.Database.GenerateCreateScript();
+        var script = ctx.Database.GenerateCreateScript()
+            .Replace("\"__aether_schema__\"", $"\"{_schema}\"", StringComparison.Ordinal)
+            .Replace("__aether_schema__", $"\"{_schema}\"", StringComparison.Ordinal)
+            .Replace($"CREATE SCHEMA \"{_schema}\";", $"CREATE SCHEMA IF NOT EXISTS \"{_schema}\";", StringComparison.Ordinal);
 
         await using var ddlConn = new NpgsqlConnection(fx.ConnectionString);
         await ddlConn.OpenAsync();

@@ -78,11 +78,10 @@ The scope flows across `await` boundaries (`AsyncLocal`) and restores the previo
 dispose. Out-of-order disposal throws `InvalidOperationException` ("Schema scope corrupted").
 
 > The obsolete `ICurrentSchema.Set()` / `IsResolved` API and
-> `NpgsqlSchemaConnectionInterceptor` have been removed. There is no single SQL mechanism shared
-> by every mode: `TransactionLocal` applies transaction-local state per command,
-> `SessionSearchPath` deliberately uses session-level `SET` / `RESET search_path`, and
-> `QualifiedNames` qualifies relations without changing `search_path`. See
-> [Schema switching modes](#schema-switching-modes) for the mode-specific contract.
+> `NpgsqlSchemaConnectionInterceptor` have been removed, as have the former `TransactionLocal`
+> and `SessionSearchPath` switching modes. Schema targeting is always
+> [qualified names](#schema-switching-qualified-names): relations are qualified in the SQL
+> itself and `search_path` is never touched.
 
 ### Schema-name formatting and validation
 
@@ -91,82 +90,45 @@ dispose. Out-of-order disposal throws `InvalidOperationException` ("Schema scope
 characters, ensures a leading letter/underscore, and trims to 63 chars). The *formatted*
 name is what `Name` returns and what ends up on the connection.
 
-Before a name is interpolated into `SET LOCAL search_path`, it is validated and quoted by
+Before a name is interpolated into SQL, it is validated and quoted by
 `PostgreSqlIdentifier.QuoteSchema(...)` (regex `^[a-zA-Z_][a-zA-Z0-9_]*$`). An invalid name
 throws `InvalidOperationException: Invalid PostgreSQL identifier: <name>`. Schema names
 cannot be passed as SQL parameters, so this validate-then-quote step is the injection guard.
 
-## Schema switching modes
+## Schema switching: qualified names
 
-Schema isolation strategy is configured explicitly via `SchemaSwitchingMode`. Pass it as the
-second argument to `AddAetherNpgsql` (default `TransactionLocal`):
+Schema targeting always uses `SchemaSwitchingMode.QualifiedNames` — the only member of the
+enum (the former `TransactionLocal` and `SessionSearchPath` modes were removed together with
+their `search_path` manipulation). The parameter on `AddAetherNpgsql` is optional and kept for
+signature compatibility:
 
 ```csharp
-services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.TransactionLocal);
-services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.SessionSearchPath);
-services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.QualifiedNames);
+services.AddAetherNpgsql<MyDbContext>(connectionString);
 ```
 
-| Mode | Command issued | Requires transaction | Pool topology |
-|------|---------------|----------------------|---------------|
-| `TransactionLocal` | `SET LOCAL search_path TO "<schema>", public` before every command | **Yes** (`IsTransactional = true`) | PgBouncer transaction pooling ✅, native pool ✅ |
-| `SessionSearchPath` | `SET search_path TO "<schema>", public` once + `RESET search_path` at UoW dispose | No (`IsTransactional = false`) | Native Npgsql pool only ✅ |
+| Strategy | Command issued | Requires transaction | Pool topology |
+|----------|---------------|----------------------|---------------|
 | `QualifiedNames` | Rewrites EF model placeholders and explicit raw-SQL `{{schema}}` tokens to `"<schema>"` | No | PgBouncer transaction/session pooling ✅, native pool ✅ |
 
-**Choosing a mode:**
-
-- **`TransactionLocal` (default):** Use when `IsTransactional = true`. `SET LOCAL` is
-  transaction-scoped, so it never leaks to the pool even under PgBouncer transaction pooling.
-  This is the safe default for any pool topology.
-
-- **`SessionSearchPath`:** Use for non-transactional, read-heavy flows (e.g. query-only
-  services) with the **native Npgsql connection pool** (no PgBouncer). The `search_path` is
-  set once per UoW (skipped on subsequent commands to the same schema) and reset with
-  `RESET search_path` before the connection is returned to the pool, preventing leakage.
-  Round-trip overhead: 1 SET + N queries + 1 RESET — lower than opening a transaction.
-  **Do not use with PgBouncer transaction pooling** — the backend may switch between commands
-  and the session-level `SET` would apply to a different tenant's queries.
-
-- **`QualifiedNames`:** Use when queries must be schema-safe without connection state, including
-  non-transactional work behind PgBouncer transaction pooling. EF-generated relations are
-  qualified at command execution; no `SET`, `SET LOCAL`, or `RESET search_path` is emitted.
+Because every command is self-describing, no connection-level state exists: queries are
+schema-safe on any pooled connection, transactional or not, with or without PgBouncer.
 
 ## How schema isolation works
 
-Within one Unit of Work, **all** schema-bound `DbContext` instances share **one**
-`NpgsqlConnection` (see
-[`CompositeUnitOfWork`](../../src/BBT.Aether.Infrastructure/BBT/Aether/Uow/CompositeUnitOfWork.cs)).
-When `IsTransactional = true`, a single `NpgsqlTransaction` is also shared. Contexts are
-created lazily and cached by `(DbContextType, Schema)`; the connection (and optionally
-transaction) are opened on the first context request.
+Connection topology depends on the Unit of Work's transaction mode (see
+[`CompositeUnitOfWork`](../../src/BBT.Aether.Infrastructure/BBT/Aether/Uow/CompositeUnitOfWork.cs)):
 
-Isolation comes from `SearchPathCommandInterceptor`, which runs before every EF command.
-Behavior depends on the configured `SchemaSwitchingMode`:
+- **`IsTransactional = true`:** all schema-bound `DbContext` instances share **one**
+  `NpgsqlConnection` and **one** `NpgsqlTransaction`, opened on the first context request.
+  Cross-schema writes commit atomically.
+- **`IsTransactional = false`:** the Unit of Work holds **no physical connection**. Contexts
+  are bound to the connection string and EF Core owns the connection lifecycle — a pooled
+  connection is rented per operation and returned immediately. This keeps connection-pool
+  pressure proportional to actual database work, not to request duration.
 
-### `TransactionLocal` (default)
+Contexts are created lazily and cached by `(DbContextType, Schema)` in both shapes.
 
-Prepends `SET LOCAL search_path TO "<schema>", public` to every command. `SET LOCAL` is
-**transaction-scoped** — it auto-reverts when the transaction ends, so it never leaks to the
-pool. This is why `IsTransactional = true` is required: without an open transaction `SET LOCAL`
-would be silently ignored, and the interceptor throws `InvalidOperationException` to guard
-against it.
-
-If the same schema is active for consecutive commands, the redundant `SET LOCAL` is skipped
-(tracked by `SchemaScopeState.Current`) — a cross-schema switch re-applies it.
-
-### `SessionSearchPath`
-
-Issues `SET search_path TO "<schema>", public` (session-scoped) once per UoW, skipping
-subsequent commands that target the same schema. At UoW dispose, `RESET search_path` is
-executed on the shared connection before it is returned to the pool, preventing leakage.
-
-No transaction is required. Use with `IsTransactional = false` and the native Npgsql pool.
-
-The `SET` is always run as its own command (same connection) rather than concatenated onto
-the command text, because concatenation would add an extra result set and break EF's
-rows-affected accounting for INSERT/UPDATE batches.
-
-### `QualifiedNames`
+Isolation comes from `QualifiedNamesCommandInterceptor`, which runs before every EF command:
 
 Schema-agnostic mappings receive one tenant-independent model placeholder. Immediately before
 execution the interceptor replaces that placeholder with the validated schema bound to the
@@ -184,7 +146,8 @@ database access; resolve it again inside the new `Change(...)` scope.
 
 ## EF mappings are schema-agnostic
 
-Map tables with **no schema argument** — schema is resolved at runtime by the selected mode:
+Map tables with **no schema argument** — schema is resolved at runtime by qualified-names
+rewriting:
 
 ```csharp
 protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -203,7 +166,7 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 **Why:** EF Core caches one compiled model per `DbContext` type. If the schema were part of
 the mapping, you would need a distinct model (and cache entry) per schema, and a context
 could only ever talk to one schema. Leaving tables unqualified means the same compiled model
-serves every schema, and the selected mode supplies the schema at execution time.
+serves every schema, and the interceptor supplies the schema at execution time.
 
 ## Usage
 
@@ -211,7 +174,7 @@ Resolve the schema-bound context from the active Unit of Work via
 `IAetherDbContextProvider<TDbContext>` (repositories do this internally). It reads
 `currentSchema.Name` and asks the active UoW to materialize the context bound to that schema.
 
-### Transactional (`TransactionLocal` mode — default)
+### Transactional (shared connection + transaction)
 
 ```csharp
 using (currentSchema.Change("flow_a"))
@@ -232,39 +195,31 @@ await using (var uow = unitOfWorkManager.Begin(
 }
 ```
 
-### Non-transactional (`SessionSearchPath` mode)
+### Non-transactional (EF Core-owned connections)
 
-Register with `SchemaSwitchingMode.SessionSearchPath`, then use `IsTransactional = false`:
+Use `IsTransactional = false` for read-heavy flows. The Unit of Work never opens a physical
+connection; EF Core rents one from the pool per operation and returns it immediately:
 
 ```csharp
-// Registration (Startup / Program.cs):
-services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.SessionSearchPath);
-
-// Usage:
 using (currentSchema.Change("flow_a"))
 await using (var uow = unitOfWorkManager.Begin(
     new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = false }))
 {
-    var db = await dbContextProvider.GetDbContextAsync();  // SET search_path TO flow_a, public
-    var items = await db.Set<Thing>().ToListAsync();       // no SET repeated (same schema)
+    var db = await dbContextProvider.GetDbContextAsync();  // no connection opened yet
+    var items = await db.Set<Thing>().ToListAsync();       // rents + returns a pooled connection
 
     // Switch schema within same UoW:
     using (currentSchema.Change("flow_b"))
     {
-        var dbB = await dbContextProvider.GetDbContextAsync();  // SET search_path TO flow_b, public
-        var others = await dbB.Set<Thing>().ToListAsync();
+        var dbB = await dbContextProvider.GetDbContextAsync();
+        var others = await dbB.Set<Thing>().ToListAsync(); // fully-qualified against flow_b
     }
-    // UoW dispose issues RESET search_path — pool gets clean session
 }
 ```
 
-### Qualified names and raw SQL
+### Raw SQL and the `{{schema}}` token
 
 ```csharp
-services.AddAetherNpgsql<MyDbContext>(
-    connectionString,
-    SchemaSwitchingMode.QualifiedNames);
-
 await using var uow = uowManager.Begin(new UnitOfWorkOptions
 {
     Scope = UnitOfWorkScopeOption.RequiresNew,
@@ -294,8 +249,7 @@ Schema-dependent `FromSqlRaw` and `ExecuteSqlRaw` statements must put the exact 
 token at every runtime relation reference. The token is replaced only in PostgreSQL SQL code;
 occurrences inside string literals (including escape strings), quoted identifiers, line or
 nested block comments, and dollar-quoted bodies are preserved. Parameters remain parameters.
-Schema-independent SQL such as `SELECT 1` needs no token. Other switching modes reject a real
-`{{schema}}` token and instead use their documented `search_path` contract.
+Schema-independent SQL such as `SELECT 1` needs no token.
 
 If `currentSchema.Name` is null when a context is requested, the provider throws
 `InvalidOperationException: Current schema is not set.`
@@ -325,28 +279,14 @@ app.MapControllers();
 
 ## PgBouncer (transaction pooling)
 
-Both `TransactionLocal` and `QualifiedNames` are safe under PgBouncer transaction pooling.
-`QualifiedNames` does not depend on backend session state and can run without a transaction.
+Qualified names are safe under PgBouncer transaction pooling: no command depends on backend
+session state, so it does not matter which physical backend executes it, transactional or not.
 
-`SET LOCAL` is transaction-scoped: when the transaction ends and the connection returns to the
-pool, the `search_path` is gone — it never leaks into a connection later handed to another
-request. This is asserted directly by
-[`PgBouncerSearchPathTests`](../../test/BBT.Aether.Postgres.Tests/PgBouncerSearchPathTests.cs)
-("SET LOCAL stayed inside the UoW transaction and never mutated session/pooled state").
+General rules that keep any pool topology healthy:
 
-`SessionSearchPath` mode issues a session-level `SET`, which **cannot** be used with
-PgBouncer transaction pooling — the backend may switch between commands and the schema set by
-one request would be visible to another. Use `SessionSearchPath` only with the native Npgsql
-pool or a backend connection whose session is pinned for the whole UoW.
-
-Rules for `TransactionLocal` under PgBouncer transaction pooling:
-
-1. **Always run inside an explicit transaction** (`IsTransactional = true`). The interceptor
-   throws `InvalidOperationException` if no transaction is open — use this to catch
-   misconfiguration early.
-2. **Keep transactions short.** A connection is leased to the request only while the
-   transaction is open.
-3. **No external service calls inside an open transaction** (HTTP, broker publishes, etc.).
+1. **Keep transactions short.** A transactional Unit of Work leases one connection for its
+   whole lifetime; a non-transactional one leases none.
+2. **No external service calls inside an open transaction** (HTTP, broker publishes, etc.).
    Do that work before opening or after committing the Unit of Work.
 
 ## SQL Server limitations

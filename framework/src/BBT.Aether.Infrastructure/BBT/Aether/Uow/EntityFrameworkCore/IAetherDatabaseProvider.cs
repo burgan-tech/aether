@@ -23,5 +23,17 @@ public interface IAetherDatabaseProvider
     void ApplyShared(DbContextOptionsBuilder builder, DbConnection sharedConnection,
         string schema, SchemaScopeState state, ICurrentSchema currentSchema) =>
         ApplyShared(builder, sharedConnection, schema, state);
+
+    /// <summary>
+    /// Binds options to the connection string so EF Core creates, opens, and closes its own
+    /// pooled connection per operation — no caller-managed shared connection is involved.
+    /// Used by non-transactional units of work, where holding a physical connection for the
+    /// UnitOfWork's lifetime is unnecessary pool pressure. The default keeps existing providers
+    /// source-compatible; multi-schema providers should override to add their schema binding.
+    /// </summary>
+    void ApplyOwned(DbContextOptionsBuilder builder, string connectionString,
+        string schema, ICurrentSchema currentSchema) =>
+        ApplyConnectionString(builder, connectionString);
+
     void ApplyConnectionString(DbContextOptionsBuilder builder, string connectionString);
 }

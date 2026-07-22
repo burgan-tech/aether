@@ -145,9 +145,7 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
         var services = new ServiceCollection();
 
         services.AddAetherCore(_ => { });
-        // Session search-path mode so a non-transactional UoW is usable (TransactionLocal, the
-        // default, requires a transaction).
-        services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString, SchemaSwitchingMode.SessionSearchPath);
+        services.AddAetherNpgsql<TestDbContext>(fx.ConnectionString);
         services.AddAetherDomainEvents<TestDbContext>();
         services.AddAetherOutbox<TestDbContext>(options => options.Schema = _schema);
 
@@ -176,7 +174,10 @@ public sealed class NonTransactionalOutboxDispatchTests(PostgresFixture fx)
         await modelConn.OpenAsync();
         await using var ctx = ActivatorUtilities.CreateInstance<TestDbContext>(
             sp, configurator.BuildOptions(modelConn, _schema, new BBT.Aether.Uow.EntityFrameworkCore.SchemaScopeState()));
-        var script = ctx.Database.GenerateCreateScript();
+        var script = ctx.Database.GenerateCreateScript()
+            .Replace("\"__aether_schema__\"", $"\"{_schema}\"", StringComparison.Ordinal)
+            .Replace("__aether_schema__", $"\"{_schema}\"", StringComparison.Ordinal)
+            .Replace($"CREATE SCHEMA \"{_schema}\";", $"CREATE SCHEMA IF NOT EXISTS \"{_schema}\";", StringComparison.Ordinal);
 
         await using var ddlConn = new NpgsqlConnection(fx.ConnectionString);
         await ddlConn.OpenAsync();

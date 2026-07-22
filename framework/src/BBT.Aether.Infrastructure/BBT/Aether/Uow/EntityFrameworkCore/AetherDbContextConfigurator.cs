@@ -28,4 +28,16 @@ public sealed class AetherDbContextConfigurator<TDbContext>(
             serviceProvider.GetRequiredService<ICurrentSchema>());
         return builder.Options;
     }
+
+    public DbContextOptions<TDbContext> BuildOwnedOptions(string schema)
+    {
+        var builder = new DbContextOptionsBuilder<TDbContext>();
+        configure(serviceProvider, builder);
+        provider.ApplyOwned(
+            builder,
+            connectionString,
+            schema,
+            serviceProvider.GetRequiredService<ICurrentSchema>());
+        return builder.Options;
+    }
 }

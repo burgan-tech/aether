@@ -13,33 +13,31 @@ namespace Microsoft.Extensions.DependencyInjection;
 public static class AetherNpgsqlServiceCollectionExtensions
 {
     /// <summary>
-    /// Registers an Aether DbContext backed by PostgreSQL (Npgsql).
+    /// Registers an Aether DbContext backed by PostgreSQL (Npgsql). Schema targeting always uses
+    /// <see cref="SchemaSwitchingMode.QualifiedNames"/> (fully-qualified <c>"schema"."table"</c>
+    /// SQL), which is safe on any pooled connection and lets non-transactional units of work
+    /// leave connection management entirely to EF Core.
     /// </summary>
     /// <param name="services">The service collection.</param>
     /// <param name="connectionString">PostgreSQL connection string.</param>
     /// <param name="mode">
-    /// Schema switching strategy. Default is <see cref="SchemaSwitchingMode.TransactionLocal"/>
-    /// (requires <c>IsTransactional = true</c>). Use <see cref="SchemaSwitchingMode.SessionSearchPath"/>
-    /// for non-transactional UoWs with Npgsql's native connection pool.
+    /// Schema switching strategy. <see cref="SchemaSwitchingMode.QualifiedNames"/> is the only
+    /// supported value; the parameter is kept for signature compatibility.
     /// </param>
     /// <param name="configure">Optional additional DbContext options.</param>
     /// <example>
     /// <code>
-    /// // Transactional (default):
     /// services.AddAetherNpgsql&lt;MyDbContext&gt;(connectionString);
-    ///
-    /// // Non-transactional with direct/session pool:
-    /// services.AddAetherNpgsql&lt;MyDbContext&gt;(connectionString, SchemaSwitchingMode.SessionSearchPath);
     /// </code>
     /// </example>
     public static IServiceCollection AddAetherNpgsql<TDbContext>(
         this IServiceCollection services,
         string connectionString,
-        SchemaSwitchingMode mode = SchemaSwitchingMode.TransactionLocal,
+        SchemaSwitchingMode mode = SchemaSwitchingMode.QualifiedNames,
         Action<IServiceProvider, DbContextOptionsBuilder>? configure = null)
         where TDbContext : AetherDbContext<TDbContext>
     {
-        services.AddAetherDbContext<TDbContext>(new NpgsqlAetherProvider(mode), connectionString, configure);
+        services.AddAetherDbContext<TDbContext>(new NpgsqlAetherProvider(), connectionString, configure);
 
         if (typeof(IHasEfCoreOutbox).IsAssignableFrom(typeof(TDbContext)))
             services.AddScoped(typeof(IOutboxLeaseStore),

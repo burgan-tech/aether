@@ -158,36 +158,33 @@ scope cannot join a non-transactional root and fails with guidance to use `Requi
 ## Registration
 
 ```csharp
-// PostgreSQL (BBT.Aether.Npgsql) — full multi-schema, TransactionLocal mode (default)
+// PostgreSQL (BBT.Aether.Npgsql) — full multi-schema via qualified names (the only mode)
 services.AddAetherNpgsql<MyDbContext>(connectionString);
-
-// PostgreSQL — non-transactional SessionSearchPath mode (native Npgsql pool, no PgBouncer)
-services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.SessionSearchPath);
-
-// PostgreSQL — qualified relations, no search_path state (transaction optional)
-services.AddAetherNpgsql<MyDbContext>(connectionString, SchemaSwitchingMode.QualifiedNames);
 
 // SQL Server (BBT.Aether.SqlServer) — single-schema
 services.AddAetherSqlServer<MyDbContext>(connectionString);
 ```
 
-`AddAetherNpgsql` accepts an optional `SchemaSwitchingMode` (second parameter, default
-`TransactionLocal`). See [Multi-Schema Support](../multi-schema/README.md#schema-switching-modes)
-for when to choose each mode.
+Schema targeting on PostgreSQL always uses `SchemaSwitchingMode.QualifiedNames`: SQL is
+rewritten to fully-qualified `"schema"."table"` names, so no connection-level `search_path`
+state exists and any pool topology (including PgBouncer transaction pooling) is safe. The
+former `TransactionLocal` and `SessionSearchPath` modes have been removed. See
+[Multi-Schema Support](../multi-schema/README.md) for details.
 
 Both Npgsql/SqlServer overloads wrap the core overload, which selects the provider explicitly:
 
 ```csharp
 services.AddAetherDbContext<MyDbContext>(
-    new NpgsqlAetherProvider(SchemaSwitchingMode.TransactionLocal),   // or SqlServerAetherProvider()
+    new NpgsqlAetherProvider(),   // or SqlServerAetherProvider()
     connectionString,
     (sp, options) => { /* optional extra EF Core configuration */ });
 ```
 
-The **connection string is captured** so the UoW can open the single shared connection it
-hands contexts out from; the optional `configure` delegate
-(`Action<IServiceProvider, DbContextOptionsBuilder>`) is captured (and re-applied with the
-shared connection bound) for each schema-bound context.
+The **connection string is captured** and the optional `configure` delegate
+(`Action<IServiceProvider, DbContextOptionsBuilder>`) is captured and re-applied for each
+schema-bound context. A transactional UoW opens one shared connection and hands contexts out
+on it; a non-transactional UoW binds contexts to the connection string, so EF Core owns the
+connection lifecycle (a pooled connection is rented per operation and returned immediately).
 
 `AddAetherDbContext` calls `AddAetherUnitOfWork<TDbContext>()`, which registers the ambient
 accessor, `IUnitOfWorkManager`, the domain-event sink, and `IAetherDbContextProvider<>`. Call
@@ -222,9 +219,9 @@ builder.Services.Configure<UnitOfWorkMiddlewareOptions>(options =>
 app.UseUnitOfWorkMiddleware();
 ```
 
-> **Default:** `IsTransactional = true`, `Scope = Required`. The middleware default is
-> explicitly transactional so that `TransactionLocal` schema switching (which requires an open
-> transaction) works without further configuration.
+> **Default:** `IsTransactional = true`, `Scope = Required`. Use `IsTransactional = false`
+> for read-heavy endpoints: a non-transactional UoW holds no physical connection at all —
+> EF Core rents a pooled connection per operation — which keeps connection-pool pressure low.
 
 ## Commit pipeline
 
@@ -276,7 +273,6 @@ non-transactional business and outbox writes.
 | `No active UnitOfWork.` | A context is requested with no ambient UoW (common when using `BeginAsync` where the ambient does not propagate to the caller — use `Begin`). |
 | `UnitOfWork DbContext limit exceeded. Limit: N` | More than `MaxDbContextCount` distinct `(Type, Schema)` contexts in one UoW. |
 | `Invalid PostgreSQL identifier: X` | The active schema name fails PostgreSQL identifier validation before it enters command text. |
-| `SchemaSwitchingMode.TransactionLocal requires a transaction, but none is active.` | `SchemaSwitchingMode.TransactionLocal` was used without an active transaction. Set `IsTransactional = true`, or switch to `SessionSearchPath` or `QualifiedNames` as appropriate for the pool mode. |
 | `A transactional Required UnitOfWork cannot join a non-transactional outer UnitOfWork.` | The inner operation requested a transaction that the existing root cannot acquire; use `RequiresNew`. |
 | `DbContext is bound to schema 'A', but current schema is 'B'.` | A QualifiedNames context/query crossed schema scopes; resolve it again in the current scope. |
 

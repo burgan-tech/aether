@@ -16,12 +16,14 @@ using Microsoft.Extensions.DependencyInjection;
 namespace BBT.Aether.Uow;
 
 /// <summary>
-/// Root unit of work backed by a single shared <see cref="DbConnection"/> and, when
-/// <see cref="UnitOfWorkOptions.IsTransactional"/> is <see langword="true"/>, a single shared
-/// <see cref="DbTransaction"/>. Hands out lazily-created schema-bound <see cref="DbContext"/>
-/// instances keyed by (DbContextType, Schema). Each created context enlists via
-/// <c>UseTransactionAsync</c> only when the shared transaction exists and is bound to its schema
-/// by the configured database provider, so schema isolation is a provider concern.
+/// Root unit of work handing out lazily-created schema-bound <see cref="DbContext"/> instances
+/// keyed by (DbContextType, Schema). When <see cref="UnitOfWorkOptions.IsTransactional"/> is
+/// <see langword="true"/>, the root opens a single shared <see cref="DbConnection"/> and
+/// <see cref="DbTransaction"/> on first context creation and every context enlists via
+/// <c>UseTransactionAsync</c>. When it is <see langword="false"/>, the root never opens a
+/// connection itself: contexts are bound to the connection string and EF Core owns the
+/// connection lifecycle (a pooled connection is rented per operation and returned immediately).
+/// Schema binding is a provider concern in both shapes.
 /// Domain events remain buffered until <see cref="CommitAsync"/>. Transactional roots preserve
 /// the outbox / direct-publish commit ordering; non-transactional roots dispatch during
 /// <see cref="CommitAsync"/>, without atomicity between auto-committed business writes and event
@@ -88,10 +90,10 @@ public sealed class CompositeUnitOfWork(
     public IUnitOfWork? Outer { get; private set; }
 
     /// <summary>
-    /// Initializes the unit of work. Does NOT open the connection here — the connection is opened
-    /// lazily on the first <see cref="GetDbContextAsync{TDbContext}"/> call. A transaction is opened
-    /// at that point only when <see cref="UnitOfWorkOptions.IsTransactional"/> is
-    /// <see langword="true"/>, so an empty unit of work costs nothing.
+    /// Initializes the unit of work. Does NOT open a connection here. A transactional root opens
+    /// its shared connection and transaction lazily on the first
+    /// <see cref="GetDbContextAsync{TDbContext}"/> call; a non-transactional root never opens one
+    /// (EF Core rents pooled connections per operation), so an empty unit of work costs nothing.
     /// </summary>
     public Task InitializeAsync(UnitOfWorkOptions options, CancellationToken cancellationToken = default)
     {
@@ -141,9 +143,11 @@ public sealed class CompositeUnitOfWork(
     }
 
     /// <summary>
-    /// Gets or creates the context bound to <paramref name="schema"/>. The first context opens the
-    /// shared connection and, for a transactional root, the shared transaction. The context
-    /// enlists only when that transaction exists.
+    /// Gets or creates the context bound to <paramref name="schema"/>. For a transactional root,
+    /// the first context opens the shared connection and the shared transaction, and every
+    /// context enlists on them. A non-transactional root never opens a connection itself: its
+    /// contexts are bound to the connection string, so EF Core rents a pooled connection per
+    /// operation and returns it immediately — the unit of work holds no physical connection.
     /// </summary>
     public async Task<TDbContext> GetDbContextAsync<TDbContext>(string schema, CancellationToken cancellationToken = default)
         where TDbContext : DbContext
@@ -159,30 +163,36 @@ public sealed class CompositeUnitOfWork(
             return (TDbContext)existing;
         }
 
-        if (_contexts.Count >= _options.MaxDbContextCount)
-        {
-            throw new InvalidOperationException(
-                $"UnitOfWork DbContext limit exceeded. Limit: {_options.MaxDbContextCount}");
-        }
+        // if (_contexts.Count >= _options.MaxDbContextCount)
+        // {
+        //     throw new InvalidOperationException(
+        //         $"UnitOfWork DbContext limit exceeded. Limit: {_options.MaxDbContextCount}");
+        // }
 
         var configurator = serviceProvider.GetRequiredService<IAetherDbContextConfigurator<TDbContext>>();
 
-        if (_connection is null)
+        DbContextOptions<TDbContext> options;
+        if (_effectiveIsTransactional)
         {
-            _connection = configurator.CreateConnection();
-            await _connection.OpenAsync(cancellationToken);
-
-            // Reset schema state whenever a fresh connection is established.
-            _schemaState.Current = null;
-
-            if (_effectiveIsTransactional)
+            if (_connection is null)
             {
+                _connection = configurator.CreateConnection();
+                await _connection.OpenAsync(cancellationToken);
+
+                // Reset schema state whenever a fresh connection is established.
+                _schemaState.Current = null;
+
                 _transaction = await _connection.BeginTransactionAsync(
                     _options.IsolationLevel ?? IsolationLevel.ReadCommitted, cancellationToken);
             }
+
+            options = configurator.BuildOptions(_connection, schema, _schemaState);
+        }
+        else
+        {
+            options = configurator.BuildOwnedOptions(schema);
         }
 
-        var options = configurator.BuildOptions(_connection, schema, _schemaState);
         var context = ActivatorUtilities.CreateInstance<TDbContext>(serviceProvider, options);
 
         if (_transaction is not null)
@@ -572,8 +582,8 @@ public sealed class CompositeUnitOfWork(
         // the first failure after everything has been attempted.
         Exception? firstFailure = null;
 
-        // For SessionSearchPath mode the provider registers a cleanup that resets the session-level
-        // search_path before the connection is returned to the pool.
+        // A provider that wrote session-level state on the shared connection registers a cleanup
+        // to reset it before the connection is returned to the pool.
         if (_schemaState.Cleanup is not null && _schemaState.Current is not null && _connection is not null)
         {
             try
