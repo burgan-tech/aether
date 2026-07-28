@@ -51,13 +51,16 @@ public class NpgsqlInboxLeaseStore<TDbContext>(
         command.CommandText = $"""
             UPDATE {fullTableName}
             SET
+                "RetryCount"  = CASE WHEN "Status" = @processing
+                                     THEN "RetryCount" + 1
+                                     ELSE "RetryCount" END,
                 "Status"      = @processing,
                 "LockedBy"    = @workerId,
                 "LockedUntil" = @lockedUntil
             WHERE "Id" IN (
                 SELECT "Id"
                 FROM {fullTableName}
-                WHERE "Status" = @pending
+                WHERE "Status" IN (@pending, @processing)
                   AND ("LockedUntil" IS NULL OR "LockedUntil" < @now)
                   AND ("NextRetryTime" IS NULL OR "NextRetryTime" <= @now)
                 ORDER BY "CreatedAt"
