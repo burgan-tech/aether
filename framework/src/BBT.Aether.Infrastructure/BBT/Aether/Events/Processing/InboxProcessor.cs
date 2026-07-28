@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Clock;
 using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
@@ -18,10 +19,13 @@ namespace BBT.Aether.Events.Processing;
 public class InboxProcessor<TDbContext>(
     IServiceScopeFactory scopeFactory,
     WorkerIdentity workerIdentity,
+    IClock clock,
     ILogger<InboxProcessor<TDbContext>> logger,
     AetherInboxOptions options) : IInboxProcessor
     where TDbContext : DbContext, IHasEfCoreInbox
 {
+    private DateTime _lastCleanupUtc = DateTime.MinValue;
+
     public virtual async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
         try
@@ -193,6 +197,10 @@ public class InboxProcessor<TDbContext>(
     protected virtual async Task CleanupOldMessagesAsync(CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(options.Schema)) return;
+
+        var nowUtc = clock.UtcNow;
+        if (!CleanupSchedule.IsDue(_lastCleanupUtc, nowUtc, options.CleanupInterval)) return;
+        _lastCleanupUtc = nowUtc;
 
         try
         {

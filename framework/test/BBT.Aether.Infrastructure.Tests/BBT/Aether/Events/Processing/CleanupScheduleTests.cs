@@ -40,4 +40,14 @@ public sealed class CleanupScheduleTests
             .IsDue(DateTime.MinValue, DateTime.UtcNow, TimeSpan.FromHours(1))
             .ShouldBeTrue();
     }
+
+    [Fact]
+    public void Inbox_and_outbox_share_the_same_cleanup_schedule_policy()
+    {
+        var now = new DateTime(2026, 7, 28, 12, 0, 0, DateTimeKind.Utc);
+        var interval = TimeSpan.FromHours(1);
+
+        CleanupSchedule.IsDue(now.AddMinutes(-30), now, interval).ShouldBeFalse();
+        CleanupSchedule.IsDue(now.AddMinutes(-90), now, interval).ShouldBeTrue();
+    }
 }
