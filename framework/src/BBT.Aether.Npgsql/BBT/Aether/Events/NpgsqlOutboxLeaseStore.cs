@@ -60,13 +60,8 @@ public class NpgsqlOutboxLeaseStore<TDbContext>(
             WHERE "Id" IN (
                 SELECT "Id"
                 FROM {fullTableName}
-                WHERE (
-                        ("Status" = @pending
-                         AND ("LockedUntil" IS NULL OR "LockedUntil" < @now))
-                        OR
-                        ("Status" = @processing
-                         AND "LockedUntil" IS NOT NULL AND "LockedUntil" < @now)
-                      )
+                WHERE "Status" IN (@pending, @processing)
+                  AND ("LockedUntil" IS NULL OR "LockedUntil" < @now)
                   AND ("NextRetryAt" IS NULL OR "NextRetryAt" <= @now)
                 ORDER BY "CreatedAt"
                 LIMIT @batchSize
