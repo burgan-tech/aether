@@ -72,9 +72,11 @@ public static class OutboxModelBuilderExtensions
                 .HasDatabaseName("IX_OutboxMessages_Dispatch")
                 .HasFilter($"\"Status\" IN ({(int)OutboxMessageStatus.Pending}, {(int)OutboxMessageStatus.Processing})");
 
-            // Index for cleanup of old processed messages
+            // Retention index: serves the retention/cleanup deletion of old processed messages.
+            // Distinct name from the legacy non-partial cleanup index it replaces -- this is a
+            // genuinely different index (partial, single-column), not a like-for-like rebuild.
             entity.HasIndex(e => new { e.ProcessedAt })
-                .HasDatabaseName("IX_OutboxMessages_Cleanup")
+                .HasDatabaseName("IX_OutboxMessages_Retention")
                 .HasFilter($"\"Status\" = {(int)OutboxMessageStatus.Processed}");
 
             // Apply convention-based configuration (handles IHasExtraProperties automatically)

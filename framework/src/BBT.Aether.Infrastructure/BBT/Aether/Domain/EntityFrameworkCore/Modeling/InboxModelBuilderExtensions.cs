@@ -69,8 +69,11 @@ public static class InboxModelBuilderExtensions
                 .HasDatabaseName("IX_InboxMessages_Dispatch")
                 .HasFilter($"\"Status\" IN ({(int)IncomingEventStatus.Pending}, {(int)IncomingEventStatus.Processing})");
 
+            // Retention index: serves the retention/cleanup deletion of old handled messages.
+            // Distinct name from the legacy non-partial cleanup index it replaces -- this is a
+            // genuinely different index (partial, single-column), not a like-for-like rebuild.
             entity.HasIndex(e => new { e.HandledTime })
-                .HasDatabaseName("IX_InboxMessages_Cleanup")
+                .HasDatabaseName("IX_InboxMessages_Retention")
                 .HasFilter($"\"Status\" = {(int)IncomingEventStatus.Processed}");
 
             // Apply convention-based configuration (handles IHasExtraProperties automatically)
