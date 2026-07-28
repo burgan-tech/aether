@@ -40,6 +40,13 @@ public class OutboxMessage
     public int RetryCount { get; set; }
 
     /// <summary>
+    /// Logical partition this message belongs to, derived from the event subject.
+    /// Written from day one so the dispatcher can lease partition-disjoint batches later
+    /// without a backfill. Not read by any query yet.
+    /// </summary>
+    public short PartitionId { get; set; }
+
+    /// <summary>
     /// Gets or sets the last error message (if any).
     /// </summary>
     public string? LastError { get; set; }

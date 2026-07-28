@@ -45,6 +45,13 @@ public class InboxMessage
     public int RetryCount { get; set; } = 0;
 
     /// <summary>
+    /// Logical partition this message belongs to, derived from the event subject.
+    /// Written from day one so the dispatcher can lease partition-disjoint batches later
+    /// without a backfill. Not read by any query yet.
+    /// </summary>
+    public short PartitionId { get; set; }
+
+    /// <summary>
     /// Gets or sets the next retry time.
     /// </summary>
     public DateTime? NextRetryTime { get; set; } = null;
