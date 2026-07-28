@@ -28,6 +28,8 @@ public class OutboxProcessor<TDbContext>(
     AetherOutboxOptions options) : IOutboxProcessor
     where TDbContext : DbContext, IHasEfCoreOutbox
 {
+    private DateTime _lastCleanupUtc = DateTime.MinValue;
+
     /// <inheritdoc />
     public virtual async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
@@ -213,6 +215,10 @@ public class OutboxProcessor<TDbContext>(
     {
         if (string.IsNullOrWhiteSpace(options.Schema)) return;
 
+        var now = clock.UtcNow;
+        if (!CleanupSchedule.IsDue(_lastCleanupUtc, now, options.CleanupInterval)) return;
+        _lastCleanupUtc = now;
+
         await using var scope = scopeFactory.CreateAsyncScope();
         var sp = scope.ServiceProvider;
         var currentSchema = sp.GetRequiredService<ICurrentSchema>();
@@ -231,7 +237,7 @@ public class OutboxProcessor<TDbContext>(
                 .Where(m => m.Status == OutboxMessageStatus.Processed
                          && m.ProcessedAt != null
                          && m.ProcessedAt < cutoffDate)
-                .Take(options.BatchSize)
+                .Take(options.CleanupBatchSize)
                 .ToListAsync(cancellationToken);
 
             if (processed.Count > 0)
