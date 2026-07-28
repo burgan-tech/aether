@@ -206,6 +206,115 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
         }
     }
 
+    [Fact]
+    public async Task LeaseBatch_reclaims_processing_message_with_expired_lease()
+    {
+        var sp = BuildProvider();
+        await SetupSchemaAsync(sp);
+        await InsertPendingMessageAsync(sp);
+
+        // Bir worker leaseledi ve çöktü: Status=Processing, LockedUntil geçmişte
+        await using (var conn = new NpgsqlConnection(fx.ConnectionString))
+        {
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                UPDATE "{_schema}"."OutboxMessages"
+                SET "Status" = 1,
+                    "LockedBy" = 'crashed-worker',
+                    "LockedUntil" = now() AT TIME ZONE 'utc' - interval '5 minutes'
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        await using var scope = sp.CreateAsyncScope();
+        var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+        var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var leaseStore = scope.ServiceProvider.GetRequiredService<IOutboxLeaseStore>();
+
+        using (currentSchema.Change(_schema))
+        {
+            IReadOnlyList<BBT.Aether.Events.OutboxMessage> leased;
+            await using (var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+            {
+                leased = await leaseStore.LeaseBatchAsync(10, "worker-2", TimeSpan.FromSeconds(30));
+                await uow.CommitAsync();
+            }
+
+            leased.Count.ShouldBe(1);
+            leased[0].LockedBy.ShouldBe("worker-2");
+            // Reclaim edilen satırın RetryCount'u artmalı — crash-loop'ta sonsuz reclaim olmasın
+            leased[0].RetryCount.ShouldBe(1);
+        }
+    }
+
+    [Fact]
+    public async Task LeaseBatch_does_not_reclaim_processing_message_with_valid_lease()
+    {
+        var sp = BuildProvider();
+        await SetupSchemaAsync(sp);
+        await InsertPendingMessageAsync(sp);
+
+        await using (var conn = new NpgsqlConnection(fx.ConnectionString))
+        {
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                UPDATE "{_schema}"."OutboxMessages"
+                SET "Status" = 1,
+                    "LockedBy" = 'healthy-worker',
+                    "LockedUntil" = now() AT TIME ZONE 'utc' + interval '5 minutes'
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        await using var scope = sp.CreateAsyncScope();
+        var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+        var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var leaseStore = scope.ServiceProvider.GetRequiredService<IOutboxLeaseStore>();
+
+        using (currentSchema.Change(_schema))
+        {
+            IReadOnlyList<BBT.Aether.Events.OutboxMessage> leased;
+            await using (var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+            {
+                leased = await leaseStore.LeaseBatchAsync(10, "worker-2", TimeSpan.FromSeconds(30));
+                await uow.CommitAsync();
+            }
+
+            leased.Count.ShouldBe(0);
+        }
+    }
+
+    [Fact]
+    public async Task LeaseBatch_does_not_increment_retry_count_for_fresh_pending()
+    {
+        var sp = BuildProvider();
+        await SetupSchemaAsync(sp);
+        await InsertPendingMessageAsync(sp);
+
+        await using var scope = sp.CreateAsyncScope();
+        var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+        var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var leaseStore = scope.ServiceProvider.GetRequiredService<IOutboxLeaseStore>();
+
+        using (currentSchema.Change(_schema))
+        {
+            IReadOnlyList<BBT.Aether.Events.OutboxMessage> leased;
+            await using (var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+            {
+                leased = await leaseStore.LeaseBatchAsync(10, "worker-1", TimeSpan.FromSeconds(30));
+                await uow.CommitAsync();
+            }
+
+            leased.Count.ShouldBe(1);
+            leased[0].RetryCount.ShouldBe(0);
+        }
+    }
+
     [Theory]
     [InlineData(SchemaSwitchingMode.TransactionLocal)]
     [InlineData(SchemaSwitchingMode.SessionSearchPath)]

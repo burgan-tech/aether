@@ -51,14 +51,22 @@ public class NpgsqlOutboxLeaseStore<TDbContext>(
         command.CommandText = $"""
             UPDATE {fullTableName}
             SET
+                "RetryCount"  = CASE WHEN "Status" = @processing
+                                     THEN "RetryCount" + 1
+                                     ELSE "RetryCount" END,
                 "Status"      = @processing,
                 "LockedBy"    = @workerId,
                 "LockedUntil" = @lockedUntil
             WHERE "Id" IN (
                 SELECT "Id"
                 FROM {fullTableName}
-                WHERE "Status" = @pending
-                  AND ("LockedUntil" IS NULL OR "LockedUntil" < @now)
+                WHERE (
+                        ("Status" = @pending
+                         AND ("LockedUntil" IS NULL OR "LockedUntil" < @now))
+                        OR
+                        ("Status" = @processing
+                         AND "LockedUntil" IS NOT NULL AND "LockedUntil" < @now)
+                      )
                   AND ("NextRetryAt" IS NULL OR "NextRetryAt" <= @now)
                 ORDER BY "CreatedAt"
                 LIMIT @batchSize
