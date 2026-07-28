@@ -17,6 +17,7 @@
 
     <ItemGroup>
         <PackageReference Include="System.Collections.Immutable" />
+        <PackageReference Include="System.IO.Hashing" />
         <PackageReference Include="Microsoft.Extensions.Localization" />
         <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
         <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" />

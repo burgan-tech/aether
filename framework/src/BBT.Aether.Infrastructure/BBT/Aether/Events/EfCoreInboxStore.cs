@@ -65,7 +65,9 @@ public class EfCoreInboxStore<TDbContext>(
         var inboxMessage = new Domain.Events.InboxMessage(envelope.Id, envelope.Type, serializedBytes)
         {
             CreatedAt = now,
-            Status = IncomingEventStatus.Pending
+            Status = IncomingEventStatus.Pending,
+            PartitionId = MessagePartitionResolver.Resolve(
+                envelope.Subject ?? envelope.Id, options.PartitionCount)
         };
 
         if (envelope.Topic != null)

@@ -20,4 +20,14 @@ public class AetherInboxOptions
     /// The database schema whose inbox table this processor handles.
     /// </summary>
     public string? Schema { get; set; }
+
+    /// <summary>
+    /// Number of logical partitions messages are hashed into.
+    /// <para>
+    /// This is NOT a runtime knob. Changing it re-maps every key and requires a migration
+    /// plan; existing rows keep their old partition. Algorithm and version are recorded on
+    /// <see cref="MessagePartitionResolver"/>.
+    /// </para>
+    /// </summary>
+    public int PartitionCount { get; set; } = 64;
 }

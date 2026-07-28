@@ -51,6 +51,8 @@ public class EfCoreOutboxStore<TDbContext>(
             CreatedAt = clock.UtcNow,
             RetryCount = 0,
             Status = OutboxMessageStatus.Pending,
+            PartitionId = MessagePartitionResolver.Resolve(
+                envelope.Subject ?? envelope.Id, options.PartitionCount),
             ExtraProperties = { ["TopicName"] = envelope.Topic ?? envelope.Type }
         };
 

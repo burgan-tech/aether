@@ -38,6 +38,7 @@ public sealed class OutboxWithinSharedTransactionTests(PostgresFixture fx)
     [EventName("OrderCreated", version: 1)]
     private sealed class OrderCreatedEvent(Guid orderId) : IDistributedEvent
     {
+        [EventSubject]
         public Guid OrderId { get; } = orderId;
     }
 
@@ -173,6 +174,15 @@ public sealed class OutboxWithinSharedTransactionTests(PostgresFixture fx)
         return (long)(await cmd.ExecuteScalarAsync())!;
     }
 
+    private async Task<short> SinglePartitionIdAsync()
+    {
+        await using var conn = new NpgsqlConnection(fx.ConnectionString);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT \"PartitionId\" FROM \"{_schema}\".\"OutboxMessages\"";
+        return (short)(await cmd.ExecuteScalarAsync())!;
+    }
+
     [Fact]
     public async Task Outbox_row_written_in_same_transaction_as_business_data()
     {
@@ -201,6 +211,43 @@ public sealed class OutboxWithinSharedTransactionTests(PostgresFixture fx)
 
         (await CountAsync("orders")).ShouldBe(1);
         (await CountAsync("OutboxMessages")).ShouldBe(1);
+    }
+
+    /// <summary>
+    /// End-to-end proof of the PartitionId write path: OrderCreatedEvent.OrderId is decorated with
+    /// [EventSubject], so DistributedEventBusBase resolves envelope.Subject to the order's GUID before
+    /// EfCoreOutboxStore.StoreAsync ever runs. The stored row's PartitionId column must equal
+    /// MessagePartitionResolver.Resolve(orderId, PartitionCount) - i.e. the real Subject, not the
+    /// envelope.Id fallback, and not the default-zero sentinel from before Task 9.
+    /// </summary>
+    [Fact]
+    public async Task Outbox_row_partition_id_is_derived_from_the_event_subject()
+    {
+        var sp = BuildProvider();
+        await ArrangeSchemaAsync(sp);
+
+        await using var scope = sp.CreateAsyncScope();
+        var ssp = scope.ServiceProvider;
+        var currentSchema = ssp.GetRequiredService<ICurrentSchema>();
+        var uowManager = ssp.GetRequiredService<IUnitOfWorkManager>();
+        var provider = ssp.GetRequiredService<IAetherDbContextProvider<TestDbContext>>();
+
+        var orderId = Guid.NewGuid();
+
+        using (currentSchema.Change(_schema))
+        {
+            await using var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+
+            var ctx = await provider.GetDbContextAsync();
+            ctx.Set<Order>().Add(new Order(orderId, "Carol"));
+
+            await uow.CommitAsync();
+        }
+
+        var expectedPartition = MessagePartitionResolver.Resolve(orderId.ToString(), new AetherOutboxOptions().PartitionCount);
+
+        (await SinglePartitionIdAsync()).ShouldBe(expectedPartition);
     }
 
     [Fact]
