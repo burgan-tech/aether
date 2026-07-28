@@ -54,6 +54,7 @@ public sealed class FixedMessagingSchemaStoreTests
             guids,
             clock,
             new AetherOutboxOptions { Schema = "sys_queues" },
+            new NullOutboxSignalCollector(),
             currentSchema);
 
         await sut.StoreAsync(CreateEnvelope());

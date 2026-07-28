@@ -19,6 +19,7 @@ public class EfCoreOutboxStore<TDbContext>(
     IGuidGenerator guidGenerator,
     IClock clock,
     AetherOutboxOptions options,
+    IOutboxSignalCollector signalCollector,
     ICurrentSchema? currentSchema) : IOutboxStore
     where TDbContext : DbContext, IHasEfCoreOutbox
 {
@@ -36,6 +37,7 @@ public class EfCoreOutboxStore<TDbContext>(
             guidGenerator,
             clock,
             new AetherOutboxOptions { Schema = null },
+            new NullOutboxSignalCollector(),
             null)
     {
     }
@@ -64,6 +66,15 @@ public class EfCoreOutboxStore<TDbContext>(
             outboxMessage.ExtraProperties["Subject"] = envelope.Subject;
 
         await dbContext.OutboxMessages.AddAsync(outboxMessage, cancellationToken);
+
+        // Mirrors BeginConfiguredSchemaScope's precedence: options.Schema only takes effect when
+        // currentSchema is available to apply it; otherwise the row lands wherever the ambient
+        // schema (if any) already points, not at options.Schema.
+        signalCollector.Mark(
+            currentSchema is not null && !string.IsNullOrWhiteSpace(options.Schema)
+                ? options.Schema
+                : currentSchema?.Name ?? string.Empty,
+            outboxMessage.PartitionId);
     }
 
     private IDisposable BeginConfiguredSchemaScope()
