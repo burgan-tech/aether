@@ -8,6 +8,7 @@ namespace BBT.Aether.Events.Processing;
 
 public sealed class OutboxBackgroundService(
     IOutboxProcessor processor,
+    IOutboxSignalCoordinator signalCoordinator,
     AetherOutboxOptions options,
     ILogger<OutboxBackgroundService> logger) : BackgroundService
 {
@@ -34,7 +35,14 @@ public sealed class OutboxBackgroundService(
                 delay = options.MaxPollingInterval;
             }
 
-            await Task.Delay(delay, stoppingToken).ConfigureAwait(false);
+            // Sleep until a wake-up signal arrives or the fallback interval elapses, whichever
+            // comes first. Fallback polling stays the correctness mechanism and is never
+            // disabled — a lost signal must cost latency, never data.
+            //
+            // The returned keys are deliberately ignored: which partition was signalled only
+            // becomes actionable when partition-filtered leasing lands in a later phase. Until
+            // then any signal simply means "poll now".
+            await signalCoordinator.WaitAsync(delay, stoppingToken).ConfigureAwait(false);
         }
     }
 }
