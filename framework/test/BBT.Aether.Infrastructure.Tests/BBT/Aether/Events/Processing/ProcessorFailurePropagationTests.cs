@@ -21,7 +21,7 @@ namespace BBT.Aether.Events.Processing;
 /// <see cref="InboxProcessor{TDbContext}.RunAsync"/> swallowed every exception internally and
 /// returned 0, making a failed cycle indistinguishable from an empty poll to
 /// <c>OutboxBackgroundService</c>/<c>InboxBackgroundService</c>. That made the background services'
-/// own <c>catch</c> block — and the <c>MaxPollingInterval</c> back-off inside it — unreachable dead
+/// own <c>catch</c> block — and the <c>ErrorPollingInterval</c> back-off inside it — unreachable dead
 /// code. These tests drive each processor against a service provider that has no registrations at
 /// all, so the very first <c>GetRequiredService</c> call inside the processing method throws, and
 /// assert the exception now reaches the caller instead of being logged and hidden behind a
