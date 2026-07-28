@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BBT.Aether.Domain.EntityFrameworkCore;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Persistence;
 using BBT.Aether.Telemetry;
@@ -68,7 +69,40 @@ public class InboxProcessor<TDbContext>(
 
                 logger.LogInformation("Leased {Count} inbox events for worker {WorkerId}", pendingEvents.Count, workerId);
 
-                foreach (var inboxMessage in pendingEvents)
+                // Retry bütçesi tükenmiş reclaim'ler işlenmez, doğrudan dead-letter'a düşer.
+                var exhausted = pendingEvents.Where(m => m.RetryCount > options.MaxRetryCount).ToList();
+                var processable = pendingEvents.Where(m => m.RetryCount <= options.MaxRetryCount).ToList();
+
+                if (exhausted.Count > 0)
+                {
+                    logger.LogWarning(
+                        "Dead-lettering {Count} inbox messages whose retry budget is exhausted (MaxRetryCount={Max})",
+                        exhausted.Count, options.MaxRetryCount);
+
+                    var exhaustedIds = exhausted.Select(m => m.Id).ToList();
+                    await using var deadLetterUow = unitOfWorkManager.BeginRequiresNew();
+                    var dbContext = await scope.ServiceProvider
+                        .GetRequiredService<IAetherDbContextProvider<TDbContext>>()
+                        .GetDbContextAsync(cancellationToken);
+
+                    // Ownership guard is LockedBy only — deliberately not LockedUntil > now, unlike
+                    // the success path. LeaseBatchAsync always reassigns LockedBy when it reclaims a
+                    // row, so LockedBy == workerId already proves no other worker owns it. Requiring
+                    // a live lease here would strand an exhausted row in Processing until a later
+                    // cycle re-detected it. Reviewed and accepted on the outbox side; mirrored here.
+                    await dbContext.InboxMessages
+                        .Where(m => exhaustedIds.Contains(m.Id) && m.LockedBy == workerId)
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(m => m.Status, IncomingEventStatus.DeadLetter)
+                            .SetProperty(m => m.LockedBy, (string?)null)
+                            .SetProperty(m => m.LockedUntil, (DateTime?)null),
+                            cancellationToken);
+
+                    await deadLetterUow.CommitAsync(cancellationToken);
+                    totalProcessed += exhausted.Count;
+                }
+
+                foreach (var inboxMessage in processable)
                 {
                     if (cancellationToken.IsCancellationRequested) break;
                     await ProcessSingleEventAsync(inboxMessage, scope.ServiceProvider, cancellationToken);
