@@ -52,7 +52,12 @@ public sealed class OutboxSignalCoordinatorTests
     public async Task Ten_thousand_signals_for_one_partition_collapse_to_one_key()
     {
         var coordinator = new OutboxSignalCoordinator();
-        for (var i = 0; i < 10_000; i++) coordinator.Signal("sys_queues", 2);
+
+        // Signal concurrently from many threads — this is what actually happens in
+        // production, where many request threads publish signals at once. Running all
+        // 10,000 calls sequentially on one thread would only prove dictionary key dedup,
+        // not coalescing under contention.
+        Parallel.For(0, 10_000, _ => coordinator.Signal("sys_queues", 2));
 
         var keys = await coordinator.WaitAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
 
@@ -108,5 +113,55 @@ public sealed class OutboxSignalCoordinatorTests
         sw.Stop();
 
         sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task A_second_concurrent_waiter_throws_while_the_first_is_still_waiting()
+    {
+        var coordinator = new OutboxSignalCoordinator();
+
+        var first = coordinator.WaitAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
+        await Task.Delay(50);
+
+        await Should.ThrowAsync<InvalidOperationException>(
+            async () => await coordinator.WaitAsync(TimeSpan.FromSeconds(30), CancellationToken.None));
+
+        // Clean up: unblock the first waiter so it doesn't outlive the test.
+        coordinator.Signal("sys_queues", 1);
+        await first;
+    }
+
+    [Fact]
+    public async Task The_guard_is_released_after_a_normal_completion_so_the_next_wait_still_works()
+    {
+        var coordinator = new OutboxSignalCoordinator();
+        coordinator.Signal("sys_queues", 1);
+
+        var completed = await coordinator.WaitAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
+        completed.Count.ShouldBe(1);
+
+        // If the guard leaked, this would throw InvalidOperationException instead of
+        // running to (empty) completion.
+        var next = await coordinator.WaitAsync(TimeSpan.FromMilliseconds(150), CancellationToken.None);
+        next.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task The_guard_is_released_after_cancellation_so_the_next_wait_still_works()
+    {
+        var coordinator = new OutboxSignalCoordinator();
+        using var cts = new CancellationTokenSource();
+
+        var cancelled = coordinator.WaitAsync(TimeSpan.FromSeconds(30), cts.Token);
+        await Task.Delay(50);
+        await cts.CancelAsync();
+
+        await Should.ThrowAsync<OperationCanceledException>(async () => await cancelled);
+
+        // A cancelled waiter must release the guard just as reliably as a normal completion —
+        // otherwise the first shutdown-then-restart of the dispatcher loop would permanently
+        // wedge it.
+        var next = await coordinator.WaitAsync(TimeSpan.FromMilliseconds(150), CancellationToken.None);
+        next.ShouldBeEmpty();
     }
 }
