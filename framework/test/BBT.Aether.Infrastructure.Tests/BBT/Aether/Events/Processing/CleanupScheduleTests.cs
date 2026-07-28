@@ -50,4 +50,15 @@ public sealed class CleanupScheduleTests
         CleanupSchedule.IsDue(now.AddMinutes(-30), now, interval).ShouldBeFalse();
         CleanupSchedule.IsDue(now.AddMinutes(-90), now, interval).ShouldBeTrue();
     }
+
+    [Fact]
+    public void Error_and_idle_polling_intervals_are_independent_options()
+    {
+        var outbox = new AetherOutboxOptions { MaxPollingInterval = TimeSpan.FromMinutes(5) };
+        var inbox = new AetherInboxOptions { MaxPollingInterval = TimeSpan.FromMinutes(5) };
+
+        // Raising the idle ceiling must not lengthen error recovery.
+        outbox.ErrorPollingInterval.ShouldBe(TimeSpan.FromSeconds(60));
+        inbox.ErrorPollingInterval.ShouldBe(TimeSpan.FromSeconds(60));
+    }
 }

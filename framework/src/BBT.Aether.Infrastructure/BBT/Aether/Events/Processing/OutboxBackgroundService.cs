@@ -34,7 +34,7 @@ public sealed class OutboxBackgroundService(
             catch (Exception ex)
             {
                 logger.LogError(ex, "Outbox background service error");
-                delay = options.MaxPollingInterval;
+                delay = options.ErrorPollingInterval;
                 backingOffAfterError = true;
             }
 

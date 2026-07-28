@@ -31,7 +31,7 @@ public sealed class InboxBackgroundService(
             catch (Exception ex)
             {
                 logger.LogError(ex, "Inbox background service error");
-                delay = options.MaxPollingInterval;
+                delay = options.ErrorPollingInterval;
             }
 
             await Task.Delay(delay, stoppingToken).ConfigureAwait(false);

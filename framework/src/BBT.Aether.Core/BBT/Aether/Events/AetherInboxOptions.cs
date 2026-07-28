@@ -17,6 +17,18 @@ public class AetherInboxOptions
     public TimeSpan MaxPollingInterval  { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
+    /// Delay applied after a dispatcher cycle throws, kept separate from
+    /// <see cref="MaxPollingInterval"/>.
+    /// </summary>
+    /// <remarks>
+    /// An empty queue and a failed cycle are different signals and should not share a curve.
+    /// The idle ceiling can be long because a wake-up signal handles latency, but a failure
+    /// should not inherit that length — and a wake-up signal deliberately cannot cut an error
+    /// back-off short, so this value is the real recovery time after a transient fault.
+    /// </remarks>
+    public TimeSpan ErrorPollingInterval { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>
     /// The database schema whose inbox table this processor handles.
     /// </summary>
     public string? Schema { get; set; }
