@@ -61,4 +61,11 @@ public sealed class AdaptivePollingTests
         afterPartial.ShouldBe(TimeSpan.FromSeconds(5));
         afterEmpty.ShouldBe(TimeSpan.FromSeconds(10));
     }
+
+    [Fact]
+    public void Idle_backoff_recovers_from_a_zero_current_delay()
+    {
+        // Doubling zero stays zero forever — a silent polling deadlock. Fall back to idle.
+        Next(TimeSpan.Zero, processed: 0).ShouldBe(Opts.IdlePollingInterval);
+    }
 }

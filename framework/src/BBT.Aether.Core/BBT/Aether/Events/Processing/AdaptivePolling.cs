@@ -9,7 +9,10 @@ namespace BBT.Aether.Events.Processing;
 /// A full batch means more work is almost certainly waiting, so poll again immediately.
 /// A partial batch means the queue just drained — returning to the busy interval would
 /// force roughly ten wasted polls climbing back to the cap, which dominated the
-/// dispatcher's database cost in production measurements.
+/// dispatcher's database cost in production measurements. If the idle backoff would
+/// otherwise double a non-positive delay (e.g. <see cref="TimeSpan.Zero"/>, reachable only
+/// if <c>busyInterval</c> were ever configured to zero) it falls back to
+/// <c>idleInterval</c> instead of staying stuck at zero forever.
 /// </remarks>
 public static class AdaptivePolling
 {
@@ -43,6 +46,7 @@ public static class AdaptivePolling
         if (processed > 0) return idleInterval;
 
         var next = TimeSpan.FromMilliseconds(current.TotalMilliseconds * 2);
+        if (next <= TimeSpan.Zero) next = idleInterval;
         return next > maxInterval ? maxInterval : next;
     }
 }
