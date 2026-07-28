@@ -30,19 +30,16 @@ public class InboxProcessor<TDbContext>(
         clock.UtcNow - TimeSpan.FromTicks(
             (long)(options.CleanupInterval.Ticks * Random.Shared.NextDouble()));
 
+    /// <inheritdoc />
     public virtual async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
-        try
-        {
-            var processed = await ProcessPendingEventsAsync(cancellationToken);
-            await CleanupOldMessagesAsync(cancellationToken);
-            return processed;
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error in inbox processing cycle");
-            return 0;
-        }
+        // Exceptions are intentionally left to propagate — InboxBackgroundService owns the
+        // retry/back-off decision for a failed cycle (it logs and jumps to MaxPollingInterval).
+        // Swallowing here previously made every failure look like an empty poll to the caller,
+        // so the background service's error back-off could never engage.
+        var processed = await ProcessPendingEventsAsync(cancellationToken);
+        await CleanupOldMessagesAsync(cancellationToken);
+        return processed;
     }
 
     protected virtual async Task<int> ProcessPendingEventsAsync(CancellationToken cancellationToken)
@@ -206,27 +203,23 @@ public class InboxProcessor<TDbContext>(
         if (!CleanupSchedule.IsDue(_lastCleanupUtc, nowUtc, options.CleanupInterval)) return;
         _lastCleanupUtc = nowUtc;
 
-        try
-        {
-            await using var scope = scopeFactory.CreateAsyncScope();
-            var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
-            var unitOfWorkManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
-            var inboxStore = scope.ServiceProvider.GetRequiredService<IInboxStore>();
+        // No local try/catch: a cleanup failure must reach RunAsync (and from there the
+        // background service) the same way a processing failure does. Mirrors
+        // OutboxProcessor.CleanupProcessedMessagesAsync, which never swallowed here.
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+        var unitOfWorkManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var inboxStore = scope.ServiceProvider.GetRequiredService<IInboxStore>();
 
-            using (currentSchema.Change(options.Schema!))
-            {
-                await using var uow = unitOfWorkManager.BeginRequiresNew();
-                var deletedCount = await inboxStore.CleanupOldMessagesAsync(
-                    options.CleanupBatchSize, options.RetentionPeriod, cancellationToken);
-                await uow.CommitAsync(cancellationToken);
-
-                if (deletedCount > 0)
-                    logger.LogInformation("Cleaned up {Count} old inbox messages", deletedCount);
-            }
-        }
-        catch (Exception ex)
+        using (currentSchema.Change(options.Schema!))
         {
-            logger.LogError(ex, "Error cleaning up old inbox messages");
+            await using var uow = unitOfWorkManager.BeginRequiresNew();
+            var deletedCount = await inboxStore.CleanupOldMessagesAsync(
+                options.CleanupBatchSize, options.RetentionPeriod, cancellationToken);
+            await uow.CommitAsync(cancellationToken);
+
+            if (deletedCount > 0)
+                logger.LogInformation("Cleaned up {Count} old inbox messages", deletedCount);
         }
     }
 

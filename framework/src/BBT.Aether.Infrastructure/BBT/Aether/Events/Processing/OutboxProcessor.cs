@@ -37,17 +37,13 @@ public class OutboxProcessor<TDbContext>(
     /// <inheritdoc />
     public virtual async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
-        try
-        {
-            var processed = await ProcessOutboxMessagesAsync(cancellationToken);
-            await CleanupProcessedMessagesAsync(cancellationToken);
-            return processed;
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error processing outbox messages");
-            return 0;
-        }
+        // Exceptions are intentionally left to propagate — OutboxBackgroundService owns the
+        // retry/back-off decision for a failed cycle (it logs and jumps to MaxPollingInterval).
+        // Swallowing here previously made every failure look like an empty poll to the caller,
+        // so the background service's error back-off could never engage.
+        var processed = await ProcessOutboxMessagesAsync(cancellationToken);
+        await CleanupProcessedMessagesAsync(cancellationToken);
+        return processed;
     }
 
     /// <summary>
