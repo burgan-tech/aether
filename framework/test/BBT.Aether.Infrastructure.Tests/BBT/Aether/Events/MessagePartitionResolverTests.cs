@@ -75,4 +75,21 @@ public sealed class MessagePartitionResolverTests
     // Fill these in from the first run — see instructions.
     private const short GoldenA = 18;
     private const short GoldenB = 62;
+
+    [Fact]
+    public void Resolve_rejects_non_positive_partition_count()
+    {
+        Should.Throw<ArgumentOutOfRangeException>(() => MessagePartitionResolver.Resolve("k", 0));
+        Should.Throw<ArgumentOutOfRangeException>(() => MessagePartitionResolver.Resolve("k", -1));
+    }
+
+    [Fact]
+    public void Resolve_rejects_partition_count_beyond_smallint()
+    {
+        // PartitionId is stored as smallint; a larger count would silently wrap the cast negative.
+        Should.Throw<ArgumentOutOfRangeException>(
+            () => MessagePartitionResolver.Resolve("k", short.MaxValue + 1));
+
+        Should.NotThrow(() => MessagePartitionResolver.Resolve("k", short.MaxValue));
+    }
 }

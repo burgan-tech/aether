@@ -29,11 +29,20 @@ public static class MessagePartitionResolver
     /// Resolves the logical partition for <paramref name="partitionKey"/>.
     /// Returns 0 when the key is null or blank. Note 0 is a normal partition, not a sentinel.
     /// </summary>
+    /// <param name="partitionKey">The key to hash into a partition, or null/blank for partition 0.</param>
+    /// <param name="partitionCount">
+    /// The number of partitions to hash into. Must be between 1 and <see cref="short.MaxValue"/>
+    /// inclusive: the result is stored in a database <c>smallint</c> column, so a larger count
+    /// would let <c>hash % partitionCount</c> exceed the range that fits, silently wrapping
+    /// negative on the cast to <see cref="short"/>.
+    /// </param>
+    /// <returns>A partition id in the range <c>[0, partitionCount)</c>.</returns>
     public static short Resolve(string? partitionKey, int partitionCount)
     {
-        if (partitionCount <= 0)
+        if (partitionCount is <= 0 or > short.MaxValue)
             throw new ArgumentOutOfRangeException(
-                nameof(partitionCount), partitionCount, "Partition count must be positive.");
+                nameof(partitionCount), partitionCount,
+                $"Partition count must be between 1 and {short.MaxValue}; partitions are stored as smallint.");
 
         if (string.IsNullOrWhiteSpace(partitionKey)) return 0;
 
