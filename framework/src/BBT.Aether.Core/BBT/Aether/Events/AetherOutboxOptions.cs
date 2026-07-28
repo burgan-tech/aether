@@ -38,4 +38,19 @@ public class AetherOutboxOptions
     /// </para>
     /// </summary>
     public int PartitionCount { get; set; } = 64;
+
+    /// <summary>
+    /// Whether the write path publishes wake-up signals after commit.
+    /// Ship disabled and enable per environment; the dispatcher works either way.
+    /// </summary>
+    public bool SignalEnabled { get; set; }
+
+    /// <summary>Pub/sub topic wake-up signals are published to.</summary>
+    public string SignalTopic { get; set; } = "outbox-wakeup";
+
+    /// <summary>
+    /// Time-to-live applied to a published signal. Short by design — a stale wake-up has no
+    /// value, since fallback polling will have covered the work by then.
+    /// </summary>
+    public int SignalTtlSeconds { get; set; } = 30;
 }
