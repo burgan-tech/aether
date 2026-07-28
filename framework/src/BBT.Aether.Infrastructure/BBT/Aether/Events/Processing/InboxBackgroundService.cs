@@ -20,9 +20,9 @@ public sealed class InboxBackgroundService(
             try
             {
                 var processed = await processor.RunAsync(stoppingToken);
-                delay = processed > 0
-                    ? options.BusyPollingInterval
-                    : Min(delay * 2, options.MaxPollingInterval);
+                delay = AdaptivePolling.NextDelay(
+                    delay, processed, options.ProcessingBatchSize,
+                    options.BusyPollingInterval, options.IdlePollingInterval, options.MaxPollingInterval);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -37,6 +37,4 @@ public sealed class InboxBackgroundService(
             await Task.Delay(delay, stoppingToken).ConfigureAwait(false);
         }
     }
-
-    private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
 }
