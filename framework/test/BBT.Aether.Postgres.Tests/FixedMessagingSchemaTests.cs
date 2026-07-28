@@ -127,10 +127,6 @@ public sealed class FixedMessagingSchemaTests(PostgresFixture fixture)
             fixture.ConnectionString,
             SchemaSwitchingMode.QualifiedNames);
         services.AddSingleton<IEventSerializer, SystemTextJsonEventSerializer>();
-        // Task 7 wires this up for real via DI; until then, register the no-op collector so the
-        // outbox store's primary constructor (with its configured-schema override behavior) is
-        // still what DI selects here, instead of silently falling back to the legacy constructor.
-        services.AddScoped<IOutboxSignalCollector, NullOutboxSignalCollector>();
         services.AddAetherOutbox<MessagingDbContext>(options => options.Schema = _messagingSchema);
         services.AddAetherInbox<MessagingDbContext>(options => options.Schema = _messagingSchema);
         return services.BuildServiceProvider();
