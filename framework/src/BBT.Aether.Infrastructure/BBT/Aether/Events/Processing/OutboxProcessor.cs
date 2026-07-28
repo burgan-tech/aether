@@ -82,9 +82,20 @@ public class OutboxProcessor<TDbContext>(
 
             logger.LogInformation("Leased {Count} outbox messages for worker {WorkerId}", messages.Count, workerId);
 
+            // Retry bütçesi tükenmiş reclaim'ler publish edilmez, doğrudan dead-letter'a düşer.
+            var exhausted = messages.Where(m => m.RetryCount > options.MaxRetryCount).ToList();
+            var publishable = messages.Where(m => m.RetryCount <= options.MaxRetryCount).ToList();
+
+            if (exhausted.Count > 0)
+            {
+                logger.LogWarning(
+                    "Dead-lettering {Count} outbox messages whose retry budget is exhausted (MaxRetryCount={Max})",
+                    exhausted.Count, options.MaxRetryCount);
+            }
+
             // PHASE 2: publish — transaction açık değil
             var outcomes = new List<OutboxPublishOutcome>(messages.Count);
-            foreach (var message in messages)
+            foreach (var message in publishable)
             {
                 if (cancellationToken.IsCancellationRequested) break;
 
@@ -116,7 +127,7 @@ public class OutboxProcessor<TDbContext>(
                 }
             }
 
-            if (outcomes.Count == 0) return 0;
+            if (outcomes.Count == 0 && exhausted.Count == 0) return 0;
 
             // PHASE 3: outcome yaz — kısa transaction, locked_by guard
             await using (var updateUow = uowManager.Begin(
@@ -124,6 +135,22 @@ public class OutboxProcessor<TDbContext>(
             {
                 var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
                 var now = clock.UtcNow;
+
+                if (exhausted.Count > 0)
+                {
+                    // Ownership guard is LockedBy only — deliberately not LockedUntil > now, unlike the
+                    // success path below. LeaseBatchAsync always reassigns LockedBy when it reclaims a row,
+                    // so LockedBy == workerId already proves no other worker owns it. Requiring a live lease
+                    // here would strand an exhausted row in Processing until a later cycle re-detected it.
+                    var exhaustedIds = exhausted.Select(m => m.Id).ToList();
+                    await dbContext.OutboxMessages
+                        .Where(m => exhaustedIds.Contains(m.Id) && m.LockedBy == workerId)
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(m => m.Status, OutboxMessageStatus.DeadLetter)
+                            .SetProperty(m => m.LockedBy, (string?)null)
+                            .SetProperty(m => m.LockedUntil, (DateTime?)null),
+                            cancellationToken);
+                }
 
                 foreach (var outcome in outcomes)
                 {
@@ -173,7 +200,7 @@ public class OutboxProcessor<TDbContext>(
                 await updateUow.CommitAsync(cancellationToken);
             }
 
-            return outcomes.Count;
+            return outcomes.Count + exhausted.Count;
         }
     }
 

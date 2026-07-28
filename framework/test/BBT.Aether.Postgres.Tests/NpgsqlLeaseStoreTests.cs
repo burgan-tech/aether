@@ -356,6 +356,49 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
         }
     }
 
+    [Fact]
+    public async Task LeaseBatch_still_reclaims_when_retry_count_at_max_so_processor_can_dead_letter()
+    {
+        var sp = BuildProvider();
+        await SetupSchemaAsync(sp);
+        await InsertPendingMessageAsync(sp);
+
+        // RetryCount zaten max'ta (varsayılan MaxRetryCount = 5) ve lease süresi dolmuş
+        await using (var conn = new NpgsqlConnection(fx.ConnectionString))
+        {
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                UPDATE "{_schema}"."OutboxMessages"
+                SET "Status" = 1,
+                    "RetryCount" = 5,
+                    "LockedBy" = 'crashed-worker',
+                    "LockedUntil" = now() AT TIME ZONE 'utc' - interval '5 minutes'
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        await using var scope = sp.CreateAsyncScope();
+        var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+        var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var leaseStore = scope.ServiceProvider.GetRequiredService<IOutboxLeaseStore>();
+
+        using (currentSchema.Change(_schema))
+        {
+            IReadOnlyList<BBT.Aether.Events.OutboxMessage> leased;
+            await using (var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+            {
+                leased = await leaseStore.LeaseBatchAsync(10, "worker-2", TimeSpan.FromSeconds(30));
+                await uow.CommitAsync();
+            }
+
+            // Lease store filtrelemiyor — processor dead-letter'a düşürecek
+            leased.Count.ShouldBe(1);
+            leased[0].RetryCount.ShouldBe(6);
+        }
+    }
+
     [Theory]
     [InlineData(SchemaSwitchingMode.TransactionLocal)]
     [InlineData(SchemaSwitchingMode.SessionSearchPath)]
