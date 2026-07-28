@@ -1,5 +1,7 @@
 using BBT.Aether.Domain.Events;
+using BBT.Aether.Events;
 using Microsoft.EntityFrameworkCore;
+using InboxMessage = BBT.Aether.Domain.Events.InboxMessage;
 
 namespace BBT.Aether.Domain.EntityFrameworkCore.Modeling;
 
@@ -60,14 +62,16 @@ public static class InboxModelBuilderExtensions
                 .IsRequired()
                 .HasDefaultValue((short)0);
 
+            // Dispatch index: partial on the statuses the lease query can match. No INCLUDE:
+            // the lease query ends in FOR UPDATE SKIP LOCKED, which must lock the heap tuple
+            // and so cannot be served by an index-only scan regardless of included columns.
             entity.HasIndex(e => new { e.PartitionId, e.NextRetryTime, e.CreatedAt })
                 .HasDatabaseName("IX_InboxMessages_Dispatch")
-                .IncludeProperties(e => new { e.LockedUntil })
-                .HasFilter("\"Status\" IN (0, 1)");
+                .HasFilter($"\"Status\" IN ({(int)IncomingEventStatus.Pending}, {(int)IncomingEventStatus.Processing})");
 
             entity.HasIndex(e => new { e.HandledTime })
                 .HasDatabaseName("IX_InboxMessages_Cleanup")
-                .HasFilter("\"Status\" = 2");
+                .HasFilter($"\"Status\" = {(int)IncomingEventStatus.Processed}");
 
             // Apply convention-based configuration (handles IHasExtraProperties automatically)
             entity.ConfigureByConvention();

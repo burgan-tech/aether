@@ -20,11 +20,6 @@
         <PackageReference Include="Dapr.Jobs"/>
 <PackageReference Include="StackExchange.Redis"/>
         <PackageReference Include="Microsoft.EntityFrameworkCore.Relational"/>
-        <!-- Needed for IndexBuilder.IncludeProperties() (Npgsql-specific covering-index API) used by
-             OutboxModelBuilderExtensions/InboxModelBuilderExtensions. ConfigureOutbox/ConfigureInbox are
-             only ever invoked against the Postgres provider today (see Postgres.Tests), so this does not
-             change runtime behavior for SqlServer consumers of this assembly. -->
-        <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL"/>
     </ItemGroup>
     
     <ItemGroup>
