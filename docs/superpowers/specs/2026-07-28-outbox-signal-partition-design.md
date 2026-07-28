@@ -506,6 +506,44 @@ olarak yapılmıyor (§7) — yeni bir sözleşme vermek bu işin kapsamı deği
 
 **3.5 Aynı değişiklik Inbox dispatcher'ına** uygulanır.
 
+**3.6 Partition'ı kapatma — iki katman**
+
+Partition istenmezse veya prod'da sorun çıkarırsa kapatılabilir olmalı. İki ayrı seviye var
+ve karıştırılmamalı:
+
+**(a) Yazma yolu — `PartitionCount = 1`.** Kod değişikliği gerekmez, bugün çalışır.
+`MessagePartitionResolver.Resolve(key, 1)` = `hash % 1` = **0**, yani her satır ve her sinyal
+partition 0'a düşer. Tabloda `CHECK` constraint **yok** (kasıtlı olarak eklenmedi), bu yüzden
+`PartitionCount` migration olmadan serbestçe değiştirilebilir.
+
+Yan etki — genellikle istenen yönde: collector `(schema, partition)` başına coalesce ettiği
+için tek partition'da bir transaction **tek** sinyal üretir. Sinyal hacmi düşer.
+
+**(b) Okuma yolu — `PartitionedLeasingEnabled` (varsayılan `false`).** Faz 3 partition'lı
+lease'i bu flag'in arkasına alır. `false` iken lease sorgusuna partition listesi geçilmez
+(`@partitions = NULL`), yani filtresiz — bugünkü davranışın aynısı. Migration gerekmez,
+runtime konfigürasyonuyla çevrilir; prod'da sorun çıkarsa deploy beklemeden kapatılır.
+
+```csharp
+    /// <summary>
+    /// Whether the dispatcher leases partition-disjoint batches. When false the lease query
+    /// is unfiltered, which is the pre-partition behaviour. Safe to flip at runtime: rows keep
+    /// whatever PartitionId they were written with, and the unfiltered query sees all of them.
+    /// </summary>
+    public bool PartitionedLeasingEnabled { get; set; }
+```
+
+**Neden kolon ve index yine de kalır:** ikisini de kaldırmak sıcak tabloda DDL demek. Kolonu
+şimdi eklemenin gerekçesi zaten buydu (§0 "tek yönlü kapılar"). T8 review'ı, 2M satırlık
+gerçekçi bir tabloda `EXPLAIN ANALYZE` ile sabit (hep 0) öndeki bir `PartitionId` kolonunun
+sorgu planını **kötüleştirmediğini** ölçtü — yeni index eskisinden marjinal olarak daha ucuz
+çıktı. Yani partition kapalıyken bile kolon ve index bedava duruyor.
+
+**Geri açma güvenli.** `1 → 64` (veya tersi) değişiminde eski satırlar eski partition'larında
+kalır. Sinyal yolu yalnızca sinyallenen partition'ı leaseler ama **fallback poll filtresizdir**,
+bu yüzden eski dağılımdaki satırlar en geç fallback aralığında yakalanır. Kayıp olmaz,
+yalnızca geçici gecikme.
+
 **Faz 3 ne zaman devreye alınır:** Kod always-on ship edilir (flag yok — düşük hacimde
 maliyeti yok, sinyal tek partition hedefler, fallback filtresizdir). Karşılığını IDM
 hacminde verir.
