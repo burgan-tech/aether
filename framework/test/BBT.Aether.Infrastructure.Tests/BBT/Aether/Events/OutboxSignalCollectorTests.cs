@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Events;
 using BBT.Aether.Uow;
+using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using Shouldly;
 using Xunit;
@@ -42,12 +43,16 @@ public sealed class OutboxSignalCollectorTests
     private static AetherOutboxOptions Options(bool enabled = true) =>
         new() { Schema = "sys_queues", SignalEnabled = enabled };
 
+    private static OutboxSignalCollector NewCollector(
+        IUnitOfWorkManager manager, IOutboxWakeupPublisher publisher, AetherOutboxOptions options) =>
+        new(manager, publisher, options, NullLogger<OutboxSignalCollector>.Instance);
+
     [Fact]
     public async Task Many_rows_in_one_transaction_produce_one_signal_per_partition()
     {
         var publisher = new RecordingPublisher();
         var (manager, fireCommit) = FakeUow();
-        var collector = new OutboxSignalCollector(manager, publisher, Options());
+        var collector = NewCollector(manager, publisher, Options());
 
         for (var i = 0; i < 100; i++) collector.Mark("sys_queues", 7);
 
@@ -64,7 +69,7 @@ public sealed class OutboxSignalCollectorTests
     {
         var publisher = new RecordingPublisher();
         var (manager, fireCommit) = FakeUow();
-        var collector = new OutboxSignalCollector(manager, publisher, Options());
+        var collector = NewCollector(manager, publisher, Options());
 
         collector.Mark("sys_queues", 1);
         collector.Mark("sys_queues", 2);
@@ -80,7 +85,7 @@ public sealed class OutboxSignalCollectorTests
     {
         var publisher = new RecordingPublisher();
         var (manager, _) = FakeUow();
-        var collector = new OutboxSignalCollector(manager, publisher, Options());
+        var collector = NewCollector(manager, publisher, Options());
 
         collector.Mark("sys_queues", 3);
         // commit handler deliberately never fired — simulates rollback
@@ -95,7 +100,7 @@ public sealed class OutboxSignalCollectorTests
         // here, or a successful commit would look like a failed request.
         var publisher = new RecordingPublisher { ThrowOnPublish = true };
         var (manager, fireCommit) = FakeUow();
-        var collector = new OutboxSignalCollector(manager, publisher, Options());
+        var collector = NewCollector(manager, publisher, Options());
 
         collector.Mark("sys_queues", 4);
 
@@ -107,7 +112,7 @@ public sealed class OutboxSignalCollectorTests
     {
         var publisher = new RecordingPublisher();
         var (manager, fireCommit) = FakeUow();
-        var collector = new OutboxSignalCollector(manager, publisher, Options(enabled: false));
+        var collector = NewCollector(manager, publisher, Options(enabled: false));
 
         collector.Mark("sys_queues", 5);
         await fireCommit();
@@ -120,7 +125,7 @@ public sealed class OutboxSignalCollectorTests
     {
         var publisher = new RecordingPublisher();
         var (manager, fireCommit) = FakeUow();
-        var collector = new OutboxSignalCollector(manager, publisher, Options());
+        var collector = NewCollector(manager, publisher, Options());
 
         for (short p = 0; p < 40; p++) collector.Mark("sys_queues", p);
 
@@ -141,7 +146,7 @@ public sealed class OutboxSignalCollectorTests
         var manager = Substitute.For<IUnitOfWorkManager>();
         manager.Current.Returns(uow);
 
-        var collector = new OutboxSignalCollector(manager, publisher, Options());
+        var collector = NewCollector(manager, publisher, Options());
         for (var i = 0; i < 50; i++) collector.Mark("sys_queues", (short)(i % 3));
 
         uow.Received(1).OnCompleted(Arg.Any<Func<IUnitOfWork, Task>>());
@@ -157,9 +162,29 @@ public sealed class OutboxSignalCollectorTests
         var manager = Substitute.For<IUnitOfWorkManager>();
         manager.Current.Returns((IUnitOfWork?)null);
 
-        var collector = new OutboxSignalCollector(manager, publisher, Options());
+        var collector = NewCollector(manager, publisher, Options());
 
         Should.NotThrow(() => collector.Mark("sys_queues", 6));
         publisher.Published.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task The_collapse_threshold_scales_with_the_configured_partition_count()
+    {
+        var publisher = new RecordingPublisher();
+        var (manager, fireCommit) = FakeUow();
+        var options = new AetherOutboxOptions
+        {
+            Schema = "sys_queues", SignalEnabled = true, PartitionCount = 8
+        };
+        var collector = NewCollector(manager, publisher, options);
+
+        // 8 partitions with a fixed threshold of 16 would never collapse; derived it must.
+        for (short p = 0; p < 8; p++) collector.Mark("sys_queues", p);
+
+        await fireCommit();
+
+        publisher.Published.Count.ShouldBe(1);
+        publisher.Published[0].PartitionId.ShouldBe(OutboxWakeupSignal.AllPartitions);
     }
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using BBT.Aether.Uow;
+using Microsoft.Extensions.Logging;
 
 namespace BBT.Aether.Events;
 
@@ -12,13 +13,16 @@ namespace BBT.Aether.Events;
 public sealed class OutboxSignalCollector(
     IUnitOfWorkManager unitOfWorkManager,
     IOutboxWakeupPublisher publisher,
-    AetherOutboxOptions options) : IOutboxSignalCollector
+    AetherOutboxOptions options,
+    ILogger<OutboxSignalCollector> logger) : IOutboxSignalCollector
 {
     /// <summary>
-    /// Above this many distinct partitions in one transaction, a single check-all signal is
-    /// cheaper for the broker than one signal each.
+    /// Above this fraction of the configured partitions in one transaction, a single check-all
+    /// signal is cheaper for the broker than one signal each. Derived from
+    /// <see cref="AetherOutboxOptions.PartitionCount"/> so it stays sensible when partitioning
+    /// is tuned down — setting PartitionCount to 1 turns partitioning off entirely.
     /// </summary>
-    private const int CollapseThreshold = 16;
+    private int CollapseThreshold => Math.Max(4, options.PartitionCount / 4);
 
     private readonly HashSet<(string Schema, short PartitionId)> _pending = [];
     private bool _hookRegistered;
@@ -55,10 +59,17 @@ public sealed class OutboxSignalCollector(
             {
                 await publisher.TryPublishAsync(signal).ConfigureAwait(false);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 // The business transaction has already committed. A broker failure must not
-                // surface here — fallback polling covers the rows regardless.
+                // surface here — fallback polling covers the rows regardless. Reaching this
+                // catch means the publisher broke its no-throw contract (it should return
+                // false, never throw), so leave a breadcrumb rather than staying silent.
+                logger.LogDebug(
+                    ex,
+                    "Outbox wake-up publisher broke its no-throw contract for schema {Schema} partition {PartitionId}",
+                    signal.Schema,
+                    signal.PartitionId);
             }
         }
     }
