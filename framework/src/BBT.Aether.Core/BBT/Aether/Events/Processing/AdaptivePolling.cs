@@ -17,8 +17,17 @@ public static class AdaptivePolling
     /// Computes the delay before the next dispatcher poll.
     /// </summary>
     /// <param name="current">The delay used before the poll that just completed.</param>
-    /// <param name="processed">Number of messages handled by the poll that just completed.</param>
-    /// <param name="batchSize">The configured lease batch size.</param>
+    /// <param name="processed">
+    /// Number of messages handled by the poll that just completed. For some callers (e.g. the
+    /// inbox, which leases in an internal round loop) this can span multiple lease rounds, so it
+    /// is not always literally "how many came back in one round".
+    /// </param>
+    /// <param name="batchSize">
+    /// The configured lease batch size. For a single-round caller this is a hard cap on
+    /// <paramref name="processed"/>; for a multi-round caller it is only the per-round cap, so
+    /// <paramref name="processed"/> &gt;= <paramref name="batchSize"/> is a heuristic for "work
+    /// was flowing" rather than proof that one round came back exactly full.
+    /// </param>
     /// <param name="busyInterval">Delay to use when a full batch was returned.</param>
     /// <param name="idleInterval">Delay to use when a partial batch was returned.</param>
     /// <param name="maxInterval">Upper bound for the exponential idle backoff.</param>
