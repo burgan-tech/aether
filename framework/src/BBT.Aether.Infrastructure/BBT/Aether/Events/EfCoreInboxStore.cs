@@ -124,20 +124,13 @@ public class EfCoreInboxStore<TDbContext>(
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var cutoffDate = clock.UtcNow - retentionPeriod;
 
-        var oldMessages = await dbContext.InboxMessages
+        return await dbContext.InboxMessages
             .Where(m => m.Status == IncomingEventStatus.Processed &&
                         m.HandledTime != null &&
                         m.HandledTime < cutoffDate)
             .OrderBy(m => m.HandledTime)
             .Take(batchSize)
-            .ToListAsync(cancellationToken);
-
-        if (oldMessages.Count == 0)
-            return 0;
-
-        var count = oldMessages.Count;
-        dbContext.InboxMessages.RemoveRange(oldMessages);
-        return count;
+            .ExecuteDeleteAsync(cancellationToken);
     }
 
     private IDisposable BeginConfiguredSchemaScope()

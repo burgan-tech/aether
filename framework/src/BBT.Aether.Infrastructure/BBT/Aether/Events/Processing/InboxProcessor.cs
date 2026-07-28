@@ -24,7 +24,11 @@ public class InboxProcessor<TDbContext>(
     AetherInboxOptions options) : IInboxProcessor
     where TDbContext : DbContext, IHasEfCoreInbox
 {
-    private DateTime _lastCleanupUtc = DateTime.MinValue;
+    // Seeded with random jitter inside the cleanup interval so that pods starting together
+    // (a deployment rollout) do not all run their first retention pass at the same moment.
+    private DateTime _lastCleanupUtc =
+        clock.UtcNow - TimeSpan.FromTicks(
+            (long)(options.CleanupInterval.Ticks * Random.Shared.NextDouble()));
 
     public virtual async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {

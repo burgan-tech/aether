@@ -28,7 +28,11 @@ public class OutboxProcessor<TDbContext>(
     AetherOutboxOptions options) : IOutboxProcessor
     where TDbContext : DbContext, IHasEfCoreOutbox
 {
-    private DateTime _lastCleanupUtc = DateTime.MinValue;
+    // Seeded with random jitter inside the cleanup interval so that pods starting together
+    // (a deployment rollout) do not all run their first retention pass at the same moment.
+    private DateTime _lastCleanupUtc =
+        clock.UtcNow - TimeSpan.FromTicks(
+            (long)(options.CleanupInterval.Ticks * Random.Shared.NextDouble()));
 
     /// <inheritdoc />
     public virtual async Task<int> RunAsync(CancellationToken cancellationToken = default)
@@ -233,18 +237,16 @@ public class OutboxProcessor<TDbContext>(
             var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
             var cutoffDate = clock.UtcNow - options.RetentionPeriod;
 
-            var processed = await dbContext.OutboxMessages
+            var deleted = await dbContext.OutboxMessages
                 .Where(m => m.Status == OutboxMessageStatus.Processed
                          && m.ProcessedAt != null
                          && m.ProcessedAt < cutoffDate)
+                .OrderBy(m => m.ProcessedAt)
                 .Take(options.CleanupBatchSize)
-                .ToListAsync(cancellationToken);
+                .ExecuteDeleteAsync(cancellationToken);
 
-            if (processed.Count > 0)
-            {
-                logger.LogInformation("Cleaning up {Count} processed outbox messages", processed.Count);
-                dbContext.OutboxMessages.RemoveRange(processed);
-            }
+            if (deleted > 0)
+                logger.LogInformation("Cleaned up {Count} processed outbox messages", deleted);
 
             await uow.CommitAsync(cancellationToken);
         }
