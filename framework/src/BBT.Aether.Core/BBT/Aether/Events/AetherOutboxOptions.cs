@@ -52,6 +52,19 @@ public class AetherOutboxOptions
     public int PartitionCount { get; set; } = 64;
 
     /// <summary>
+    /// Whether the dispatcher leases partition-disjoint batches when a wake-up signal names a
+    /// partition. When false the lease query is never filtered, which is the pre-partition
+    /// behaviour.
+    /// </summary>
+    /// <remarks>
+    /// Safe to flip at runtime in either direction. Rows keep whatever <c>PartitionId</c> they
+    /// were written with, and fallback polling is unfiltered regardless, so a row can never be
+    /// stranded by turning this on or off — only its dispatch can be delayed to the next
+    /// fallback interval.
+    /// </remarks>
+    public bool PartitionedLeasingEnabled { get; set; }
+
+    /// <summary>
     /// Whether the write path publishes wake-up signals after commit.
     /// Ship disabled and enable per environment; the dispatcher works either way.
     /// </summary>

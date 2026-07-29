@@ -21,11 +21,17 @@ public interface IOutboxLeaseStore
     /// <param name="batchSize">Maximum number of messages to lease</param>
     /// <param name="workerId">Unique identifier for the worker acquiring the lease</param>
     /// <param name="leaseDuration">How long the lease should be held</param>
+    /// <param name="partitionIds">
+    /// When supplied, only rows in these partitions are considered. When null the query is
+    /// unfiltered — which is what fallback polling always does, so that a partition whose
+    /// signal was lost is never stranded.
+    /// </param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>List of leased outbox messages</returns>
     Task<IReadOnlyList<OutboxMessage>> LeaseBatchAsync(
         int batchSize,
         string workerId,
         TimeSpan leaseDuration,
+        IReadOnlyCollection<short>? partitionIds = null,
         CancellationToken cancellationToken = default);
 }

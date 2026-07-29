@@ -76,7 +76,8 @@ public class OutboxProcessor<TDbContext>(
                 new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
             {
                 messages = (await leaseStore.LeaseBatchAsync(
-                    options.BatchSize, workerId, options.LeaseDuration, cancellationToken)).ToList();
+                    options.BatchSize, workerId, options.LeaseDuration,
+                    cancellationToken: cancellationToken)).ToList();
                 await leaseUow.CommitAsync(cancellationToken);
             }
 

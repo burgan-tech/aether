@@ -29,8 +29,11 @@ public class NpgsqlOutboxLeaseStore<TDbContext>(
         int batchSize,
         string workerId,
         TimeSpan leaseDuration,
+        IReadOnlyCollection<short>? partitionIds = null,
         CancellationToken cancellationToken = default)
     {
+        // partitionIds is accepted to satisfy the contract but not yet applied; the
+        // partition-filtered query lands in the next commit.
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var entityType = dbContext.Model.FindEntityType(typeof(BBT.Aether.Domain.Events.OutboxMessage))!;
         var schema = currentSchema.Name
