@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -32,8 +33,6 @@ public class NpgsqlOutboxLeaseStore<TDbContext>(
         IReadOnlyCollection<short>? partitionIds = null,
         CancellationToken cancellationToken = default)
     {
-        // partitionIds is accepted to satisfy the contract but not yet applied; the
-        // partition-filtered query lands in the next commit.
         var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
         var entityType = dbContext.Model.FindEntityType(typeof(BBT.Aether.Domain.Events.OutboxMessage))!;
         var schema = currentSchema.Name
@@ -48,6 +47,16 @@ public class NpgsqlOutboxLeaseStore<TDbContext>(
             await connection.OpenAsync(cancellationToken);
 
         var dbTransaction = dbContext.Database.CurrentTransaction?.GetDbTransaction();
+
+        // Built conditionally rather than a single "(@p IS NULL OR ...)" predicate: the planner
+        // only proves the partial dispatch index covers this query when it sees the status
+        // values as constants, and a nullable-parameter predicate muddies that. An empty
+        // collection is treated as unfiltered, not "match nothing" — ANY of an empty array
+        // returns zero rows, which would silently stall dispatch instead of falling back to a
+        // full sweep.
+        var partitionFilter = partitionIds is { Count: > 0 }
+            ? "\n                  AND \"PartitionId\" = ANY(@partitionIds)"
+            : string.Empty;
 
         await using var command = connection.CreateCommand();
         command.Transaction = dbTransaction;
@@ -65,14 +74,14 @@ public class NpgsqlOutboxLeaseStore<TDbContext>(
                 FROM {fullTableName}
                 WHERE "Status" IN (@pending, @processing)
                   AND ("LockedUntil" IS NULL OR "LockedUntil" < @now)
-                  AND ("NextRetryAt" IS NULL OR "NextRetryAt" <= @now)
+                  AND ("NextRetryAt" IS NULL OR "NextRetryAt" <= @now){partitionFilter}
                 ORDER BY "CreatedAt"
                 LIMIT @batchSize
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING "Id", "Status", "EventName", "EventData", "CreatedAt",
                       "ProcessedAt", "LockedBy", "LockedUntil", "LastError",
-                      "RetryCount", "NextRetryAt", "ExtraProperties";
+                      "RetryCount", "NextRetryAt", "PartitionId", "ExtraProperties";
             """;
 
         AddParameter(command, "@processing", (int)OutboxMessageStatus.Processing);
@@ -81,6 +90,11 @@ public class NpgsqlOutboxLeaseStore<TDbContext>(
         AddParameter(command, "@lockedUntil", lockedUntil);
         AddParameter(command, "@now",        now);
         AddParameter(command, "@batchSize",  batchSize);
+
+        if (partitionIds is { Count: > 0 })
+        {
+            AddParameter(command, "@partitionIds", partitionIds.ToArray());
+        }
 
         var messages = new List<OutboxMessage>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -99,6 +113,7 @@ public class NpgsqlOutboxLeaseStore<TDbContext>(
                 LastError   = reader.IsDBNull(reader.GetOrdinal("LastError"))   ? null : reader.GetString(reader.GetOrdinal("LastError")),
                 RetryCount  = reader.GetInt32(reader.GetOrdinal("RetryCount")),
                 NextRetryAt = reader.IsDBNull(reader.GetOrdinal("NextRetryAt")) ? null : reader.GetDateTime(reader.GetOrdinal("NextRetryAt")),
+                PartitionId = reader.GetInt16(reader.GetOrdinal("PartitionId")),
                 ExtraProperties = DeserializeExtraProperties(reader),
             });
         }
