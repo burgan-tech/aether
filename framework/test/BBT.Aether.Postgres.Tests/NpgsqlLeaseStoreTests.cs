@@ -117,6 +117,31 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
         await cmd.ExecuteNonQueryAsync();
     }
 
+    /// <summary>
+    /// Reads back the id of the single row currently in the table. Used right after an insert,
+    /// while it is the only row, so the caller can pin that specific row's partition later by
+    /// identity rather than by whatever it happened to hash to.
+    /// </summary>
+    private async Task<Guid> GetSoleMessageIdAsync()
+    {
+        await using var conn = new NpgsqlConnection(fx.ConnectionString);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT \"Id\" FROM \"{_schema}\".\"OutboxMessages\"";
+        return (Guid)(await cmd.ExecuteScalarAsync())!;
+    }
+
+    private async Task SetPartitionForIdAsync(Guid id, short partitionId)
+    {
+        await using var conn = new NpgsqlConnection(fx.ConnectionString);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"UPDATE \"{_schema}\".\"OutboxMessages\" SET \"PartitionId\" = @partitionId WHERE \"Id\" = @id";
+        cmd.Parameters.Add(new NpgsqlParameter("partitionId", partitionId));
+        cmd.Parameters.Add(new NpgsqlParameter("id", id));
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     [Fact]
     public async Task LeaseBatch_returns_pending_messages_and_locks_them()
     {
@@ -515,18 +540,24 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
         var sp = BuildProvider();
         await SetupSchemaAsync(sp);
 
+        // Partitions are pinned by row identity rather than left to whatever each row's
+        // subject/id happens to hash to — with the default 64-partition count, relying on the
+        // second row hashing away from partition 5 would leave a ~1/64 chance per run of both
+        // rows landing in the same partition and the test failing for an unrelated reason.
         await InsertPendingMessageAsync(sp);
-        await SetPartitionAsync(5);                 // first row -> 5
-        await InsertPendingMessageAsync(sp);        // second row -> whatever it hashed to
+        var firstId = await GetSoleMessageIdAsync();
+        await SetPartitionForIdAsync(firstId, 5);
 
+        await InsertPendingMessageAsync(sp);
         await using (var conn = new NpgsqlConnection(fx.ConnectionString))
         {
             await conn.OpenAsync();
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = $"""
                 UPDATE "{_schema}"."OutboxMessages" SET "PartitionId" = 9
-                WHERE "PartitionId" <> 5
+                WHERE "Id" <> @firstId
                 """;
+            cmd.Parameters.Add(new NpgsqlParameter("firstId", firstId));
             await cmd.ExecuteNonQueryAsync();
         }
 

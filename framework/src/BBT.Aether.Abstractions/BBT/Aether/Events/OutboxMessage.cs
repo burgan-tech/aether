@@ -40,9 +40,9 @@ public class OutboxMessage
     public int RetryCount { get; set; }
 
     /// <summary>
-    /// Logical partition this message belongs to, derived from the event subject.
-    /// Written from day one so the dispatcher can lease partition-disjoint batches later
-    /// without a backfill. Not read by any query yet.
+    /// Logical partition this message belongs to, derived from a deterministic hash of the
+    /// event subject (or id, if the subject is absent). The lease query can filter and return
+    /// this column, letting the dispatcher lease partition-disjoint batches.
     /// </summary>
     public short PartitionId { get; set; }
 
