@@ -35,13 +35,15 @@ public class OutboxProcessor<TDbContext>(
             (long)(options.CleanupInterval.Ticks * Random.Shared.NextDouble()));
 
     /// <inheritdoc />
-    public virtual async Task<int> RunAsync(CancellationToken cancellationToken = default)
+    public virtual async Task<int> RunAsync(
+        IReadOnlyCollection<short>? partitionIds = null,
+        CancellationToken cancellationToken = default)
     {
         // Exceptions are intentionally left to propagate — OutboxBackgroundService owns the
         // retry/back-off decision for a failed cycle (it logs and jumps to ErrorPollingInterval).
         // Swallowing here previously made every failure look like an empty poll to the caller,
         // so the background service's error back-off could never engage.
-        var processed = await ProcessOutboxMessagesAsync(cancellationToken);
+        var processed = await ProcessOutboxMessagesAsync(partitionIds, cancellationToken);
         await CleanupProcessedMessagesAsync(cancellationToken);
         return processed;
     }
@@ -49,7 +51,8 @@ public class OutboxProcessor<TDbContext>(
     /// <summary>
     /// Leases a batch, publishes each message, then persists outcomes.
     /// </summary>
-    protected virtual async Task<int> ProcessOutboxMessagesAsync(CancellationToken cancellationToken)
+    protected virtual async Task<int> ProcessOutboxMessagesAsync(
+        IReadOnlyCollection<short>? partitionIds, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(options.Schema))
         {
@@ -77,6 +80,10 @@ public class OutboxProcessor<TDbContext>(
             {
                 messages = (await leaseStore.LeaseBatchAsync(
                     options.BatchSize, workerId, options.LeaseDuration,
+                    // PartitionedLeasingEnabled is enforced here and nowhere else, so a caller
+                    // cannot bypass the kill switch by supplying a filter. When it is off the
+                    // query is always unfiltered, which is the pre-partition behaviour.
+                    options.PartitionedLeasingEnabled ? partitionIds : null,
                     cancellationToken: cancellationToken)).ToList();
                 await leaseUow.CommitAsync(cancellationToken);
             }

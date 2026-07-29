@@ -21,7 +21,7 @@ public sealed class OutboxBackgroundService(
         {
             try
             {
-                var processed = await processor.RunAsync(stoppingToken);
+                var processed = await processor.RunAsync(cancellationToken: stoppingToken);
                 delay = AdaptivePolling.NextDelay(
                     delay, processed, options.BatchSize,
                     options.BusyPollingInterval, options.IdlePollingInterval, options.MaxPollingInterval);
