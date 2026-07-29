@@ -141,8 +141,21 @@ yeni bir sözleşmedir ve bu işin kapsamı değil.
         CancellationToken cancellationToken = default);
 ```
 
-Parametreyi `cancellationToken`'dan **önce** ve opsiyonel koy: mevcut çağıranlar
-(`OutboxProcessor`, testler) kaynak uyumlu kalır ve derlenmeye devam eder.
+Parametreyi `cancellationToken`'dan **önce** ve opsiyonel koy.
+
+> ⚠️ **Bu, bir çağıranı kırar — planın ilk sürümü bunu gözden kaçırmıştı.**
+> `OutboxProcessor.cs:79` `LeaseBatchAsync`'i **konumsal** çağırıyor
+> (`..., options.LeaseDuration, cancellationToken)`), yani 4. sıra artık `partitionIds`
+> olduğu için `CS1503` alırsın. Postgres testleri 3 argümanla çağırdığı için etkilenmez.
+>
+> Düzeltme tek satır: o çağrıda token'ı adıyla geçir
+> (`cancellationToken: cancellationToken`). Başka hiçbir şeye dokunma — Task 3 zaten aynı
+> satırı filtreyi geçirecek şekilde yeniden yazacak.
+>
+> Alternatif, `partitionIds`'i `cancellationToken`'dan **sonra** koymaktı; hiçbir çağıranı
+> kırmazdı ama iptal token'ının ardına opsiyonel parametre dizmek yanlış okunur ve sonraki
+> çağıranların sessizce yanlış yazmasına davetiye çıkarır. Tek satırlık named argument daha
+> temiz takas.
 
 `using System.Collections.Generic;` gerekiyorsa ekle.
 
@@ -150,17 +163,45 @@ Parametreyi `cancellationToken`'dan **önce** ve opsiyonel koy: mevcut çağıra
 
 Yeni parametreyi imzasına ekle; gövdesi boş liste döndürmeye devam etsin.
 
-- [ ] **Step 4: Derle**
+- [ ] **Step 4: `NpgsqlOutboxLeaseStore`'a imzayı ekle (yalnızca imza)**
+
+> ⚠️ **Planın ilk sürümü burada da yanılmıştı.** "Opsiyonel parametre sayesinde
+> `NpgsqlOutboxLeaseStore` değişmeden derlenir" iddiası **yanlış**: opsiyonel parametre
+> *çağrı yerini* rahatlatır, *implementasyonu* değil. Implicit interface implementation
+> tam parametre listesini bildirmek zorundadır, aksi hâlde `CS0535` alırsın.
+
+Bu yüzden imzayı burada eklemek gerekiyor — ama **yalnızca imzayı**:
+
+```csharp
+    public async Task<IReadOnlyList<OutboxMessage>> LeaseBatchAsync(
+        int batchSize,
+        string workerId,
+        TimeSpan leaseDuration,
+        IReadOnlyCollection<short>? partitionIds = null,
+        CancellationToken cancellationToken = default)
+```
+
+SQL'e dokunma, `= ANY(...)` ekleme, dizi parametresi ekleme. T2 davranışın sahibi ve
+testlerinin **önce kırmızı** olabilmesi için filtrenin şu an hiçbir şey yapmadığı bir
+durumdan başlaması gerekiyor. Parametrenin henüz uygulanmadığını bir yorumla belirt:
+
+```csharp
+        // partitionIds is accepted to satisfy the contract but not yet applied; the
+        // partition-filtered query lands in the next commit.
+```
+
+**`NpgsqlInboxLeaseStore`'a dokunma** — ayrı `IInboxLeaseStore` arayüzünü implement ediyor ve
+bilinçli olarak kapsam dışı.
+
+- [ ] **Step 5: Derle**
 
 ```bash
 cd /Users/U0B006/Documents/repos/burgan-tech/aether
 dotnet build framework/BBT.Aether.slnx
 ```
 
-Beklenen: 0 error. Opsiyonel parametre sayesinde `NpgsqlOutboxLeaseStore` ve
-`NpgsqlInboxLeaseStore` henüz değişmeden derlenmeli — **`NpgsqlInboxLeaseStore` `IInboxLeaseStore`
-implement ediyor, ona dokunma.** Hangi lease store'ların bu arayüzü implement ettiğini
-doğrula ve raporla; beklenmedik bir implementasyon varsa dur.
+Beklenen: 0 error. Hangi tiplerin `IOutboxLeaseStore`'u implement ettiğini raporla;
+beklenmedik bir implementasyon varsa dur.
 
 - [ ] **Step 5: Commit**
 
