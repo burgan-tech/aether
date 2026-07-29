@@ -54,7 +54,8 @@ public class NpgsqlOutboxLeaseStore<TDbContext>(
         // collection is treated as unfiltered, not "match nothing" — ANY of an empty array
         // returns zero rows, which would silently stall dispatch instead of falling back to a
         // full sweep.
-        var partitionFilter = partitionIds is { Count: > 0 }
+        var hasPartitionFilter = partitionIds is { Count: > 0 };
+        var partitionFilter = hasPartitionFilter
             ? "\n                  AND \"PartitionId\" = ANY(@partitionIds)"
             : string.Empty;
 
@@ -91,9 +92,9 @@ public class NpgsqlOutboxLeaseStore<TDbContext>(
         AddParameter(command, "@now",        now);
         AddParameter(command, "@batchSize",  batchSize);
 
-        if (partitionIds is { Count: > 0 })
+        if (hasPartitionFilter)
         {
-            AddParameter(command, "@partitionIds", partitionIds.ToArray());
+            AddParameter(command, "@partitionIds", partitionIds!.ToArray());
         }
 
         var messages = new List<OutboxMessage>();

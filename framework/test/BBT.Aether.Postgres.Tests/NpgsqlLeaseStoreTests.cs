@@ -142,6 +142,21 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
         await cmd.ExecuteNonQueryAsync();
     }
 
+    /// <summary>
+    /// Reads back the id of the one row that is not among <paramref name="excludedIds"/>. Used
+    /// right after an insert, while exactly one new row exists, so the caller can pin that row's
+    /// partition by identity instead of by whatever it happened to hash to.
+    /// </summary>
+    private async Task<Guid> GetMessageIdExcludingAsync(params Guid[] excludedIds)
+    {
+        await using var conn = new NpgsqlConnection(fx.ConnectionString);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT \"Id\" FROM \"{_schema}\".\"OutboxMessages\" WHERE NOT (\"Id\" = ANY(@excludedIds))";
+        cmd.Parameters.Add(new NpgsqlParameter("excludedIds", excludedIds));
+        return (Guid)(await cmd.ExecuteScalarAsync())!;
+    }
+
     [Fact]
     public async Task LeaseBatch_returns_pending_messages_and_locks_them()
     {
@@ -535,31 +550,60 @@ public sealed class NpgsqlLeaseStoreTests(PostgresFixture fx)
     }
 
     [Fact]
+    public async Task LeaseBatch_with_an_empty_filter_is_unfiltered()
+    {
+        var sp = BuildProvider();
+        await SetupSchemaAsync(sp);
+        await InsertPendingMessageAsync(sp);
+        await SetPartitionAsync(42);
+
+        await using var scope = sp.CreateAsyncScope();
+        var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
+        var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var leaseStore = scope.ServiceProvider.GetRequiredService<IOutboxLeaseStore>();
+
+        using (currentSchema.Change(_schema))
+        {
+            IReadOnlyList<BBT.Aether.Events.OutboxMessage> leased;
+            await using (var uow = uowManager.Begin(
+                new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true }))
+            {
+                // An empty collection takes a different path through the "Count: > 0" guard
+                // than null, but means the same thing: unfiltered, not "match nothing" — ANY
+                // of an empty array returns zero rows, which would silently stall dispatch.
+                leased = await leaseStore.LeaseBatchAsync(
+                    10, "worker-1", TimeSpan.FromSeconds(30), Array.Empty<short>());
+                await uow.CommitAsync();
+            }
+
+            leased.Count.ShouldBe(1);
+        }
+    }
+
+    [Fact]
     public async Task LeaseBatch_with_several_partitions_returns_rows_from_each()
     {
         var sp = BuildProvider();
         await SetupSchemaAsync(sp);
 
         // Partitions are pinned by row identity rather than left to whatever each row's
-        // subject/id happens to hash to — with the default 64-partition count, relying on the
-        // second row hashing away from partition 5 would leave a ~1/64 chance per run of both
-        // rows landing in the same partition and the test failing for an unrelated reason.
+        // subject/id happens to hash to — with the default 64-partition count, relying on
+        // hashes landing where convenient would leave a per-run chance of the test failing (or
+        // passing) for an unrelated reason.
         await InsertPendingMessageAsync(sp);
         var firstId = await GetSoleMessageIdAsync();
         await SetPartitionForIdAsync(firstId, 5);
 
         await InsertPendingMessageAsync(sp);
-        await using (var conn = new NpgsqlConnection(fx.ConnectionString))
-        {
-            await conn.OpenAsync();
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"""
-                UPDATE "{_schema}"."OutboxMessages" SET "PartitionId" = 9
-                WHERE "Id" <> @firstId
-                """;
-            cmd.Parameters.Add(new NpgsqlParameter("firstId", firstId));
-            await cmd.ExecuteNonQueryAsync();
-        }
+        var secondId = await GetMessageIdExcludingAsync(firstId);
+        await SetPartitionForIdAsync(secondId, 9);
+
+        // A third row outside the requested {5, 9} set is what makes this test capable of
+        // failing: with only rows inside the requested set, deleting the
+        // "AND PartitionId = ANY(...)" fragment entirely would still leave it green.
+        await InsertPendingMessageAsync(sp);
+        var thirdId = await GetMessageIdExcludingAsync(firstId, secondId);
+        await SetPartitionForIdAsync(thirdId, 11);
 
         await using var scope = sp.CreateAsyncScope();
         var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
