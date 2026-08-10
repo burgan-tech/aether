@@ -22,4 +22,17 @@ public static class InfrastructureActivitySource
     /// The shared ActivitySource instance for creating activities (spans) in Aether infrastructure.
     /// </summary>
     public static readonly ActivitySource Source = new(SourceName, Version);
+
+    /// <summary>
+    /// Starts an infrastructure diagnostic span only when the global tracing profile is Verbose.
+    /// </summary>
+    public static Activity? StartDiagnosticActivity(
+        string operationName,
+        ActivityKind kind,
+        ActivityContext parentContext = default)
+    {
+        return AetherTracingRuntime.IsVerbose
+            ? Source.StartActivity(operationName, kind, parentContext)
+            : null;
+    }
 }

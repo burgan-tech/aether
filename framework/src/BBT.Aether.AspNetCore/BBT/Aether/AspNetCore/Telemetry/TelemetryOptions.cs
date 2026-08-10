@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using BBT.Aether.Telemetry;
 
 namespace BBT.Aether.AspNetCore.Telemetry;
 
@@ -113,6 +114,12 @@ public sealed class LoggingEnricherOptions
 
 public sealed class AetherTracingOptions
 {
+    /// <summary>
+    /// Controls whether only business spans or all diagnostic spans are produced.
+    /// Defaults to Business to keep production traces focused on service boundaries and business spans.
+    /// </summary>
+    public AetherTracingDetailLevel DetailLevel { get; set; } = AetherTracingDetailLevel.Business;
+
     public bool EnableAspNetCore { get; set; } = true;
     public bool EnableHttpClient { get; set; } = true;
     public bool EnableEntityFrameworkCore { get; set; } = true;

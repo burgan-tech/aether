@@ -46,7 +46,7 @@ internal sealed class RedisDistributedLockHandle(
         if (Volatile.Read(ref _disposed) == 1)
             return false;
 
-        using var activity = InfrastructureActivitySource.Source.StartActivity(
+        using var activity = InfrastructureActivitySource.StartDiagnosticActivity(
             "DistributedLock.Extend",
             ActivityKind.Client,
             Activity.Current?.Context ?? default);
@@ -96,7 +96,7 @@ internal sealed class RedisDistributedLockHandle(
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
             return;
 
-        using var activity = InfrastructureActivitySource.Source.StartActivity(
+        using var activity = InfrastructureActivitySource.StartDiagnosticActivity(
             "DistributedLock.Release",
             ActivityKind.Client,
             Activity.Current?.Context ?? default);

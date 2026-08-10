@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Net.Http;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using BBT.Aether.AspNetCore.Telemetry;
+using BBT.Aether.Telemetry;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
@@ -37,6 +39,7 @@ public static class AetherTelemetryServiceCollectionExtensions
         }
 
         section.Bind(opts);
+        AetherTracingRuntime.Configure(opts.Tracing.DetailLevel);
 
         // Apply defaults and environment variables
         var envName =
@@ -156,18 +159,23 @@ public static class AetherTelemetryServiceCollectionExtensions
                 {
                     tracing.AddHttpClientInstrumentation(o =>
                     {
-                        o.FilterHttpRequestMessage = req =>
-                            !IsExcluded(req.RequestUri?.ToString(), excludedPatterns);
+                        o.FilterHttpRequestMessage = req => ShouldTraceHttpRequest(req, excludedPatterns);
+                        o.EnrichWithHttpRequestMessage = EnrichHttpClientActivity;
                     });
                 }
 
-                if (opts.Tracing.EnableEntityFrameworkCore)
+                if (opts.Tracing.EnableEntityFrameworkCore && AetherTracingRuntime.IsVerbose)
                 {
                     tracing.AddEntityFrameworkCoreInstrumentation();
                 }
                 
                 tracing.AddSource("BBT.Aether.Aspects");
                 tracing.AddSource("BBT.Aether.Infrastructure");
+
+                if (!AetherTracingRuntime.IsVerbose)
+                {
+                    tracing.AddProcessor(new BusinessSpanFilterProcessor());
+                }
                 
                 // Custom sources
                 foreach (var src in opts.Tracing.AdditionalSources)
@@ -283,6 +291,67 @@ public static class AetherTelemetryServiceCollectionExtensions
         }
 
         return false;
+    }
+
+    private static bool ShouldTraceHttpRequest(HttpRequestMessage request, List<Regex> excludedPatterns)
+    {
+        if (IsExcluded(request.RequestUri?.ToString(), excludedPatterns))
+        {
+            return false;
+        }
+
+        return AetherTracingRuntime.IsVerbose || !IsDaprDiagnosticRequest(request.RequestUri);
+    }
+
+    private static bool IsDaprDiagnosticRequest(Uri? uri)
+    {
+        var path = uri?.AbsolutePath;
+        if (string.IsNullOrEmpty(path))
+        {
+            return false;
+        }
+
+        if (path.StartsWith("/dapr.proto.runtime.v1.Dapr/", StringComparison.OrdinalIgnoreCase))
+        {
+            return path.EndsWith("/GetState", StringComparison.OrdinalIgnoreCase)
+                   || path.EndsWith("/GetBulkState", StringComparison.OrdinalIgnoreCase)
+                   || path.EndsWith("/SaveState", StringComparison.OrdinalIgnoreCase)
+                   || path.EndsWith("/DeleteState", StringComparison.OrdinalIgnoreCase)
+                   || path.EndsWith("/ExecuteStateTransaction", StringComparison.OrdinalIgnoreCase)
+                   || path.EndsWith("/GetSecret", StringComparison.OrdinalIgnoreCase)
+                   || path.EndsWith("/GetBulkSecret", StringComparison.OrdinalIgnoreCase)
+                   || path.EndsWith("/GetConfiguration", StringComparison.OrdinalIgnoreCase)
+                   || path.EndsWith("/SubscribeConfiguration", StringComparison.OrdinalIgnoreCase)
+                   || path.EndsWith("/TryLockAlpha1", StringComparison.OrdinalIgnoreCase)
+                   || path.EndsWith("/UnlockAlpha1", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return path.StartsWith("/v1.0/state/", StringComparison.OrdinalIgnoreCase)
+               || path.StartsWith("/v1.0-alpha1/state/", StringComparison.OrdinalIgnoreCase)
+               || path.StartsWith("/v1.0-alpha1/lock/", StringComparison.OrdinalIgnoreCase)
+               || path.StartsWith("/v1.0/secrets/", StringComparison.OrdinalIgnoreCase)
+               || path.StartsWith("/v1.0/configuration/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void EnrichHttpClientActivity(Activity activity, HttpRequestMessage request)
+    {
+        var segments = request.RequestUri?.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments is not { Length: >= 5 }
+            || !string.Equals(segments[0], "v1.0", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(segments[1], "invoke", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(segments[3], "method", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var appId = Uri.UnescapeDataString(segments[2]);
+        var method = Uri.UnescapeDataString(string.Join('/', segments.Skip(4)));
+
+        activity.DisplayName = $"Dapr invoke {appId}";
+        activity.SetTag("rpc.system", "dapr");
+        activity.SetTag("rpc.service", appId);
+        activity.SetTag("rpc.method", method);
+        activity.SetTag("dapr.app_id", appId);
     }
 
     private static string GetRoutePatternSafe(HttpContext httpContext)

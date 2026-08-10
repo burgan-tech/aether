@@ -58,7 +58,7 @@ internal sealed class DaprDistributedLockHandle(
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
             return;
 
-        using var activity = InfrastructureActivitySource.Source.StartActivity(
+        using var activity = InfrastructureActivitySource.StartDiagnosticActivity(
             "DistributedLock.Release",
             ActivityKind.Client,
             Activity.Current?.Context ?? default);

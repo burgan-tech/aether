@@ -55,7 +55,7 @@ public class DaprDistributedLockService(
     [Obsolete("Use IDistributedLockHandle.ReleaseAsync() or dispose the handle returned by TryAcquireLockAsync. This method uses a static owner and cannot reliably release locks acquired concurrently.")]
     public async Task<bool> ReleaseLockAsync(string resourceId, CancellationToken cancellationToken = default)
     {
-        using var activity = InfrastructureActivitySource.Source.StartActivity(
+        using var activity = InfrastructureActivitySource.StartDiagnosticActivity(
             "DistributedLock.Release",
             ActivityKind.Client,
             Activity.Current?.Context ?? default);
@@ -151,7 +151,7 @@ public class DaprDistributedLockService(
 
     private Activity? StartLockActivity(string operationName, string resourceId, int expiryInSeconds)
     {
-        var activity = InfrastructureActivitySource.Source.StartActivity(
+        var activity = InfrastructureActivitySource.StartDiagnosticActivity(
             operationName,
             ActivityKind.Client,
             Activity.Current?.Context ?? default);
