@@ -89,7 +89,7 @@ public class DaprDistributedCacheService(
 
     private Activity? StartCacheActivity(string operationName, string key)
     {
-        var activity = InfrastructureActivitySource.Source.StartActivity(
+        var activity = InfrastructureActivitySource.StartDiagnosticActivity(
             operationName,
             ActivityKind.Client,
             Activity.Current?.Context ?? default);

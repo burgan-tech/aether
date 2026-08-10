@@ -61,6 +61,8 @@ Request → [Trace] → [Log] → [UnitOfWork] → Method → [UnitOfWork] → [
 Integrates with OpenTelemetry to create spans for method execution.
 
 ```csharp
+using BBT.Aether.Telemetry;
+
 // Basic span creation
 [Trace]
 public async Task ProcessAsync() { }
@@ -77,6 +79,10 @@ public async Task ProcessAsync() { }
 [Trace(Mode = TracingMode.Span)]     // Creates new span (default)
 [Trace(Mode = TracingMode.Event)]    // Adds events to current span
 [Trace(Mode = TracingMode.Enrich)]   // Enriches current span with tags
+
+// Trace aspects represent application/business spans in both profiles
+[Trace]
+public async Task ExecuteDiagnosticStepAsync() { }
 ```
 
 **Properties:**
@@ -84,6 +90,8 @@ public async Task ProcessAsync() { }
 - `Kind` - ActivityKind: Internal (default), Server, Client, Producer, Consumer
 - `OperationName` - Custom span name (default: ClassName.MethodName)
 - `Tags` - Custom tags in "key:value" format
+
+`[Trace]` annotations represent application/business spans and are emitted in both `Business` and `Verbose`. In the `Business` profile, completed spans whose final display name starts with `[` are filtered as ordered pipeline-step detail. `Telemetry:Tracing:DetailLevel` also controls diagnostic instrumentation such as EF Core, distributed cache/lock, and low-level client spans globally.
 
 ### [Log] - Structured Logging
 
@@ -260,4 +268,3 @@ public class OrderAppService
 
 - [Unit of Work](../unit-of-work/README.md) - Detailed UoW documentation
 - [Telemetry](../telemetry/README.md) - OpenTelemetry setup
-
