@@ -64,8 +64,10 @@ Config section key: `Telemetry` or `Aether:Telemetry`.
       "Protocol": "http/protobuf"
     },
     "Tracing": {
+      "DetailLevel": "Business",
       "EnableAspNetCore": true,
       "EnableHttpClient": true,
+      "EnableEntityFrameworkCore": true,
       "AdditionalSources": ["MyApp.*"],
       "ExcludedPaths": ["/health", "/metrics"],
       "Headers": ["x-correlation-id", "x-request-id"],
@@ -105,6 +107,7 @@ Config section key: `Telemetry` or `Aether:Telemetry`.
 }
 ```
 
+- **Tracing.DetailLevel**: `Business` is the default and keeps service boundaries and `[Trace]` application/business spans while suppressing diagnostic instrumentation such as EF Core, distributed cache/lock, low-level Dapr calls, and spans whose final display name starts with `[` (ordered pipeline-step detail). `Verbose` keeps all configured instrumentation and must be selected explicitly.
 - **Tracing.Headers**: Request header names added as activity tags on spans (no wildcard).
 - **Logging.Enrichers**: CustomAttributes and Headers are added as attributes to **all** log records (via EnricherLogProcessor) and to the HTTP body log event (via middleware scope). Header values in the sensitive list are redacted.
 - **Logging.Body**: Options for HTTP request/response body logging when `UseHttpBodyLogging()` is used. Path exclusion uses `Logging.ExcludedPaths`.
@@ -142,6 +145,9 @@ var response = await _httpClient.GetAsync("https://api.example.com/products");
 // EF Core queries are automatically traced (if enabled)
 var product = await _repository.GetAsync(id);
 ```
+
+Custom static instrumentation can use `AetherTracingRuntime.IsVerbose` to
+follow the same globally configured profile.
 
 ### Custom Spans with Aspects
 
@@ -508,4 +514,3 @@ public class OrderServiceTests
 - **[Application Services](../application-services/README.md)** - Automatically traced
 - **[Unit of Work](../unit-of-work/README.md)** - Transaction spans
 - **[Distributed Events](../distributed-events/README.md)** - Context propagation
-
