@@ -110,6 +110,29 @@ public sealed class LoggingEnricherOptions
     /// Header names to add as individual enrich properties (e.g. RequestHeader.x_correlation_id). Values for headers in the sensitive list are shown as ***REDACTED***. Full request/response headers remain in RequestHeaders/ResponseHeaders JSON.
     /// </summary>
     public List<string> Headers { get; set; } = new();
+
+    /// <summary>
+    /// Prefix applied to request-header enrich keys. Defaults to <c>"RequestHeader."</c>, so the
+    /// header <c>x-correlation-id</c> is emitted as <c>RequestHeader.x_correlation_id</c>.
+    /// <para>
+    /// Set to an empty string to emit the bare (normalized) header name instead — useful for log
+    /// backends such as OpenObserve or Elasticsearch, which cannot store dots in flat field names
+    /// and therefore lowercase the key and replace <c>.</c> with <c>_</c> on ingest, turning
+    /// <c>RequestHeader.act_sub</c> into <c>requestheader_act_sub</c>.
+    /// </para>
+    /// <para>
+    /// Note: request and response keys are distinguished only by these prefixes. Setting this and
+    /// <see cref="ResponseHeaderKeyPrefix"/> to the same value (for example both empty) makes a
+    /// header present on both the request and the response collapse onto a single key.
+    /// </para>
+    /// </summary>
+    public string RequestHeaderKeyPrefix { get; set; } = "RequestHeader.";
+
+    /// <summary>
+    /// Prefix applied to response-header enrich keys. Defaults to <c>"ResponseHeader."</c>.
+    /// See <see cref="RequestHeaderKeyPrefix"/> for the prefix semantics and the collision note.
+    /// </summary>
+    public string ResponseHeaderKeyPrefix { get; set; } = "ResponseHeader.";
 }
 
 public sealed class AetherTracingOptions

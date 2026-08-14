@@ -346,8 +346,8 @@ public sealed class HttpBodyLoggingMiddleware
             if (string.IsNullOrWhiteSpace(headerName))
                 continue;
             var key = headerName.Trim();
-            var requestKey = $"RequestHeader.{key.Replace("-", "_", StringComparison.Ordinal).ToLowerInvariant()}";
-            var responseKey = $"ResponseHeader.{key.Replace("-", "_", StringComparison.Ordinal).ToLowerInvariant()}";
+            var requestKey = HeaderEnrichmentKeys.Request(_enricherOptions, key);
+            var responseKey = HeaderEnrichmentKeys.Response(_enricherOptions, key);
             var isSensitive = _sensitiveHeaderNames.Contains(key);
 
             if (context.Request.Headers.TryGetValue(key, out var reqVal))
