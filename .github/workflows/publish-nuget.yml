@@ -19,6 +19,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write  # NuGet.org Trusted Publishing (OIDC) için gerekli
 
 jobs:
   build-and-publish:
@@ -214,18 +215,32 @@ jobs:
         path: packages/
         retention-days: 30
     
+    # Trusted Publishing: GitHub'ın OIDC token'ı NuGet.org'a gönderilir ve
+    # 1 saat geçerli, tek kullanımlık kısa ömürlü bir API key alınır.
+    # Anahtar kısa ömürlü olduğu için bu adım push'tan hemen önce çalışmalıdır.
+    # NuGet.org policy'si bu workflow dosya adına (publish-nuget.yml) bağlıdır;
+    # dosyayı yeniden adlandırırsanız policy'yi de güncellemek gerekir.
+    - name: NuGet login (OIDC → short-lived API key)
+      id: nuget-login
+      uses: NuGet/login@v1
+      with:
+        user: ${{ secrets.NUGET_USER }}
+
     - name: Publish to NuGet.org
       env:
-        NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
       run: |
-        # Check if API key is configured
+        # Verify the OIDC token exchange produced a key
         if [ -z "$NUGET_API_KEY" ]; then
-          echo "❌ Error: NUGET_API_KEY secret is not configured"
-          echo "Please add your NuGet.org API key as a repository secret named 'NUGET_API_KEY'"
-          echo "Get your API key from: https://www.nuget.org/account/apikeys"
+          echo "❌ Error: Trusted Publishing did not return an API key"
+          echo "Checklist:"
+          echo "  - NUGET_USER secret must be your nuget.org profile name (not e-mail)"
+          echo "  - nuget.org Trusted Publishing policy must match:"
+          echo "      owner=${{ github.repository_owner }}, repo=${{ github.event.repository.name }}, workflow=publish-nuget.yml"
+          echo "  - Job must have 'id-token: write' permission"
           exit 1
         fi
-        
+
         echo "🚀 Publishing packages to NuGet.org..."
         
         FORCE_FLAG=""
