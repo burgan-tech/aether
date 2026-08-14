@@ -92,7 +92,9 @@ Config section key: `Telemetry` or `Aether:Telemetry`.
       "ParseStateValues": true,
       "Enrichers": {
         "CustomAttributes": { "env": "Production", "team": "platform" },
-        "Headers": ["x-correlation-id", "x-request-id"]
+        "Headers": ["x-correlation-id", "x-request-id"],
+        "RequestHeaderKeyPrefix": "RequestHeader.",
+        "ResponseHeaderKeyPrefix": "ResponseHeader."
       },
       "Body": {
         "EnableRequestBody": false,
@@ -278,7 +280,8 @@ public class OrderMetrics
 `Telemetry:Logging:Enrichers` (CustomAttributes and Headers) are added as attributes to **every** log record in the application via `EnricherLogProcessor`. This allows querying all logs with the same enrich fields (e.g. `env`, `app`, `RequestHeader.x_correlation_id`) in a single observability query.
 
 - **CustomAttributes**: Key-value pairs added to every log.
-- **Headers**: Listed request/response headers are added as `RequestHeader.<name>` and `ResponseHeader.<name>`; values for headers in the sensitive list are redacted. When there is no HTTP context (e.g. background job), only CustomAttributes are added.
+- **Headers**: Listed request/response headers are added as `RequestHeader.<name>` and `ResponseHeader.<name>`; values for headers in the sensitive list are redacted. When there is no HTTP context (e.g. background job), only CustomAttributes are added. The header name is normalized (lowercased, `-` replaced by `_`), so `X-Request-Id` becomes `RequestHeader.x_request_id`.
+- **RequestHeaderKeyPrefix / ResponseHeaderKeyPrefix**: The prefixes above are configurable (defaults `RequestHeader.` / `ResponseHeader.`). Log backends that cannot store dots in flat field names — OpenObserve, Elasticsearch — lowercase the key and replace `.` with `_` on ingest, so `RequestHeader.act_sub` is queried as `requestheader_act_sub`. Set the prefix to `""` to emit the bare header name (`act_sub`) instead. Request and response keys are distinguished only by these prefixes: giving both the same value (for example both empty) makes a header present on both request and response collapse onto a single key.
 
 ### Automatic Enrichment
 

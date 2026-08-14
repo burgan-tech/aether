@@ -38,15 +38,16 @@ public sealed class EnricherLogProcessor(
         }
 
         var httpContext = httpContextAccessor?.HttpContext;
-        if (httpContext != null && options.Logging?.Enrichers?.Headers is { Count: > 0 } headerNames)
+        if (httpContext != null && options.Logging?.Enrichers is { } enrichers
+            && enrichers.Headers is { Count: > 0 } headerNames)
         {
             foreach (var headerName in headerNames)
             {
                 if (string.IsNullOrWhiteSpace(headerName))
                     continue;
                 var key = headerName.Trim();
-                var requestKey = $"RequestHeader.{NormalizeHeaderKey(key)}";
-                var responseKey = $"ResponseHeader.{NormalizeHeaderKey(key)}";
+                var requestKey = HeaderEnrichmentKeys.Request(enrichers, key);
+                var responseKey = HeaderEnrichmentKeys.Response(enrichers, key);
                 var isSensitive = _sensitiveHeaderNames.Contains(key);
 
                 if (httpContext.Request.Headers.TryGetValue(key, out var reqVal))
@@ -89,7 +90,4 @@ public sealed class EnricherLogProcessor(
         }
         return false;
     }
-
-    private static string NormalizeHeaderKey(string key)
-        => key.Replace("-", "_", StringComparison.Ordinal).ToLowerInvariant();
 }
