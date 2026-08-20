@@ -11,7 +11,8 @@ public class BasicUserInfo(
     string[]? roles = null,
     string? actorUserId = null,
     string? actorUserName = null,
-    string? consentId = null)
+    string? consentId = null,
+    string? position = null)
 {
     /// <summary>
     /// Gets or sets the user's ID.
@@ -45,4 +46,8 @@ public class BasicUserInfo(
     /// Gets or sets the consent ID.
     /// </summary>
     public string? ConsentId { get; set; } = consentId;
+    /// <summary>
+    /// Gets or sets the user's position (organizational posting).
+    /// </summary>
+    public string? Position { get; set; } = position;
 }

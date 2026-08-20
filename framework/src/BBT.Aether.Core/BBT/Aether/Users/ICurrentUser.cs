@@ -38,6 +38,23 @@ public interface ICurrentUser
     string[]? Roles { get; }
 
     /// <summary>
+    /// Gets the user's primary role — the first entry of <see cref="Roles"/>.
+    /// <para>
+    /// Provided for legacy systems that carry a single <c>role</c> claim: there the header holds one
+    /// value, so this returns exactly that value. When a caller may carry several roles, use
+    /// <see cref="Roles"/> — this property only ever reflects the first one.
+    /// </para>
+    /// </summary>
+    string? Role { get; }
+
+    /// <summary>
+    /// Gets the user's position — the organizational posting that, together with the actor
+    /// (<c>act_sub</c>) and subject (<c>sub</c>) identities, identifies the caller at an external
+    /// identity provider.
+    /// </summary>
+    string? Position { get; }
+
+    /// <summary>
     /// Gets the actor user's ID (in case of delegation).
     /// </summary>
     string? ActorUserId { get; }
@@ -70,6 +87,7 @@ public interface ICurrentUser
     /// <param name="actorUserId">The actor user's ID.</param>
     /// <param name="actorUserName">The actor user's username.</param>
     /// <param name="consentId">The consent ID.</param>
+    /// <param name="position">The user's position (organizational posting).</param>
     /// <returns>An IDisposable that reverts the changes when disposed.</returns>
     IDisposable Change(
         string? id,
@@ -79,5 +97,17 @@ public interface ICurrentUser
         string[]? roles = null,
         string? actorUserId = null,
         string? actorUserName = null,
-        string? consentId = null);
+        string? consentId = null,
+        string? position = null);
+
+    /// <summary>
+    /// Changes the current user's information within a disposable scope.
+    /// <para>
+    /// Prefer this overload: it carries every field of <see cref="BasicUserInfo"/>, so a call site does
+    /// not have to be revisited when a new field is added to the user model.
+    /// </para>
+    /// </summary>
+    /// <param name="user">The user information to make current.</param>
+    /// <returns>An IDisposable that reverts the change when disposed.</returns>
+    IDisposable Change(BasicUserInfo user);
 }

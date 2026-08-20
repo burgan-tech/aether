@@ -32,6 +32,12 @@ public static class AetherClaimTypes
     public static string Role { get; set; } = "role";
 
     /// <summary>
+    /// Default: position
+    /// (Organizational posting of the user)
+    /// </summary>
+    public static string Position { get; set; } = "position";
+
+    /// <summary>
     /// Default: email
     /// </summary>
     public static string Email { get; set; } = "email";

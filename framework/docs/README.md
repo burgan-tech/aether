@@ -75,6 +75,7 @@ app.Run();
 
 | Feature | Description |
 |---------|-------------|
+| [Current User](current-user/README.md) | Ambient caller identity, roles, position, header forwarding |
 | [Object Mapping](mapper/README.md) | AutoMapper integration |
 | [GUID Generation](guid-generation/README.md) | Sequential and simple GUID strategies |
 | [Telemetry](telemetry/README.md) | OpenTelemetry integration |
@@ -107,6 +108,7 @@ BBT.Aether.Core (Base)
 | Inbox/Outbox | ✓ | ✓ | ✓ | - | - |
 | Cache/Lock | ✓ | - | ✓ | - | - |
 | Background Jobs | ✓ | ✓ | ✓ | ✓ | - |
+| Current User | ✓ | - | - | ✓ | - |
 | Telemetry | - | - | - | ✓ | ✓ |
 | Tracing/Logging/Metrics | - | - | - | - | ✓ |
 
