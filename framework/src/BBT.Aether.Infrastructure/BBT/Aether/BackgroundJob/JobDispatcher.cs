@@ -32,7 +32,8 @@ public class JobDispatcher(
         if (string.IsNullOrWhiteSpace(jobName))
             throw new ArgumentNullException(nameof(jobName));
 
-        using var activity = InfrastructureActivitySource.Source.StartActivity(
+        // Diagnostic: pure dispatch plumbing between BackgroundJob.Execute and the handler.
+        using var activity = InfrastructureActivitySource.StartDiagnosticActivity(
             "BackgroundJob.Dispatch",
             ActivityKind.Internal,
             Activity.Current?.Context ?? default);
