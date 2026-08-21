@@ -101,4 +101,33 @@ public interface IBackgroundJobService
     /// </returns>
     /// <exception cref="ArgumentException">Thrown when id is empty.</exception>
     Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Persists the job and returns a handle that arms it later, instead of arming as part of this call.
+    /// <para>
+    /// For callers that write the job inside a critical section (a distributed lock, a short
+    /// transaction) but must keep the scheduler round-trip out of it. Persisting is cheap and local;
+    /// the scheduler call is neither, and inside a lock it becomes the lock's hold time.
+    /// </para>
+    /// <para>
+    /// Same parameters and same persistence semantics as <see cref="EnqueueAsync{TPayload}"/> with
+    /// <c>directly: true</c> — the row lands <c>Scheduled</c> and an arm failure rolls it back to
+    /// <c>Pending</c> for the arming poller. The only difference is WHEN the scheduler is called, which
+    /// the caller now decides by invoking <see cref="IBackgroundJobArmHandle.ArmAsync"/>.
+    /// </para>
+    /// <para>
+    /// Call <c>ArmAsync</c> only after the work that justified the critical section has committed. The
+    /// handle carries the payload in memory, so arming costs one scheduler call and no database access.
+    /// </para>
+    /// </summary>
+    Task<IBackgroundJobArmHandle> EnqueueWithDeferredArmAsync<TPayload>(
+        string handlerName,
+        string jobName,
+        TPayload payload,
+        string schedule,
+        Dictionary<string, object>? metadata = null,
+        JobScheduleFailurePolicy? failurePolicyOptions = null,
+        Guid? jobId = null,
+        BBT.Aether.Domain.Entities.JobKind? kind = null,
+        CancellationToken cancellationToken = default);
 }
