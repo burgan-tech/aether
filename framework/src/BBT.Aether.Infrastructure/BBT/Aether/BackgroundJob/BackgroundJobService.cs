@@ -79,6 +79,46 @@ public sealed class BackgroundJobService(
         JobKind? kind = null,
         CancellationToken cancellationToken = default)
     {
+        var (enqueuedId, _) = await EnqueueCoreAsync(
+            handlerName, jobName, payload, schedule, metadata, failurePolicyOptions,
+            directly, jobId, kind, deferArm: false, cancellationToken);
+        return enqueuedId;
+    }
+
+    /// <inheritdoc/>
+    public async Task<IBackgroundJobArmHandle> EnqueueWithDeferredArmAsync<TPayload>(
+        string handlerName,
+        string jobName,
+        TPayload payload,
+        string schedule,
+        Dictionary<string, object>? metadata = null,
+        JobScheduleFailurePolicy? failurePolicyOptions = null,
+        Guid? jobId = null,
+        JobKind? kind = null,
+        CancellationToken cancellationToken = default)
+    {
+        // directly: true so the row lands Scheduled, exactly as the inline path leaves it — no later
+        // status write is needed. The one difference is that the scheduler is not called here; the
+        // returned handle calls it, carrying the payload in memory so no re-read is needed either.
+        var (deferredId, arm) = await EnqueueCoreAsync(
+            handlerName, jobName, payload, schedule, metadata, failurePolicyOptions,
+            directly: true, jobId, kind, deferArm: true, cancellationToken);
+        return new DeferredArmHandle(deferredId, arm!);
+    }
+
+    private async Task<(Guid JobId, Func<CancellationToken, Task>? Arm)> EnqueueCoreAsync<TPayload>(
+        string handlerName,
+        string jobName,
+        TPayload payload,
+        string schedule,
+        Dictionary<string, object>? metadata,
+        JobScheduleFailurePolicy? failurePolicyOptions,
+        bool directly,
+        Guid? jobId,
+        JobKind? kind,
+        bool deferArm,
+        CancellationToken cancellationToken)
+    {
         if (string.IsNullOrWhiteSpace(handlerName))
             throw new ArgumentNullException(nameof(handlerName));
 
@@ -91,7 +131,10 @@ public sealed class BackgroundJobService(
         if (string.IsNullOrWhiteSpace(schedule))
             throw new ArgumentNullException(nameof(schedule));
 
-        using var activity = InfrastructureActivitySource.Source.StartActivity(
+        // Diagnostic, not business: enqueueing a job is plumbing around the work, and in the
+        // default Business profile it only adds depth to an already deep trace. The job's own
+        // execution span (BackgroundJob.Execute) is the one that carries meaning and stays.
+        using var activity = InfrastructureActivitySource.StartDiagnosticActivity(
             "BackgroundJob.Enqueue",
             ActivityKind.Producer,
             Activity.Current?.Context ?? default);
@@ -155,19 +198,26 @@ public sealed class BackgroundJobService(
         // Bytes for the scheduler (the `directly` arm path). Equivalent to the JSON the poller arms with.
         var payloadBytes = eventSerializer.Serialize(envelope);
 
+        // Deferred arm: hand the caller a closure over everything the scheduler needs. Same call the
+        // inline path makes, same failure handling — only the timing is the caller's to choose.
+        Func<CancellationToken, Task>? armAction = deferArm
+            ? ct => ArmNowAsync(handlerName, jobName, schedule, payloadBytes,
+                failurePolicyOptions, effectiveJobId, ct)
+            : null;
+
         // Atomic-ambient: when the caller has an ambient UoW, persist into it (commits with their business
         // transaction — a rollback discards the row). Otherwise open a short own transaction.
         if (uowManager.Current is { } ambient)
         {
             await jobStore.SaveAsync(jobInfo, cancellationToken);
-            if (directly)
+            if (directly && !deferArm)
                 ambient.OnCompleted(_ => ArmNowAsync(handlerName, jobName, schedule, payloadBytes,
                     failurePolicyOptions, effectiveJobId, CancellationToken.None));
             logger.LogInformation(
                 "Enqueued {Status} job '{HandlerName}'/'{JobName}' into ambient UoW. Id: {Id}",
                 jobInfo.Status, handlerName, jobName, effectiveJobId);
             activity?.SetStatus(ActivityStatusCode.Ok);
-            return effectiveJobId;
+            return (effectiveJobId, armAction);
         }
 
         await using (var uow = uowManager.Begin(
@@ -187,14 +237,26 @@ public sealed class BackgroundJobService(
             }
         }
 
-        if (directly)
+        if (directly && !deferArm)
             await ArmNowAsync(handlerName, jobName, schedule, payloadBytes, failurePolicyOptions,
                 effectiveJobId, cancellationToken);
         logger.LogInformation(
             "Enqueued {Status} job '{HandlerName}'/'{JobName}'. Id: {Id}",
             jobInfo.Status, handlerName, jobName, effectiveJobId);
         activity?.SetStatus(ActivityStatusCode.Ok);
-        return effectiveJobId;
+        return (effectiveJobId, armAction);
+    }
+
+    /// <summary>
+    /// Closure-backed <see cref="IBackgroundJobArmHandle"/>. Holds the scheduler arguments captured at
+    /// enqueue time, so arming needs neither a job-row read nor a status write.
+    /// </summary>
+    private sealed class DeferredArmHandle(Guid jobId, Func<CancellationToken, Task> arm)
+        : IBackgroundJobArmHandle
+    {
+        public Guid JobId { get; } = jobId;
+
+        public Task ArmAsync(CancellationToken cancellationToken = default) => arm(cancellationToken);
     }
 
     /// <summary>
@@ -248,7 +310,10 @@ public sealed class BackgroundJobService(
         if (string.IsNullOrWhiteSpace(newSchedule))
             throw new ArgumentNullException(nameof(newSchedule));
 
-        using var activity = InfrastructureActivitySource.Source.StartActivity(
+        // Diagnostic, not business: enqueueing a job is plumbing around the work, and in the
+        // default Business profile it only adds depth to an already deep trace. The job's own
+        // execution span (BackgroundJob.Execute) is the one that carries meaning and stays.
+        using var activity = InfrastructureActivitySource.StartDiagnosticActivity(
             "BackgroundJob.Update",
             ActivityKind.Producer,
             Activity.Current?.Context ?? default);
@@ -413,7 +478,10 @@ public sealed class BackgroundJobService(
         if (id == Guid.Empty)
             throw new ArgumentException("Id cannot be empty.", nameof(id));
 
-        using var activity = InfrastructureActivitySource.Source.StartActivity(
+        // Diagnostic, not business: enqueueing a job is plumbing around the work, and in the
+        // default Business profile it only adds depth to an already deep trace. The job's own
+        // execution span (BackgroundJob.Execute) is the one that carries meaning and stays.
+        using var activity = InfrastructureActivitySource.StartDiagnosticActivity(
             "BackgroundJob.Delete",
             ActivityKind.Producer,
             Activity.Current?.Context ?? default);

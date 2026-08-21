@@ -146,7 +146,9 @@ public class DaprJobScheduler(
 
     private static Activity? StartSchedulerActivity(string operationName, string handlerName, string jobName)
     {
-        var activity = InfrastructureActivitySource.Source.StartActivity(
+        // Diagnostic: the scheduler round-trip is infrastructure detail. Business traces care that
+        // the job ran (BackgroundJob.Execute), not about the Schedule/Delete calls that armed it.
+        var activity = InfrastructureActivitySource.StartDiagnosticActivity(
             operationName,
             ActivityKind.Client,
             Activity.Current?.Context ?? default);
