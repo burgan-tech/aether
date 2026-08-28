@@ -88,8 +88,29 @@ public class OutboxProcessor<TDbContext>(
             {
                 if (cancellationToken.IsCancellationRequested) break;
 
+                // Re-join the originating trace when the row carries its drop identity (written by
+                // EfCoreOutboxStore since the outbox-trace-continuity change): the per-message span
+                // parents to the stored context and LINKS back to the worker loop — the same shape the
+                // inbox side's EventTraceScope uses, so publish → outbox drop → outbox publish → inbox
+                // handle reads as one tree. Rows without the identity (pre-deploy rows, untraced
+                // writes) keep the worker-loop parent unchanged.
+                var loopContext = Activity.Current?.Context ?? default;
+                var parentContext = loopContext;
+                IEnumerable<ActivityLink>? links = null;
+                if (message.ExtraProperties.TryGetValue("TraceParent", out var tpObj) &&
+                    ActivityContext.TryParse(
+                        tpObj?.ToString(),
+                        message.ExtraProperties.TryGetValue("TraceState", out var tsObj) ? tsObj?.ToString() : null,
+                        isRemote: true,
+                        out var originContext))
+                {
+                    parentContext = originContext;
+                    if (loopContext.TraceId != default)
+                        links = new[] { new ActivityLink(loopContext) };
+                }
+
                 using var activity = InfrastructureActivitySource.Source.StartActivity(
-                    "Outbox.Process", ActivityKind.Producer, Activity.Current?.Context ?? default);
+                    "Outbox.Process", ActivityKind.Producer, parentContext, links: links);
 
                 var topicName = message.ExtraProperties.TryGetValue("TopicName", out var topicObj)
                     ? topicObj?.ToString() ?? message.EventName : message.EventName;
