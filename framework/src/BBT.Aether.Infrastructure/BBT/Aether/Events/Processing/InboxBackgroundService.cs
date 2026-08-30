@@ -10,7 +10,8 @@ namespace BBT.Aether.Events.Processing;
 public sealed class InboxBackgroundService(
     IInboxProcessor processor,
     AetherInboxOptions options,
-    ILogger<InboxBackgroundService> logger) : BackgroundService
+    ILogger<InboxBackgroundService> logger,
+    BBT.Aether.Polling.IPollingWakeSignal<IInboxProcessor>? wakeSignal = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -18,8 +19,12 @@ public sealed class InboxBackgroundService(
         // leave the whole fleet polling on the same tick.
         try
         {
-            await Task.Delay(PollingDelay.StartupOffset(options.IdlePollingInterval), stoppingToken)
-                .ConfigureAwait(false);
+            // Startup offset: also wake-aware, so a nudge that lands during a rolling restart advances the
+            // first poll instead of waiting the offset out.
+            if (wakeSignal is null)
+                await Task.Delay(PollingDelay.StartupOffset(options.IdlePollingInterval), stoppingToken).ConfigureAwait(false);
+            else
+                await wakeSignal.WaitAsync(PollingDelay.StartupOffset(options.IdlePollingInterval), stoppingToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -49,7 +54,11 @@ public sealed class InboxBackgroundService(
                 delay = PollingDelay.OnError(delay, options.IdlePollingInterval, options.MaxPollingInterval);
             }
 
-            await Task.Delay(PollingDelay.Jitter(delay), stoppingToken).ConfigureAwait(false);
+            // A wake signal cuts the interval short; timeout keeps polling as the safety net.
+            if (wakeSignal is null)
+                await Task.Delay(PollingDelay.Jitter(delay), stoppingToken).ConfigureAwait(false);
+            else
+                await wakeSignal.WaitAsync(PollingDelay.Jitter(delay), stoppingToken).ConfigureAwait(false);
         }
     }
 }
