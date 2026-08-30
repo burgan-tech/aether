@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -182,6 +183,59 @@ public sealed class OutboxWakeupCoordinatorTests
         notified.ShouldBeTrue();
 
         await notifier.Received(1).NotifyAsync(Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task OnCompletedCallback_Invoked_WithAmbientActivity_NotifierSeesNoAmbientActivity()
+    {
+        // Reproduces the trace-leak bug: the OnCompleted callback runs inside the committing
+        // business transaction's ExecutionContext, which still has an ambient Activity flowing
+        // through Task.Run. The notify must be severed from it — the nudge is infrastructure,
+        // not business flow, and must never attach to (or propagate the traceparent of) the
+        // business trace that triggered it.
+        var options = new AetherOutboxOptions { WakeupSignalEnabled = true };
+        var unitOfWorkManager = Substitute.For<IUnitOfWorkManager>();
+        var uow = Substitute.For<IUnitOfWork>();
+        unitOfWorkManager.Current.Returns(uow);
+
+        Activity? activitySeenByNotifier = null;
+        var notifierInvoked = false;
+        var notifier = Substitute.For<IOutboxWakeupNotifier>();
+        notifier.NotifyAsync(Arg.Any<CancellationToken>()).Returns(_ =>
+        {
+            activitySeenByNotifier = Activity.Current;
+            notifierInvoked = true;
+            return Task.CompletedTask;
+        });
+
+        Func<IUnitOfWork, Task>? capturedCallback = null;
+        uow.OnCompleted(Arg.Do<Func<IUnitOfWork, Task>>(cb => capturedCallback = cb));
+
+        var sut = new OutboxWakeupCoordinator(options, unitOfWorkManager, notifier);
+        sut.OnOutboxMessageStored();
+        capturedCallback.ShouldNotBeNull();
+
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = _ => true,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        using var activitySource = new ActivitySource(nameof(OutboxWakeupCoordinatorTests) + ".AmbientActivity");
+        using var ambientActivity = activitySource.StartActivity("business-transition");
+        ambientActivity.ShouldNotBeNull();
+        Activity.Current.ShouldBe(ambientActivity);
+
+        // Fire the OnCompleted callback while the ambient business Activity is current, exactly as
+        // it happens inside CommitAsync in production.
+        var callbackTask = capturedCallback!(uow);
+        callbackTask.IsCompleted.ShouldBeTrue();
+
+        var notified = await PollUntilAsync(() => notifierInvoked, TimeSpan.FromSeconds(1));
+        notified.ShouldBeTrue();
+
+        activitySeenByNotifier.ShouldBeNull();
     }
 
     private sealed class FakeAmbientAccessor : IAmbientUnitOfWorkAccessor

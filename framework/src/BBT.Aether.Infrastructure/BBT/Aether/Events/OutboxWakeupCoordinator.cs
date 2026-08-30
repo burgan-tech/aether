@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -70,6 +71,10 @@ public sealed class OutboxWakeupCoordinator(
     {
         _ = Task.Run(async () =>
         {
+            // The nudge is infrastructure, not business flow: sever the ambient Activity captured via
+            // ExecutionContext so the publish's client span (and the delivery it causes on the worker)
+            // can never attach to — or propagate the traceparent of — the committing business trace.
+            Activity.Current = null;
             try
             {
                 using var cts = new CancellationTokenSource(NotifyTimeout);
