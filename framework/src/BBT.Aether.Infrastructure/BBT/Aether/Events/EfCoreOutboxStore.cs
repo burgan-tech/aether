@@ -20,7 +20,8 @@ public class EfCoreOutboxStore<TDbContext>(
     IGuidGenerator guidGenerator,
     IClock clock,
     AetherOutboxOptions options,
-    ICurrentSchema? currentSchema) : IOutboxStore
+    ICurrentSchema? currentSchema,
+    OutboxWakeupCoordinator? wakeupCoordinator = null) : IOutboxStore
     where TDbContext : DbContext, IHasEfCoreOutbox
 {
     /// <summary>
@@ -37,6 +38,7 @@ public class EfCoreOutboxStore<TDbContext>(
             guidGenerator,
             clock,
             new AetherOutboxOptions { Schema = null },
+            null,
             null)
     {
     }
@@ -80,6 +82,8 @@ public class EfCoreOutboxStore<TDbContext>(
         }
 
         await dbContext.OutboxMessages.AddAsync(outboxMessage, cancellationToken);
+
+        wakeupCoordinator?.OnOutboxMessageStored();
     }
 
     private IDisposable BeginConfiguredSchemaScope()
