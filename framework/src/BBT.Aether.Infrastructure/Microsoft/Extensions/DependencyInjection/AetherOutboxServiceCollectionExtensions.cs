@@ -30,6 +30,18 @@ public static class AetherOutboxServiceCollectionExtensions
 
         services.AddSingleton<IOutboxProcessor, OutboxProcessor<TDbContext>>();
 
+        // Scoped, matching the scoped EfCoreOutboxStore + scoped IUnitOfWorkManager it consumes
+        // (singleton would be a captive dependency). Per-UoW dedupe survives across scoped instances
+        // because the registration table is static.
+        services.TryAddScoped<OutboxWakeupCoordinator>();
+        if (options.WakeupSignalEnabled)
+        {
+            services.TryAddSingleton<IOutboxWakeupNotifier, DaprOutboxWakeupNotifier>();
+        }
+        services.TryAddSingleton<
+            BBT.Aether.Polling.IPollingWakeSignal<IOutboxProcessor>,
+            BBT.Aether.Polling.PollingWakeSignal<IOutboxProcessor>>();
+
         if (withHostedService)
             services.AddHostedService<OutboxBackgroundService>();
 
@@ -53,6 +65,10 @@ public static class AetherOutboxServiceCollectionExtensions
         services.TryAddSingleton<WorkerIdentity>();
 
         services.AddSingleton<IInboxProcessor, InboxProcessor<TDbContext>>();
+
+        services.TryAddSingleton<
+            BBT.Aether.Polling.IPollingWakeSignal<IInboxProcessor>,
+            BBT.Aether.Polling.PollingWakeSignal<IInboxProcessor>>();
 
         if (withHostedService)
             services.AddHostedService<InboxBackgroundService>();

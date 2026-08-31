@@ -88,31 +88,57 @@ public class OutboxProcessor<TDbContext>(
             {
                 if (cancellationToken.IsCancellationRequested) break;
 
-                using var activity = InfrastructureActivitySource.Source.StartActivity(
-                    "Outbox.Process", ActivityKind.Producer, Activity.Current?.Context ?? default);
+                // Separate worker execution by design: the publish episode is its own trace. The
+                // originating transition is causally related, not structurally the parent — a link
+                // preserves the relation without stretching the origin trace across the worker hop
+                // (trace_refactor: outbox publish must not be a child of the source transition span).
+                var loopContext = Activity.Current?.Context ?? default;
 
-                var topicName = message.ExtraProperties.TryGetValue("TopicName", out var topicObj)
-                    ? topicObj?.ToString() ?? message.EventName : message.EventName;
-                var pubSubName = message.ExtraProperties.TryGetValue("PubSubName", out var pubSubObj)
-                    ? pubSubObj?.ToString() ?? eventBusOptions.PubSubName : eventBusOptions.PubSubName;
+                var links = new List<ActivityLink>(2);
+                if (TryParseOrigin(message, out var originContext))
+                    links.Add(new ActivityLink(originContext));
+                if (loopContext != default)
+                    links.Add(new ActivityLink(loopContext));
 
-                activity?.SetTag("event.name", message.EventName);
-                activity?.SetTag("event.topic", topicName);
-                activity?.SetTag("outbox.message_id", message.Id.ToString());
-                activity?.SetTag("outbox.retry_count", message.RetryCount);
-
+                // StartActivity treats `default(ActivityContext)` as "no explicit parent" and
+                // silently falls back to Activity.Current when one is ambient (a documented
+                // System.Diagnostics.Activity quirk) — forcing a genuine new root therefore
+                // requires clearing Activity.Current for the call, then restoring the worker-loop
+                // ambient once this message's span has ended.
+                var previousActivity = Activity.Current;
+                Activity.Current = null;
                 try
                 {
-                    await eventBus.PublishEnvelopeAsync(message.EventData, topicName, pubSubName, cancellationToken);
-                    outcomes.Add(new OutboxPublishOutcome(message.Id, true, null));
-                    activity?.SetStatus(ActivityStatusCode.Ok);
-                    logger.LogInformation("Published outbox message {MessageId}", message.Id);
+                    using var activity = InfrastructureActivitySource.Source.StartActivity(
+                        "Outbox.Process", ActivityKind.Producer, default(ActivityContext), links: links);
+
+                    var topicName = message.ExtraProperties.TryGetValue("TopicName", out var topicObj)
+                        ? topicObj?.ToString() ?? message.EventName : message.EventName;
+                    var pubSubName = message.ExtraProperties.TryGetValue("PubSubName", out var pubSubObj)
+                        ? pubSubObj?.ToString() ?? eventBusOptions.PubSubName : eventBusOptions.PubSubName;
+
+                    activity?.SetTag("event.name", message.EventName);
+                    activity?.SetTag("event.topic", topicName);
+                    activity?.SetTag("outbox.message_id", message.Id.ToString());
+                    activity?.SetTag("outbox.retry_count", message.RetryCount);
+
+                    try
+                    {
+                        await eventBus.PublishEnvelopeAsync(message.EventData, topicName, pubSubName, cancellationToken);
+                        outcomes.Add(new OutboxPublishOutcome(message.Id, true, null));
+                        activity?.SetStatus(ActivityStatusCode.Ok);
+                        logger.LogInformation("Published outbox message {MessageId}", message.Id);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "Failed to publish outbox message {MessageId}", message.Id);
+                        RecordException(activity, ex);
+                        outcomes.Add(new OutboxPublishOutcome(message.Id, false, ex.Message));
+                    }
                 }
-                catch (Exception ex)
+                finally
                 {
-                    logger.LogError(ex, "Failed to publish outbox message {MessageId}", message.Id);
-                    RecordException(activity, ex);
-                    outcomes.Add(new OutboxPublishOutcome(message.Id, false, ex.Message));
+                    Activity.Current = previousActivity;
                 }
             }
 
@@ -221,6 +247,27 @@ public class OutboxProcessor<TDbContext>(
     {
         var delay = options.RetryBaseDelay * Math.Pow(2, retryCount - 1);
         return clock.UtcNow.Add(TimeSpan.FromMilliseconds(delay.TotalMilliseconds));
+    }
+
+    /// <summary>
+    /// Parses the origin trace identity stored on the row (written by EfCoreOutboxStore) so it can
+    /// be attached as a causation link. Never used as the parent — see the episode-separation note
+    /// at the call site.
+    /// </summary>
+    private static bool TryParseOrigin(OutboxMessage message, out ActivityContext originContext)
+    {
+        if (message.ExtraProperties.TryGetValue("TraceParent", out var tpObj) &&
+            ActivityContext.TryParse(
+                tpObj?.ToString(),
+                message.ExtraProperties.TryGetValue("TraceState", out var tsObj) ? tsObj?.ToString() : null,
+                isRemote: true,
+                out originContext))
+        {
+            return true;
+        }
+
+        originContext = default;
+        return false;
     }
 
     private static void RecordException(Activity? activity, Exception ex)

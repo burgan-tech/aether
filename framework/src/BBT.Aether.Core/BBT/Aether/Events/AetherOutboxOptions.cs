@@ -18,4 +18,11 @@ public class AetherOutboxOptions
     /// The database schema whose outbox table this processor handles.
     /// </summary>
     public string? Schema { get; set; } = "sys_queues";
+
+    /// <summary>
+    /// When true, a unit of work that stored outbox messages publishes a direct pub/sub wake nudge
+    /// (<see cref="OutboxWakeupEvent"/>) after commit so outbox processors poll immediately instead
+    /// of waiting out the idle interval. Default false. Requires an IOutboxWakeupNotifier registration.
+    /// </summary>
+    public bool WakeupSignalEnabled { get; set; }
 }

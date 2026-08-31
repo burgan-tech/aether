@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
@@ -19,7 +20,8 @@ public class EfCoreOutboxStore<TDbContext>(
     IGuidGenerator guidGenerator,
     IClock clock,
     AetherOutboxOptions options,
-    ICurrentSchema? currentSchema) : IOutboxStore
+    ICurrentSchema? currentSchema,
+    OutboxWakeupCoordinator? wakeupCoordinator = null) : IOutboxStore
     where TDbContext : DbContext, IHasEfCoreOutbox
 {
     /// <summary>
@@ -36,6 +38,7 @@ public class EfCoreOutboxStore<TDbContext>(
             guidGenerator,
             clock,
             new AetherOutboxOptions { Schema = null },
+            null,
             null)
     {
     }
@@ -61,7 +64,26 @@ public class EfCoreOutboxStore<TDbContext>(
         if (envelope.Subject != null)
             outboxMessage.ExtraProperties["Subject"] = envelope.Subject;
 
+        // The drop's trace identity, persisted the same way TopicName is. The payload bytes already
+        // carry a TraceParent for traceable events, but the processor publishes them opaquely — these
+        // row-level copies are what let Outbox.Process re-join the originating trace without
+        // deserializing the envelope. Absent (not null) when nothing is ambient, so pre-existing rows
+        // and non-traced writes keep today's behavior.
+        if (Activity.Current is { } ambient)
+        {
+            outboxMessage.ExtraProperties["TraceParent"] = ambient.Id!;
+            if (!string.IsNullOrEmpty(ambient.TraceStateString))
+                outboxMessage.ExtraProperties["TraceState"] = ambient.TraceStateString;
+
+            // The originating trace's only chance to learn which row the event became: the id is born
+            // here, and widening IOutboxStore.StoreAsync's return type for one tag is not worth the
+            // ripple through every implementor. Ambient here is the EventBus.Publish span.
+            ambient.SetTag("outbox.message_id", outboxMessage.Id.ToString());
+        }
+
         await dbContext.OutboxMessages.AddAsync(outboxMessage, cancellationToken);
+
+        wakeupCoordinator?.OnOutboxMessageStored();
     }
 
     private IDisposable BeginConfiguredSchemaScope()
