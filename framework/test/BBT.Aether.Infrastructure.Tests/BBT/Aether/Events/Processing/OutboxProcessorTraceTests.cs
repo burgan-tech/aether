@@ -24,11 +24,12 @@ using OutboxEntity = BBT.Aether.Domain.Events.OutboxMessage;
 namespace BBT.Aether.Events.Processing;
 
 /// <summary>
-/// Pins the shape of OutboxProcessor's per-message "Outbox.Process" span: when the leased
-/// message's ExtraProperties carry the drop's trace identity (written by EfCoreOutboxStore), the
-/// span re-parents into that origin trace and links back to the worker loop — the same shape the
-/// inbox side's EventTraceScope uses. Rows without a (parseable) trace identity keep today's
-/// behavior: parented to the worker-loop activity, no link.
+/// Pins the shape of OutboxProcessor's per-message "Outbox.Process" span under the episode-
+/// separation policy (trace_refactor): the publish is its own trace ROOT — never re-parented onto
+/// the originating transition or the worker loop. Both the origin (when the row's TraceParent is
+/// present and parseable) and the worker-loop ambient (when one is active) are attached only as
+/// causation links, so an origin span's own parent/child duration semantics are never stretched
+/// across the worker hop.
 /// </summary>
 public sealed class OutboxProcessorTraceTests
 {
@@ -47,7 +48,7 @@ public sealed class OutboxProcessorTraceTests
     }
 
     [Fact]
-    public async Task Message_with_stored_trace_parent_reparents_into_the_origin_trace_and_links_the_worker_loop()
+    public async Task Message_with_stored_trace_parent_is_a_new_root_that_links_the_origin_and_the_worker_loop()
     {
         using var listener = CreateListener(out var started);
 
@@ -55,9 +56,11 @@ public sealed class OutboxProcessorTraceTests
         using var origin = originSource.StartActivity("EventBus.Publish", ActivityKind.Producer);
         origin.ShouldNotBeNull();
         var traceParent = origin!.Id!;
+        var traceState = "vendor=origin-state";
+        origin.TraceStateString = traceState;
         origin.Stop(); // the drop's publish span has already ended by the time the processor runs
 
-        var message = MakeMessage(traceParent: traceParent);
+        var message = MakeMessage(traceParent: traceParent, traceState: traceState);
 
         using var loopSource = new ActivitySource(LoopSourceName);
         using var loop = loopSource.StartActivity("Outbox.Poll", ActivityKind.Internal);
@@ -67,16 +70,25 @@ public sealed class OutboxProcessorTraceTests
 
         var activity = started.ShouldHaveSingleItem();
         activity.OperationName.ShouldBe("Outbox.Process");
-        activity.TraceId.ShouldBe(origin.TraceId);
-        activity.ParentSpanId.ShouldBe(origin.SpanId);
-        activity.Links.ShouldContain(l => l.Context.SpanId == loop!.SpanId);
+
+        // New root: never a child of the origin or the worker loop.
+        activity.ParentSpanId.ShouldBe(default(ActivitySpanId));
+        activity.TraceId.ShouldNotBe(origin.TraceId);
+        activity.TraceId.ShouldNotBe(loop!.TraceId);
+
+        // Both are attached as links (causation), never as the parent.
+        activity.Links.ShouldContain(l => l.Context.TraceId == origin.TraceId && l.Context.SpanId == origin.SpanId
+            && l.Context.TraceState == traceState);
+        activity.Links.ShouldContain(l => l.Context.SpanId == loop.SpanId);
+        activity.Links.Count().ShouldBe(2);
+
         activity.GetTagItem("event.name").ShouldBe("TestEvent");
         activity.GetTagItem("outbox.message_id").ShouldBe(message.Id.ToString());
         activity.GetTagItem("outbox.retry_count").ShouldBe(0);
     }
 
     [Fact]
-    public async Task Message_without_trace_parent_keeps_the_worker_loop_as_parent_with_no_link()
+    public async Task Message_without_trace_parent_is_still_a_new_root_and_links_only_the_worker_loop()
     {
         using var listener = CreateListener(out var started);
 
@@ -90,16 +102,17 @@ public sealed class OutboxProcessorTraceTests
 
         var activity = started.ShouldHaveSingleItem();
         activity.OperationName.ShouldBe("Outbox.Process");
-        activity.TraceId.ShouldBe(loop!.TraceId);
-        activity.ParentSpanId.ShouldBe(loop.SpanId);
-        activity.Links.ShouldBeEmpty();
+        activity.ParentSpanId.ShouldBe(default(ActivitySpanId));
+        activity.TraceId.ShouldNotBe(loop!.TraceId);
+        activity.Links.ShouldHaveSingleItem();
+        activity.Links.ShouldContain(l => l.Context.SpanId == loop.SpanId);
         activity.GetTagItem("event.name").ShouldBe("TestEvent");
         activity.GetTagItem("outbox.message_id").ShouldBe(message.Id.ToString());
         activity.GetTagItem("outbox.retry_count").ShouldBe(0);
     }
 
     [Fact]
-    public async Task Message_with_garbage_trace_parent_keeps_todays_behavior()
+    public async Task Message_with_garbage_trace_parent_drops_the_origin_link_but_stays_a_root()
     {
         using var listener = CreateListener(out var started);
 
@@ -112,16 +125,42 @@ public sealed class OutboxProcessorTraceTests
         await Should.NotThrowAsync(async () => await RunProcessorAsync(new[] { message }));
 
         var activity = started.ShouldHaveSingleItem();
-        activity.TraceId.ShouldBe(loop!.TraceId);
-        activity.ParentSpanId.ShouldBe(loop.SpanId);
-        activity.Links.ShouldBeEmpty();
+        activity.ParentSpanId.ShouldBe(default(ActivitySpanId));
+        activity.TraceId.ShouldNotBe(loop!.TraceId);
+        activity.Links.ShouldHaveSingleItem();
+        activity.Links.ShouldContain(l => l.Context.SpanId == loop.SpanId);
     }
 
-    private static OutboxMessage MakeMessage(string? traceParent)
+    [Fact]
+    public async Task Message_with_trace_parent_and_no_ambient_loop_is_a_root_that_links_only_the_origin()
+    {
+        using var listener = CreateListener(out var started);
+
+        using var originSource = new ActivitySource(OriginSourceName);
+        using var origin = originSource.StartActivity("EventBus.Publish", ActivityKind.Producer);
+        origin.ShouldNotBeNull();
+        var traceParent = origin!.Id!;
+        origin.Stop();
+
+        var message = MakeMessage(traceParent: traceParent);
+
+        // No ambient worker-loop activity active here — Activity.Current is null.
+        await RunProcessorAsync(new[] { message });
+
+        var activity = started.ShouldHaveSingleItem();
+        activity.ParentSpanId.ShouldBe(default(ActivitySpanId));
+        activity.TraceId.ShouldNotBe(origin.TraceId);
+        activity.Links.ShouldHaveSingleItem();
+        activity.Links.ShouldContain(l => l.Context.TraceId == origin.TraceId && l.Context.SpanId == origin.SpanId);
+    }
+
+    private static OutboxMessage MakeMessage(string? traceParent, string? traceState = null)
     {
         var extraProperties = new Dictionary<string, object>();
         if (traceParent != null)
             extraProperties["TraceParent"] = traceParent;
+        if (traceState != null)
+            extraProperties["TraceState"] = traceState;
 
         return new OutboxMessage
         {
