@@ -7,6 +7,7 @@ using BBT.Aether.Events;
 using BBT.Aether.MultiSchema;
 using BBT.Aether.Uow;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace BBT.Aether.AspNetCore.Events;
@@ -85,6 +86,12 @@ public abstract class EventsController(
 
                 // Step 7: Commit UoW (flushes inbox)
                 await uow.CommitAsync(cancellationToken);
+
+                // Same-process nudge: the inbox poller and this delivery endpoint share the host,
+                // so a stored row can be processed immediately instead of waiting out the idle interval.
+                HttpContext.RequestServices
+                    .GetService<BBT.Aether.Polling.IPollingWakeSignal<IInboxProcessor>>()
+                    ?.Signal();
 
                 return Ok();
             }
