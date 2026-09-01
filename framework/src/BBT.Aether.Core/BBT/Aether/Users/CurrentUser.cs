@@ -21,6 +21,10 @@ public class CurrentUser(ICurrentUserAccessor currentUserAccessor) : ICurrentUse
     /// <inheritdoc />
     public string[]? Roles => currentUserAccessor.Current?.Roles;
     /// <inheritdoc />
+    public string? Role => Roles?.FirstOrDefault();
+    /// <inheritdoc />
+    public string? Position => currentUserAccessor.Current?.Position;
+    /// <inheritdoc />
     public string? ActorUserId => currentUserAccessor.Current?.ActorUserId; 
     /// <inheritdoc />
     public string? ActorUserName => currentUserAccessor.Current?.ActorUserName; 
@@ -43,25 +47,29 @@ public class CurrentUser(ICurrentUserAccessor currentUserAccessor) : ICurrentUse
         string[]? roles = null,
         string? actorUserId = null,
         string? actorUserName = null,
-        string? consentId = null
+        string? consentId = null,
+        string? position = null
     )
     {
-        return SetCurrent(id, userName, name, surname, roles, actorUserId, actorUserName, consentId);
+        return Change(new BasicUserInfo(
+            id,
+            userName,
+            name,
+            surname,
+            roles,
+            actorUserId,
+            actorUserName,
+            consentId,
+            position));
     }
 
-    private IDisposable SetCurrent(
-        string? id,
-        string? userName = null,
-        string? name = null,
-        string? surname = null,
-        string[]? roles = null,
-        string? actorUserId = null,
-        string? actorUserName = null,
-        string? consentId = null
-    )
+    /// <inheritdoc />
+    public IDisposable Change(BasicUserInfo user)
     {
+        Check.NotNull(user, nameof(user));
+
         var parentScope = currentUserAccessor.Current;
-        currentUserAccessor.Current = new BasicUserInfo(id, userName, name, surname, roles, actorUserId, actorUserName, consentId);
+        currentUserAccessor.Current = user;
         return new DisposeAction(() => { currentUserAccessor.Current = parentScope; });
     }
 }

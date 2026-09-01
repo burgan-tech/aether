@@ -1,4 +1,3 @@
-using System.Linq;
 using BBT.Aether.Users;
 using Microsoft.AspNetCore.Http;
 
@@ -17,25 +16,21 @@ public class HeaderCurrentUserResolver(IHttpContextAccessor httpContextAccessor)
             return null;
         }
 
-        var userId = context.Request.Headers[AetherClaimTypes.UserId].FirstOrDefault() ?? string.Empty;
-        var userName = context.Request.Headers[AetherClaimTypes.UserName].FirstOrDefault() ?? string.Empty;
-        var name = context.Request.Headers[AetherClaimTypes.Name].FirstOrDefault() ?? string.Empty;
-        var surname = context.Request.Headers[AetherClaimTypes.SurName].FirstOrDefault() ?? string.Empty;
-        var rolesHeader = context.Request.Headers[AetherClaimTypes.Role].FirstOrDefault();
-        var roles = rolesHeader != null ? rolesHeader.Split(',') : [];
-        var actorUserName = context.Request.Headers[AetherClaimTypes.ActorSub].FirstOrDefault() ?? string.Empty;
-        var consentId = context.Request.Headers[AetherClaimTypes.ConsentId].FirstOrDefault() ?? string.Empty;
-        var actorUserId = context.Request.Headers[AetherClaimTypes.ActorUserId].FirstOrDefault() ?? string.Empty;
-        
+        var request = context.Request;
+
         return new BasicUserInfo(
-            userId,
-            userName,
-            name,
-            surname,
-            roles,
-            actorUserId,
-            actorUserName,
-            consentId
+            request.GetClaimHeader(AetherClaimTypes.UserId) ?? string.Empty,
+            request.GetClaimHeader(AetherClaimTypes.UserName) ?? string.Empty,
+            request.GetClaimHeader(AetherClaimTypes.Name) ?? string.Empty,
+            request.GetClaimHeader(AetherClaimTypes.SurName) ?? string.Empty,
+            CurrentUserHeaderExtensions.ParseRolesFromHeader(request.GetClaimHeader(AetherClaimTypes.Role)) ?? [],
+            request.GetClaimHeader(AetherClaimTypes.ActorUserId) ?? string.Empty,
+            request.GetClaimHeader(AetherClaimTypes.ActorSub) ?? string.Empty,
+            request.GetClaimHeader(AetherClaimTypes.ConsentId) ?? string.Empty,
+            // Position stays null when the request carries none, unlike the fields above: it is a newer
+            // claim with no empty-string callers to keep working, and null lets consumers fall through
+            // with `?? fallback` instead of having to test for empty.
+            request.GetClaimHeader(AetherClaimTypes.Position)
         );
     }
 }

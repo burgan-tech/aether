@@ -16,15 +16,7 @@ public class AetherCurrentUserMiddleware(ICurrentUser currentUser, ICurrentUserR
             return;
         }
 
-        using (currentUser.Change(
-                   basicUserInfo.Id,
-                   basicUserInfo.UserName,
-                   basicUserInfo.Name,
-                   basicUserInfo.Surname,
-                   basicUserInfo.Roles,
-                   basicUserInfo.ActorUserId,
-                   basicUserInfo.ActorUserName,
-                   basicUserInfo.ConsentId))
+        using (currentUser.Change(basicUserInfo))
         {
             await next(context);
         }
