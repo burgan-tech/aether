@@ -93,7 +93,7 @@ new DistributedCacheEntryOptions
 // Relative - Expires after duration
 new DistributedCacheEntryOptions
 {
-    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(30)
+    AbsoluteExpiration = DateTimeOffset.UtcNow.AddMinutes(30)
 }
 
 // Sliding - Resets on access
@@ -102,6 +102,23 @@ new DistributedCacheEntryOptions
     SlidingExpiration = TimeSpan.FromMinutes(15)
 }
 ```
+
+### TTL granularity differs by provider
+
+| Provider | Smallest expressible TTL | Notes |
+|---|---|---|
+| Redis | sub-second | the `TimeSpan` is passed through to `StringSetAsync` |
+| .NET Core `IDistributedCache` | sub-second | passed through to `SetAbsoluteExpiration` |
+| Dapr state store | **1 second** | Dapr's `ttlInSeconds` metadata is whole seconds |
+
+A request below one second is rounded **up** to one second on Dapr — never down, because a TTL of
+zero would make the entry permanent. Do not rely on a sub-second TTL for correctness: if a value
+must disappear the moment it goes stale, invalidate it explicitly with `RemoveAsync` and keep the
+TTL only as a backstop.
+
+If the requested lifetime has already elapsed (an `AbsoluteExpiration` in the past, or a
+non-positive `SlidingExpiration`), the Dapr provider skips the write rather than storing an entry
+that would never expire. Any previous value under that key is left in place.
 
 ## Interface
 
