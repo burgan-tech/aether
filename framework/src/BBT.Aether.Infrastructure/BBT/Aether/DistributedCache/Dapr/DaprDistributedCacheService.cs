@@ -57,6 +57,15 @@ public class DaprDistributedCacheService(
 
         if (requestedTtl is { } ttl)
         {
+            if (ttl <= TimeSpan.Zero)
+            {
+                // The caller asked for an entry that is already dead. Writing it with no TTL would
+                // make it permanent — the opposite of the request — so skip the write entirely.
+                activity?.SetTag("cache.skipped", true);
+                activity?.SetStatus(ActivityStatusCode.Ok);
+                return;
+            }
+
             var ttlInSeconds = ToStoreTtlSeconds(ttl);
             metadata["ttlInSeconds"] = ttlInSeconds.ToString(CultureInfo.InvariantCulture);
             activity?.SetTag("cache.ttl_seconds", ttlInSeconds);

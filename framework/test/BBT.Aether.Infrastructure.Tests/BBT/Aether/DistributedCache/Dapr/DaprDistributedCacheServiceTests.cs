@@ -117,6 +117,22 @@ public class DaprDistributedCacheServiceTests
         _capturedMetadata!.ShouldNotContainKey("ttlInSeconds");
     }
 
+    [Fact]
+    public async Task SetAsync_AbsoluteExpirationAlreadyPassed_DoesNotWrite()
+    {
+        await SetWithAbsoluteAsync(TimeSpan.FromSeconds(-5));
+
+        _saveCallCount.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task SetAsync_NonPositiveSlidingExpiration_DoesNotWrite()
+    {
+        await SetWithSlidingAsync(TimeSpan.Zero);
+
+        _saveCallCount.ShouldBe(0);
+    }
+
     private sealed class CachedPayload
     {
         public string Value { get; init; } = "payload";
