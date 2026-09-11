@@ -133,6 +133,18 @@ public class DaprDistributedCacheServiceTests
         _saveCallCount.ShouldBe(0);
     }
 
+    [Fact]
+    public async Task SetAsync_AbsoluteExpirationFarInTheFuture_ClampsToMaxInt()
+    {
+        await _sut.SetAsync(
+            Key,
+            new CachedPayload(),
+            DistributedCacheEntryOptions.WithAbsoluteExpiration(DateTimeOffset.MaxValue));
+
+        _capturedMetadata.ShouldNotBeNull();
+        _capturedMetadata!["ttlInSeconds"].ShouldBe("2147483647");
+    }
+
     private sealed class CachedPayload
     {
         public string Value { get; init; } = "payload";

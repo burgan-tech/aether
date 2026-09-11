@@ -132,6 +132,11 @@ public class DaprDistributedCacheService(
     {
         var seconds = Math.Ceiling(ttl.TotalSeconds);
 
-        return seconds < 1 ? 1 : (int)seconds;
+        if (seconds < 1)
+        {
+            return 1;
+        }
+
+        return seconds >= int.MaxValue ? int.MaxValue : (int)seconds;
     }
 }
