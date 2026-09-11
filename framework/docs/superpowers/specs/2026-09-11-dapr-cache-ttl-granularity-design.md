@@ -1,6 +1,6 @@
 # Dapr distributed cache: sub-second TTL granularity — design
 
-**Status:** approved scope, pending implementation
+**Status:** implemented on `fix/dapr-cache-ttl-granularity`
 **Area:** `BBT.Aether.Infrastructure` → `BBT/Aether/DistributedCache/Dapr/DaprDistributedCacheService.cs`
 **Source issue:** vnext report `ai-docs/superpowers/reports/2026-09-11-aether-dapr-cache-ttl-granularity.md`
 (filed by the vnext team from preprod runtime 0.0.92, 2026-09-10)
