@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Telemetry;
@@ -47,20 +48,18 @@ public class DaprDistributedCacheService(
 
         var metadata = new Dictionary<string, string>();
 
-        if (options?.AbsoluteExpiration.HasValue == true)
+        TimeSpan? requestedTtl = options switch
         {
-            var ttl = (int)(options.AbsoluteExpiration.Value - DateTimeOffset.UtcNow).TotalSeconds;
-            if (ttl > 0)
-            {
-                metadata["ttlInSeconds"] = ttl.ToString();
-                activity?.SetTag("cache.ttl_seconds", ttl);
-            }
-        }
-        else if (options?.SlidingExpiration.HasValue == true)
+            { AbsoluteExpiration: { } absolute } => absolute - DateTimeOffset.UtcNow,
+            { SlidingExpiration: { } sliding } => sliding,
+            _ => null,
+        };
+
+        if (requestedTtl is { } ttl)
         {
-            var ttl = (int)options.SlidingExpiration.Value.TotalSeconds;
-            metadata["ttlInSeconds"] = ttl.ToString();
-            activity?.SetTag("cache.ttl_seconds", ttl);
+            var ttlInSeconds = ToStoreTtlSeconds(ttl);
+            metadata["ttlInSeconds"] = ttlInSeconds.ToString(CultureInfo.InvariantCulture);
+            activity?.SetTag("cache.ttl_seconds", ttlInSeconds);
         }
 
         await _daprClient.SaveStateAsync(
@@ -111,5 +110,19 @@ public class DaprDistributedCacheService(
             { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
             { "exception.message", ex.Message },
         }));
+    }
+
+    /// <summary>
+    /// Converts a requested lifetime to the whole seconds a Dapr state store understands.
+    /// </summary>
+    /// <remarks>
+    /// Rounding a sub-second request DOWN to zero silently turns the shortest-lived entry a caller
+    /// can ask for into a permanent one, so round UP and never below one second.
+    /// </remarks>
+    private static int ToStoreTtlSeconds(TimeSpan ttl)
+    {
+        var seconds = Math.Ceiling(ttl.TotalSeconds);
+
+        return seconds < 1 ? 1 : (int)seconds;
     }
 }
