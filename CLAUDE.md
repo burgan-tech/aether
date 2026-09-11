@@ -29,6 +29,21 @@ dotnet run --project framework/src/BBT.Aether.Cli create PROJECT_NAME -tm TEAM_N
 ### NuGet Packaging
 Packages are published automatically via GitHub Actions on `release-v*` branches. Version is auto-calculated from the branch name (e.g., `release-v1.0` → `1.0.0`, `1.0.1`, ...).
 
+#### Local feed for unreleased work (consumed by vnext)
+
+```bash
+./build/pack-local.sh              # packs every framework/src library as 1.0.NN-local into .local-feed/
+./build/pack-local.sh 1.0.41-local # explicit version; must end in -local (the script refuses otherwise)
+```
+
+- `.local-feed/` is git-ignored; `-local` versions can never shadow a published release.
+- The script purges `~/.nuget/packages/bbt.aether.*/<version>` before packing — without that, re-packing
+  the same version silently keeps the old contents in the build ("the member I just added does not exist").
+- Consumer side (vnext): uncomment **both** the `aether-local` source (`../aether/.local-feed`) and its
+  `packageSourceMapping` block in `nuget.config`, then set `<AetherPackageVersion>` in
+  `Directory.Build.props` to the packed version. Revert both before opening a vnext PR — CI cannot restore
+  a `-local` version. Full procedure: vnext `docs/testing/integration-testing.md` §8.
+
 ## Architecture
 
 Aether is a .NET 10 SDK/framework targeting enterprise cloud-native applications, published as 13 NuGet packages. The solution file is `framework/BBT.Aether.slnx` (modern `.slnx` format).

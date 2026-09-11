@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Telemetry;
@@ -47,20 +48,27 @@ public class DaprDistributedCacheService(
 
         var metadata = new Dictionary<string, string>();
 
-        if (options?.AbsoluteExpiration.HasValue == true)
+        TimeSpan? requestedTtl = options switch
         {
-            var ttl = (int)(options.AbsoluteExpiration.Value - DateTimeOffset.UtcNow).TotalSeconds;
-            if (ttl > 0)
+            { AbsoluteExpiration: { } absolute } => absolute - DateTimeOffset.UtcNow,
+            { SlidingExpiration: { } sliding } => sliding,
+            _ => null,
+        };
+
+        if (requestedTtl is { } ttl)
+        {
+            if (ttl <= TimeSpan.Zero)
             {
-                metadata["ttlInSeconds"] = ttl.ToString();
-                activity?.SetTag("cache.ttl_seconds", ttl);
+                // The caller asked for an entry that is already dead. Writing it with no TTL would
+                // make it permanent — the opposite of the request — so skip the write entirely.
+                activity?.SetTag("cache.skipped", true);
+                activity?.SetStatus(ActivityStatusCode.Ok);
+                return;
             }
-        }
-        else if (options?.SlidingExpiration.HasValue == true)
-        {
-            var ttl = (int)options.SlidingExpiration.Value.TotalSeconds;
-            metadata["ttlInSeconds"] = ttl.ToString();
-            activity?.SetTag("cache.ttl_seconds", ttl);
+
+            var ttlInSeconds = ToStoreTtlSeconds(ttl);
+            metadata["ttlInSeconds"] = ttlInSeconds.ToString(CultureInfo.InvariantCulture);
+            activity?.SetTag("cache.ttl_seconds", ttlInSeconds);
         }
 
         await _daprClient.SaveStateAsync(
@@ -111,5 +119,31 @@ public class DaprDistributedCacheService(
             { "exception.type", ex.GetType().FullName ?? ex.GetType().Name },
             { "exception.message", ex.Message },
         }));
+    }
+
+    /// <summary>
+    /// Converts a requested lifetime to the whole seconds a Dapr state store understands.
+    /// </summary>
+    /// <remarks>
+    /// Rounding a sub-second request DOWN to zero silently turns the shortest-lived entry a caller
+    /// can ask for into a permanent one, so round UP and never below one second. The upper end is
+    /// clamped too: a lifetime whose seconds exceed <see cref="int.MaxValue"/> (for example
+    /// <see cref="DateTimeOffset.MaxValue"/> used as an absolute expiry) is capped at
+    /// <see cref="int.MaxValue"/> rather than passed through an unchecked cast.
+    /// </remarks>
+    private static int ToStoreTtlSeconds(TimeSpan ttl)
+    {
+        var seconds = Math.Ceiling(ttl.TotalSeconds);
+
+        if (seconds < 1)
+        {
+            return 1;
+        }
+
+        // This clamp is load-bearing, not defensive filler: casting an out-of-range double to int
+        // in an unchecked context is unspecified — it wraps to int.MinValue on x64 but saturates to
+        // int.MaxValue on ARM64 — so do not remove this check just because it happens to look like
+        // a no-op after watching the overflow test pass on an ARM64 machine.
+        return seconds >= int.MaxValue ? int.MaxValue : (int)seconds;
     }
 }
