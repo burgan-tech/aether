@@ -84,19 +84,13 @@ public async Task UpdateProductAsync(Product product)
 ## Expiration Options
 
 ```csharp
-// Absolute - Expires at specific time
+// Absolute - Expires at a specific point in time
 new DistributedCacheEntryOptions
 {
     AbsoluteExpiration = DateTimeOffset.UtcNow.AddHours(1)
 }
 
-// Relative - Expires after duration
-new DistributedCacheEntryOptions
-{
-    AbsoluteExpiration = DateTimeOffset.UtcNow.AddMinutes(30)
-}
-
-// Sliding - Resets on access
+// Sliding - Expires after a duration of inactivity (see the granularity notes below for Dapr)
 new DistributedCacheEntryOptions
 {
     SlidingExpiration = TimeSpan.FromMinutes(15)
@@ -119,6 +113,24 @@ TTL only as a backstop.
 If the requested lifetime has already elapsed (an `AbsoluteExpiration` in the past, or a
 non-positive `SlidingExpiration`), the Dapr provider skips the write rather than storing an entry
 that would never expire. Any previous value under that key is left in place.
+
+An `AbsoluteExpiration` computed before a slow fetch can elapse before the write happens, and the
+write is then skipped — this is exactly what `GetOrSetAsync` does, since it builds `options` before
+awaiting `fetchFunc` and only calls `SetAsync` afterwards. Prefer `SlidingExpiration` for short
+lifetimes: it is measured at write time rather than against a timestamp fixed earlier, so a slow
+fetch cannot make it negative.
+
+`RefreshAsync` on the Dapr provider is a no-op, and Dapr's `ttlInSeconds` metadata does not slide on
+access either, so a `SlidingExpiration` behaves as a plain absolute TTL there — it does not reset
+when the entry is read.
+
+`cache.ttl_seconds` does not mean the same thing on every provider's span: Redis emits the
+*requested* value truncated to whole seconds (`0` for a 500 ms TTL), while Dapr emits the *stored*
+value after rounding up (`1` for the same request). Do not aggregate the tag across providers
+without accounting for that.
+
+Entries written by an earlier Aether version without a TTL are not repaired by this change and
+expire only when overwritten — flush them or key-version them when upgrading.
 
 ## Interface
 

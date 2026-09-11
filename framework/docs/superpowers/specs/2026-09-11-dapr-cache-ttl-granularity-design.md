@@ -41,9 +41,10 @@ Four defects in nine lines:
 3. **The absolute and sliding branches disagree.** Sub-second sliding writes the literal
    `ttlInSeconds: 0` instead of dropping it. The same requested duration gets two different
    meanings depending on which property the caller set.
-4. **Large TTLs overflow.** `DateTimeOffset.MaxValue` as an absolute expiry yields ≈ 7.9 × 10¹³
-   seconds; the unchecked `(int)` cast wraps to a negative number. (Not in the original report —
-   found while reading the code.)
+4. **Large TTLs overflow.** `DateTimeOffset.MaxValue` as an absolute expiry yields ≈ 2.5 × 10¹¹
+   seconds (about 7,973 years from today). The unchecked `(int)` cast's behaviour on out-of-range
+   input is unspecified: it wraps to `int.MinValue` on x64, but saturates to `int.MaxValue` on
+   ARM64. (Not in the original report — found while reading the code.)
 
 The Redis and .NET Core providers pass the `TimeSpan` through unchanged, so the defect is invisible
 in local development (Redis) and only appears where a Dapr state store is configured.
@@ -123,9 +124,18 @@ provider-granularity note in `framework/docs/distributed-cache/README.md`.
   granularity on the abstraction (`TimeSpan.Zero` for Redis/in-memory, `TimeSpan.FromSeconds(1)`
   for Dapr). That adds a member to a published interface in `BBT.Aether.Core` and touches all three
   providers. Worth doing, but as its own change with its own design — it does not gate this fix.
-- **A `Debug` log when a TTL is rounded up.** `DaprDistributedCacheService` has no `ILogger`;
-  injecting one changes the constructor and `AddDaprDistributedCache`. The `cache.ttl_seconds` and
-  `cache.skipped` span tags give the same signal without touching the public surface.
+- **A `Debug` log when a TTL is rounded up.** `InfrastructureActivitySource.StartDiagnosticActivity`
+  only returns an activity when the process-wide tracing profile is `Verbose`
+  (`AetherTracingRuntime`, default `Business` — see `framework/docs/telemetry/README.md`). Under the
+  default `Business` profile `activity` is `null`, every `SetTag` is a no-op, and a skipped write
+  produces no log, no metric and no span — the `cache.ttl_seconds` and `cache.skipped` tags are not
+  a substitute for a log in a default deployment. The logger was still deferred: adding a parameter
+  to `DaprDistributedCacheService`'s primary constructor is a binary-breaking change for a type
+  shipped in a published NuGet package, and the approved scope for this change was the Dapr
+  provider and its tests. The consequence is real — an operator investigating "nothing is ever
+  cached" has no default-profile signal to go on. Giving the provider an optional `ILogger`
+  (`RedisDistributedCacheService` already takes one) is recommended follow-up work, alongside the
+  `MinimumTtl` item above.
 - **Cross-provider alignment of already-expired writes.** The three providers currently disagree:
   Dapr writes a permanent entry (this bug), Redis passes a negative `TimeSpan` to
   `StringSetAsync`, .NET Core writes an entry that is immediately expired. Aligning them is a
@@ -151,8 +161,11 @@ provider-granularity note in `framework/docs/distributed-cache/README.md`.
 When a caller passes an already-expired absolute expiry and the key already holds an older value,
 skipping the write **leaves that older value in place**. Deleting the key instead would be
 defensible, but it costs an extra round trip and turns a degenerate `SetAsync` into a destructive
-operation. The degenerate case is a caller bug or a clock race; leaving the previous entry to
-expire on its own terms is the smaller surprise.
+operation. This is not only a caller bug or a clock race: `DistributedCacheBase.GetOrSetAsync`
+builds the caller's `options` — including any absolute expiry — before it awaits `fetchFunc()`, and
+calls `SetAsync` only afterwards, so a short absolute expiry paired with a slow fetch is a normal
+way to reach this path. Leaving the previous entry to expire on its own terms is still the smaller
+surprise than deleting it.
 
 ## Compatibility
 

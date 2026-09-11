@@ -395,9 +395,10 @@ EOF
 ### Task 3: Clamp absurdly large TTLs instead of overflowing to a negative number
 
 `DateTimeOffset.MaxValue` is a plausible way to say "never expire". It yields roughly
-7.9 × 10¹³ seconds, and the unchecked `double`→`int` conversion wraps to `int.MinValue` — the
-provider would then send a negative `ttlInSeconds`. This defect predates the reported bug and is
-not in the source report.
+2.5 × 10¹¹ seconds (about 7,973 years from today), and the unchecked `double`→`int` conversion's
+behaviour on out-of-range input is unspecified: it wraps to `int.MinValue` on x64, but saturates to
+`int.MaxValue` on ARM64. On x64 the provider would then send a negative `ttlInSeconds`. This defect
+predates the reported bug and is not in the source report.
 
 **Files:**
 - Modify: `framework/src/BBT.Aether.Infrastructure/BBT/Aether/DistributedCache/Dapr/DaprDistributedCacheService.cs` (`ToStoreTtlSeconds`)
@@ -431,7 +432,9 @@ Append to `DaprDistributedCacheServiceTests`, above the `CachedPayload` class:
 dotnet test framework/test/BBT.Aether.Infrastructure.Tests/BBT.Aether.Infrastructure.Tests.csproj --filter "FullyQualifiedName~SetAsync_AbsoluteExpirationFarInTheFuture_ClampsToMaxInt"
 ```
 
-Expected: FAIL — the value is `-2147483648` (or another wrapped number) instead of `2147483647`.
+Expected: FAIL on x64 — the value is `-2147483648` instead of `2147483647`. The cast's behaviour on
+out-of-range input is unspecified, so this assertion may pass instead of fail on ARM64, where the
+same conversion saturates to `int.MaxValue` rather than wrapping.
 
 - [ ] **Step 3: Add the upper clamp**
 

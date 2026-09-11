@@ -126,7 +126,10 @@ public class DaprDistributedCacheService(
     /// </summary>
     /// <remarks>
     /// Rounding a sub-second request DOWN to zero silently turns the shortest-lived entry a caller
-    /// can ask for into a permanent one, so round UP and never below one second.
+    /// can ask for into a permanent one, so round UP and never below one second. The upper end is
+    /// clamped too: a lifetime whose seconds exceed <see cref="int.MaxValue"/> (for example
+    /// <see cref="DateTimeOffset.MaxValue"/> used as an absolute expiry) is capped at
+    /// <see cref="int.MaxValue"/> rather than passed through an unchecked cast.
     /// </remarks>
     private static int ToStoreTtlSeconds(TimeSpan ttl)
     {
@@ -137,6 +140,10 @@ public class DaprDistributedCacheService(
             return 1;
         }
 
+        // This clamp is load-bearing, not defensive filler: casting an out-of-range double to int
+        // in an unchecked context is unspecified — it wraps to int.MinValue on x64 but saturates to
+        // int.MaxValue on ARM64 — so do not remove this check just because it happens to look like
+        // a no-op after watching the overflow test pass on an ARM64 machine.
         return seconds >= int.MaxValue ? int.MaxValue : (int)seconds;
     }
 }
