@@ -50,7 +50,7 @@ public class ProductService
         await _cache.SetAsync($"product:{product.Id}", product, 
             new DistributedCacheEntryOptions
             {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(30)
+                AbsoluteExpiration = DateTimeOffset.UtcNow.AddMinutes(30)
             });
     }
 }
