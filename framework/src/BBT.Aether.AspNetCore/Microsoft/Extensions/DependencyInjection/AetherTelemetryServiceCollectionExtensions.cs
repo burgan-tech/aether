@@ -13,6 +13,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using OpenTelemetry;
+using OpenTelemetry.Context.Propagation;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -99,6 +101,13 @@ public static class AetherTelemetryServiceCollectionExtensions
             .WithTracing(tracing =>
             {
                 if (!opts.TracingEnabled) return;
+
+                // A filtered span must not become the parent a remote service sees. Instrumentation
+                // filters run after the Activity exists and only clear the Recorded flag, so the id
+                // that goes on the wire names a span nobody will export — and a receiver that
+                // samples on its own terms (a Dapr sidecar does) then records an orphan. See
+                // FilteredSpanParentPropagator for the measurements and the rejected alternatives.
+                InstallFilteredSpanParentPropagator();
 
                 var excludedPatterns = CompileRegex(opts.Logging.ExcludedPaths
                     .Concat(opts.Tracing.ExcludedPaths));
@@ -293,6 +302,28 @@ public static class AetherTelemetryServiceCollectionExtensions
         return false;
     }
 
+    /// <summary>
+    /// Wraps both injection layers once per process. Idempotent on purpose: AddAetherTelemetry can
+    /// be called more than once in tests and in hosts that compose several modules, and stacking
+    /// wrappers would re-run the same decision for no gain.
+    /// </summary>
+    private static void InstallFilteredSpanParentPropagator()
+    {
+        if (DistributedContextPropagator.Current is not FilteredSpanParentPropagator)
+        {
+            DistributedContextPropagator.Current =
+                new FilteredSpanParentPropagator(DistributedContextPropagator.Current);
+        }
+
+        // Both layers inject and OpenTelemetry's runs last, overwriting what .NET wrote — so
+        // wrapping only the .NET propagator leaves the defect in place. Measured, not assumed.
+        if (Propagators.DefaultTextMapPropagator is not FilteredSpanParentTextMapPropagator)
+        {
+            Sdk.SetDefaultTextMapPropagator(
+                new FilteredSpanParentTextMapPropagator(Propagators.DefaultTextMapPropagator));
+        }
+    }
+
     private static bool ShouldTraceHttpRequest(HttpRequestMessage request, List<Regex> excludedPatterns)
     {
         if (IsExcluded(request.RequestUri?.ToString(), excludedPatterns))
@@ -300,37 +331,7 @@ public static class AetherTelemetryServiceCollectionExtensions
             return false;
         }
 
-        return AetherTracingRuntime.IsVerbose || !IsDaprDiagnosticRequest(request.RequestUri);
-    }
-
-    private static bool IsDaprDiagnosticRequest(Uri? uri)
-    {
-        var path = uri?.AbsolutePath;
-        if (string.IsNullOrEmpty(path))
-        {
-            return false;
-        }
-
-        if (path.StartsWith("/dapr.proto.runtime.v1.Dapr/", StringComparison.OrdinalIgnoreCase))
-        {
-            return path.EndsWith("/GetState", StringComparison.OrdinalIgnoreCase)
-                   || path.EndsWith("/GetBulkState", StringComparison.OrdinalIgnoreCase)
-                   || path.EndsWith("/SaveState", StringComparison.OrdinalIgnoreCase)
-                   || path.EndsWith("/DeleteState", StringComparison.OrdinalIgnoreCase)
-                   || path.EndsWith("/ExecuteStateTransaction", StringComparison.OrdinalIgnoreCase)
-                   || path.EndsWith("/GetSecret", StringComparison.OrdinalIgnoreCase)
-                   || path.EndsWith("/GetBulkSecret", StringComparison.OrdinalIgnoreCase)
-                   || path.EndsWith("/GetConfiguration", StringComparison.OrdinalIgnoreCase)
-                   || path.EndsWith("/SubscribeConfiguration", StringComparison.OrdinalIgnoreCase)
-                   || path.EndsWith("/TryLockAlpha1", StringComparison.OrdinalIgnoreCase)
-                   || path.EndsWith("/UnlockAlpha1", StringComparison.OrdinalIgnoreCase);
-        }
-
-        return path.StartsWith("/v1.0/state/", StringComparison.OrdinalIgnoreCase)
-               || path.StartsWith("/v1.0-alpha1/state/", StringComparison.OrdinalIgnoreCase)
-               || path.StartsWith("/v1.0-alpha1/lock/", StringComparison.OrdinalIgnoreCase)
-               || path.StartsWith("/v1.0/secrets/", StringComparison.OrdinalIgnoreCase)
-               || path.StartsWith("/v1.0/configuration/", StringComparison.OrdinalIgnoreCase);
+        return AetherTracingRuntime.IsVerbose || !DaprDiagnosticRequest.Matches(request.RequestUri);
     }
 
     private static void EnrichHttpClientActivity(Activity activity, HttpRequestMessage request)
