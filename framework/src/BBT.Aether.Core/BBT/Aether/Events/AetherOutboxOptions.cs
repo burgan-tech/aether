@@ -7,6 +7,17 @@ public class AetherOutboxOptions
 {
     public int MaxRetryCount { get; set; } = 5;
     public TimeSpan RetentionPeriod { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// Minimum time between cleanups of processed messages on one worker. A cleanup that deletes
+    /// a full <see cref="CleanupBatchSize"/> batch leaves the next cycle due, so a backlog keeps
+    /// draining one batch per cycle; the interval applies once a batch comes back short.
+    /// </summary>
+    public TimeSpan CleanupInterval { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>Maximum number of processed messages deleted per cleanup cycle.</summary>
+    public int CleanupBatchSize { get; set; } = 1000;
+
     public int BatchSize { get; set; } = 100;
     public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromMinutes(1);
     public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(30);

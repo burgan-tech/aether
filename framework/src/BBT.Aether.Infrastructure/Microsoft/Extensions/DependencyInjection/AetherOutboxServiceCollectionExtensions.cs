@@ -25,6 +25,9 @@ public static class AetherOutboxServiceCollectionExtensions
         // Null fallback — provider (Npgsql/SqlServer) overrides with AddScoped
         services.TryAddScoped<IOutboxLeaseStore, NullOutboxLeaseStore>();
 
+        // Set-based EF Core fallback — Npgsql overrides with a FOR UPDATE SKIP LOCKED delete
+        services.TryAddScoped<IOutboxCleanupStore, EfCoreOutboxCleanupStore<TDbContext>>();
+
         // WorkerIdentity singleton — guard against double registration
         services.TryAddSingleton<WorkerIdentity>();
 
@@ -61,6 +64,9 @@ public static class AetherOutboxServiceCollectionExtensions
         services.AddScoped<IInboxStore, EfCoreInboxStore<TDbContext>>();
 
         services.TryAddScoped<IInboxLeaseStore, NullInboxLeaseStore>();
+
+        // Set-based EF Core fallback — Npgsql overrides with a FOR UPDATE SKIP LOCKED delete
+        services.TryAddScoped<IInboxCleanupStore, EfCoreInboxCleanupStore<TDbContext>>();
 
         services.TryAddSingleton<WorkerIdentity>();
 

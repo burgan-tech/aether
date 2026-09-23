@@ -21,6 +21,8 @@ public class InboxProcessor<TDbContext>(
     AetherInboxOptions options) : IInboxProcessor
     where TDbContext : DbContext, IHasEfCoreInbox
 {
+    private readonly CleanupSchedule _cleanupSchedule = new();
+
     public virtual async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
         try
@@ -156,30 +158,40 @@ public class InboxProcessor<TDbContext>(
         }
     }
 
+    /// <summary>
+    /// Deletes one batch of processed messages older than the retention period, at most once per
+    /// <see cref="AetherInboxOptions.CleanupInterval"/> unless the previous batch came back full.
+    /// </summary>
     protected virtual async Task CleanupOldMessagesAsync(CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(options.Schema)) return;
+        if (!_cleanupSchedule.IsDue) return;
 
         try
         {
             await using var scope = scopeFactory.CreateAsyncScope();
             var currentSchema = scope.ServiceProvider.GetRequiredService<ICurrentSchema>();
             var unitOfWorkManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
-            var inboxStore = scope.ServiceProvider.GetRequiredService<IInboxStore>();
+            var cleanupStore = scope.ServiceProvider.GetRequiredService<IInboxCleanupStore>();
 
             using (currentSchema.Change(options.Schema!))
             {
                 await using var uow = unitOfWorkManager.BeginRequiresNew();
-                var deletedCount = await inboxStore.CleanupOldMessagesAsync(
+                var deletedCount = await cleanupStore.DeleteProcessedAsync(
                     options.CleanupBatchSize, options.RetentionPeriod, cancellationToken);
                 await uow.CommitAsync(cancellationToken);
 
                 if (deletedCount > 0)
                     logger.LogInformation("Cleaned up {Count} old inbox messages", deletedCount);
+
+                // A full batch means a backlog remains: stay due so the next cycle keeps draining.
+                if (deletedCount < options.CleanupBatchSize)
+                    _cleanupSchedule.Defer(options.CleanupInterval);
             }
         }
         catch (Exception ex)
         {
+            _cleanupSchedule.Defer(options.CleanupInterval);
             logger.LogError(ex, "Error cleaning up old inbox messages");
         }
     }

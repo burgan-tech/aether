@@ -11,6 +11,8 @@ Bu belge, inbox/outbox altyapısının iç mimarisini açıklar ve yeni bir veri
 BBT.Aether.Abstractions
   └── IOutboxLeaseStore       ← kira (lease) kontratı
   └── IInboxLeaseStore
+  └── IOutboxCleanupStore     ← retention cleanup kontratı
+  └── IInboxCleanupStore
   └── IOutboxStore            ← yalnızca StoreAsync (write)
   └── IInboxStore             ← write + mark operasyonları
   └── OutboxMessageStatus     ← Pending / Processing / Processed / DeadLetter
@@ -27,6 +29,8 @@ BBT.Aether.Core
 BBT.Aether.Infrastructure
   └── EfCoreOutboxStore       ← StoreAsync (EF Core, provider-agnostic)
   └── EfCoreInboxStore        ← write/mark, dead letter mantığı
+  └── EfCoreOutboxCleanupStore ← set-based ExecuteDelete fallback (provider-agnostic)
+  └── EfCoreInboxCleanupStore
   └── OutboxProcessor         ← 3 fazlı işlem döngüsü
   └── InboxProcessor          ← lease-based, distributed lock YOK
   └── OutboxBackgroundService ← adaptive polling host
@@ -36,6 +40,8 @@ BBT.Aether.Infrastructure
 BBT.Aether.Npgsql
   └── NpgsqlOutboxLeaseStore  ← FOR UPDATE SKIP LOCKED
   └── NpgsqlInboxLeaseStore
+  └── NpgsqlOutboxCleanupStore ← DELETE … FOR UPDATE SKIP LOCKED
+  └── NpgsqlInboxCleanupStore
 ```
 
 Temel ilke: **Infrastructure, ham SQL içermez.** Her ham SQL sorgusu sağlayıcı paketine taşınmıştır.
@@ -214,6 +220,57 @@ veritabanına gereksiz bağlantı açmasını önler.
 
 ---
 
+## Retention Cleanup
+
+Her processor, her döngünün sonunda süresi dolmuş `Processed` mesajları siler. Silme işlemi
+`IOutboxCleanupStore` / `IInboxCleanupStore` üzerinden, kendi `RequiresNew` transactional UoW'u
+içinde yapılır.
+
+```csharp
+public interface IInboxCleanupStore
+{
+    Task<int> DeleteProcessedAsync(int batchSize, TimeSpan retentionPeriod, CancellationToken ct = default);
+}
+```
+
+### Neden ayrı bir store?
+
+Eski yöntem satırları kilitsiz okuyup `RemoveRange` ile siliyordu. Birden fazla replica aynı anda
+çalışınca hepsi aynı en eski satırları seçiyordu (`ORDER BY … LIMIT`). İlk commit eden kazanıyor,
+diğerlerinin `DELETE WHERE "Id" = …` komutu 0 satır etkiliyordu. EF Core bunu
+`DbUpdateConcurrencyException` ("expected to affect 1 row(s), but actually affected 0") olarak
+fırlatıyordu. Veri kaybı yoktu ama her pod'da Error seviyesinde log üretiyordu. Outbox tarafında
+bu hata `RunAsync`'in yayın sayısını da sıfırlıyor ve polling'i idle backoff'a düşürüyordu.
+
+| Implementasyon | Davranış |
+|---|---|
+| `NpgsqlInboxCleanupStore` / `NpgsqlOutboxCleanupStore` | Tek statement: `DELETE … WHERE "Id" IN (SELECT … ORDER BY … LIMIT … FOR UPDATE SKIP LOCKED)`. Başka worker'ın kilitlediği satırlar beklenmeden atlanır, worker'lar ayrık batch'ler siler. |
+| `EfCoreInboxCleanupStore` / `EfCoreOutboxCleanupStore` | Id'leri okur, `ExecuteDeleteAsync` ile siler. Başka worker'ın sildiği satır hata vermez, sadece sayılmaz. Bekleme yine olabilir, ama concurrency hatası olmaz. |
+
+Cleanup yalnızca eski `Processed` satırlara dokunur. Lease (`Pending`) ve handler yazımlarıyla
+kesişmez, sıcak yolu kilitlemez.
+
+### Sıklık: `CleanupInterval`
+
+`CleanupInterval` (varsayılan 1 saat) worker başına iki cleanup arasındaki en kısa süredir:
+
+- Batch **dolu** dönerse (`deleted == CleanupBatchSize`) birikim var demektir. Cleanup bir sonraki
+  döngüde tekrar çalışır; birikim döngü başına bir batch ile erir.
+- Batch **eksik** dönerse ya da cleanup **hata** verirse bir sonraki cleanup `CleanupInterval`
+  kadar ertelenir. Böylece hata her döngüde tekrar log'lanmaz.
+- `CleanupInterval = TimeSpan.Zero` eski davranışı (her döngüde cleanup) geri getirir.
+
+Zamanlama monotonik tick sayacıyla tutulur. Worker başlar başlamaz ilk döngüde cleanup yapılır.
+
+### `IInboxStore.CleanupOldMessagesAsync` (Obsolete)
+
+Bu metot artık `[Obsolete]` ve Aether tarafından çağrılmıyor. `EfCoreInboxStore` içindeki
+implementasyonu geriye uyumluluk için duruyor ve set-based silmeye yönlendiriliyor. Bu metodu
+override eden consumer'ların özel mantığı artık çalışmaz; cleanup'ı özelleştirmek için
+`IInboxCleanupStore`'u kaydedin ya da `InboxProcessor.CleanupOldMessagesAsync`'i override edin.
+
+---
+
 ## Kayıt Sırası ve Override Modeli
 
 ```
@@ -223,7 +280,12 @@ AddAetherOutbox<TDbContext>()
 AddAetherNpgsql<TDbContext>()
   → if (IHasEfCoreOutbox)
         services.AddScoped<IOutboxLeaseStore, NpgsqlOutboxLeaseStore<TDbContext>>()   ← override
+        services.AddScoped<IOutboxCleanupStore, NpgsqlOutboxCleanupStore<TDbContext>>() ← override
 ```
+
+Cleanup store'lar aynı modeli izler: `AddAetherOutbox` / `AddAetherInbox`
+`EfCore*CleanupStore`'u `TryAddScoped` ile kaydeder, `AddAetherNpgsql` Npgsql implementasyonunu
+`AddScoped` ile üzerine yazar.
 
 `AddScoped` her zaman `TryAddScoped` sonraki kaydının önüne geçer — sıra farklı olsa bile.
 Böylece uygulama hem `AddAetherOutbox` hem `AddAetherNpgsql` çağrıyorsa gerçek PostgreSQL
@@ -288,6 +350,9 @@ public static IServiceCollection AddAetherSqlServer<TDbContext>(
 - `OUTPUT INSERTED.*` hem lock hem de döndürme işlemini tek sorguda yapar
 - SQL Server tek şemada çalışır; `ICurrentSchema.Change(...)` tablo adını değiştirmez
 - Tablo adı model üzerindeki `HasDefaultSchema` / `ToTable(schema:)` ile sabittir
+- Cleanup için ayrı bir store yazılmazsa `EfCore*CleanupStore` fallback'i çalışır (hata vermez,
+  ama satır atlamaz). `SKIP LOCKED` eşdeğeri için `DELETE TOP (@batchSize) … WITH (READPAST, ROWLOCK)`
+  kullanan bir `SqlServerInboxCleanupStore` / `SqlServerOutboxCleanupStore` eklenebilir
 - `EfCoreInboxStore.MarkAsFailedAsync` ve `EfCoreOutboxStore.StoreAsync` değişmez — sağlayıcıdan bağımsızdır
 
 ---
@@ -308,3 +373,7 @@ public static IServiceCollection AddAetherSqlServer<TDbContext>(
 | `Infrastructure/BBT/Aether/Events/Processing/OutboxBackgroundService.cs` | Adaptive polling host |
 | `Npgsql/BBT/Aether/Events/NpgsqlOutboxLeaseStore.cs` | FOR UPDATE SKIP LOCKED |
 | `Npgsql/BBT/Aether/Events/NpgsqlInboxLeaseStore.cs` | FOR UPDATE SKIP LOCKED |
+| `Abstractions/BBT/Aether/Events/IOutboxCleanupStore.cs` / `IInboxCleanupStore.cs` | Retention cleanup kontratı |
+| `Infrastructure/BBT/Aether/Events/EfCoreOutboxCleanupStore.cs` / `EfCoreInboxCleanupStore.cs` | Set-based fallback |
+| `Infrastructure/BBT/Aether/Events/Processing/CleanupSchedule.cs` | `CleanupInterval` zamanlaması |
+| `Npgsql/BBT/Aether/Events/NpgsqlOutboxCleanupStore.cs` / `NpgsqlInboxCleanupStore.cs` | DELETE … FOR UPDATE SKIP LOCKED |
