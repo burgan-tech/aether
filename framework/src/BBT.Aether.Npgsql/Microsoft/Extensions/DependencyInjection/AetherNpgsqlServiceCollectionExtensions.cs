@@ -40,12 +40,20 @@ public static class AetherNpgsqlServiceCollectionExtensions
         services.AddAetherDbContext<TDbContext>(new NpgsqlAetherProvider(), connectionString, configure);
 
         if (typeof(IHasEfCoreOutbox).IsAssignableFrom(typeof(TDbContext)))
+        {
             services.AddScoped(typeof(IOutboxLeaseStore),
                 typeof(NpgsqlOutboxLeaseStore<>).MakeGenericType(typeof(TDbContext)));
+            services.AddScoped(typeof(IOutboxCleanupStore),
+                typeof(NpgsqlOutboxCleanupStore<>).MakeGenericType(typeof(TDbContext)));
+        }
 
         if (typeof(IHasEfCoreInbox).IsAssignableFrom(typeof(TDbContext)))
+        {
             services.AddScoped(typeof(IInboxLeaseStore),
                 typeof(NpgsqlInboxLeaseStore<>).MakeGenericType(typeof(TDbContext)));
+            services.AddScoped(typeof(IInboxCleanupStore),
+                typeof(NpgsqlInboxCleanupStore<>).MakeGenericType(typeof(TDbContext)));
+        }
 
         if (typeof(IHasEfCoreBackgroundJobs).IsAssignableFrom(typeof(TDbContext)))
             services.AddScoped(typeof(IJobArmingLeaseStore),

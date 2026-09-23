@@ -117,27 +117,13 @@ public class EfCoreInboxStore<TDbContext>(
         }
     }
 
+    [Obsolete("Retention cleanup moved to IInboxCleanupStore, which InboxProcessor now uses. This method is no longer called by Aether.")]
     public async Task<int> CleanupOldMessagesAsync(int batchSize, TimeSpan retentionPeriod,
         CancellationToken cancellationToken = default)
     {
         using var schemaScope = BeginConfiguredSchemaScope();
-        var dbContext = await dbContextProvider.GetDbContextAsync(cancellationToken);
-        var cutoffDate = clock.UtcNow - retentionPeriod;
-
-        var oldMessages = await dbContext.InboxMessages
-            .Where(m => m.Status == IncomingEventStatus.Processed &&
-                        m.HandledTime != null &&
-                        m.HandledTime < cutoffDate)
-            .OrderBy(m => m.HandledTime)
-            .Take(batchSize)
-            .ToListAsync(cancellationToken);
-
-        if (oldMessages.Count == 0)
-            return 0;
-
-        var count = oldMessages.Count;
-        dbContext.InboxMessages.RemoveRange(oldMessages);
-        return count;
+        return await new EfCoreInboxCleanupStore<TDbContext>(dbContextProvider, clock)
+            .DeleteProcessedAsync(batchSize, retentionPeriod, cancellationToken);
     }
 
     private IDisposable BeginConfiguredSchemaScope()

@@ -46,6 +46,7 @@ public interface IInboxStore
     /// <param name="retentionPeriod">Retention period for processed messages</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>Number of messages deleted</returns>
+    [Obsolete("Retention cleanup moved to IInboxCleanupStore, which InboxProcessor now uses. This method is no longer called by Aether.")]
     Task<int> CleanupOldMessagesAsync(int batchSize, TimeSpan retentionPeriod, CancellationToken cancellationToken = default);
 }
 
