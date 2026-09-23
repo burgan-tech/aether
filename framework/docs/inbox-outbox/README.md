@@ -156,6 +156,8 @@ new AetherOutboxOptions
     MaxRetryCount        = 5,                               // Failed attempts before DeadLetter
     RetryBaseDelay       = TimeSpan.FromMinutes(1),         // Exponential backoff base
     RetentionPeriod      = TimeSpan.FromDays(7),            // Processed messages kept for
+    CleanupInterval      = TimeSpan.FromHours(1),           // Min time between cleanups (per worker)
+    CleanupBatchSize     = 1000,                            // Processed messages deleted per cleanup
     BusyPollingInterval  = TimeSpan.FromMilliseconds(100),  // Delay when batch was non-empty
     IdlePollingInterval  = TimeSpan.FromSeconds(5),         // Starting delay when batch is empty
     MaxPollingInterval   = TimeSpan.FromSeconds(60),        // Backoff ceiling
@@ -180,6 +182,12 @@ new AetherInboxOptions
     MaxPollingInterval   = TimeSpan.FromSeconds(60),
 }
 ```
+
+**Retention cleanup.** Each worker deletes one `CleanupBatchSize` batch of expired `Processed`
+messages at most once per `CleanupInterval`. A full batch keeps cleanup due on the next cycle, so
+a backlog drains one batch per cycle. On PostgreSQL the delete uses `FOR UPDATE SKIP LOCKED`, so
+replicas delete disjoint batches and never fail on each other's rows. See
+[INTERNALS.md](INTERNALS.md#retention-cleanup).
 
 ---
 

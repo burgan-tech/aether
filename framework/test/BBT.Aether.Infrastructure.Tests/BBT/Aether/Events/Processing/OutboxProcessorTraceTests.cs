@@ -31,6 +31,11 @@ namespace BBT.Aether.Events.Processing;
 /// causation links, so an origin span's own parent/child duration semantics are never stretched
 /// across the worker hop.
 /// </summary>
+/// <remarks>
+/// Shares a collection with every other test class that runs OutboxProcessor: the listener here
+/// is process-wide, so an "Outbox.Process" span started by a parallel test would be captured too.
+/// </remarks>
+[Collection(OutboxProcessorSpanCollection.Name)]
 public sealed class OutboxProcessorTraceTests
 {
     private const string OriginSourceName = "Test.Origin";
@@ -233,6 +238,7 @@ public sealed class OutboxProcessorTraceTests
         services.AddSingleton(new AetherEventBusOptions { DefaultSource = "urn:vnext:test", PubSubName = "pubsub" });
         services.AddSingleton(leaseStore);
         services.AddSingleton(dbContextProvider);
+        services.AddSingleton(Substitute.For<IOutboxCleanupStore>());
         await using var provider = services.BuildServiceProvider();
 
         var env = Substitute.For<IHostEnvironment>();
@@ -250,4 +256,10 @@ public sealed class OutboxProcessorTraceTests
 
         await processor.RunAsync();
     }
+}
+
+[CollectionDefinition(Name)]
+public sealed class OutboxProcessorSpanCollection
+{
+    public const string Name = "OutboxProcessor spans";
 }
