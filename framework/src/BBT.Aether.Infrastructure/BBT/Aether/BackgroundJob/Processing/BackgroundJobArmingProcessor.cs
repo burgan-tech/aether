@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
@@ -102,12 +101,13 @@ public class BackgroundJobArmingProcessor(
                 try
                 {
                     // The stored Payload is the SerializeToElement(envelope) JsonElement that
-                    // BackgroundJobService produced from the SAME envelope it serialized to bytes for the
-                    // scheduler. IEventSerializer has no Serialize(JsonElement) overload, so reconstruct the
-                    // identical wire bytes from the element's raw JSON text (UTF-8). The scheduler does
-                    // Deserialize<object>(payload) then reserializes, so byte-for-byte equality is not
-                    // required — equivalent JSON is sufficient, which GetRawText() guarantees.
-                    var payloadBytes = Encoding.UTF8.GetBytes(job.Payload.GetRawText());
+                    // BackgroundJobService produced. Arm with a REFERENCE to it, not the thing itself:
+                    // the same helper the inline arm path uses strips the body and keeps the header.
+                    //
+                    // This path must never arm the full payload. It is the recovery arm — it runs after
+                    // a scheduler outage, on a backlog, which is precisely when arming an oversized body
+                    // would wedge the scheduler again. Both arm paths therefore share one helper.
+                    var payloadBytes = JobArmPayload.CreateReference(job.Payload, job.Id);
 
                     // Retrying → one-shot at NextRetryAt; else use the stored schedule expression.
                     if (claim.OriginalStatus == BackgroundJobStatus.Retrying && job.NextRetryAt is { } dueAt)
