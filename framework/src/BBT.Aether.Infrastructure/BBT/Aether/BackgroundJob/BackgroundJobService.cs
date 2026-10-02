@@ -195,8 +195,12 @@ public sealed class BackgroundJobService(
         // the signature so callers don't break and so a later task can wire it through ExtraProperties.
         // The `directly` path below DOES honor failurePolicyOptions, via ScheduleAsync.
 
-        // Bytes for the scheduler (the `directly` arm path). Equivalent to the JSON the poller arms with.
-        var payloadBytes = eventSerializer.Serialize(envelope);
+        // Bytes for the scheduler (the `directly` arm path). Built from the SAME element that was just
+        // persisted on the row, through the SAME helper the arming poller uses, so the two arm paths
+        // cannot produce different wire shapes. The body is deliberately left behind: the scheduler
+        // only needs to name the job, and the dispatcher rehydrates the arguments from the row it
+        // already reads to claim the job. See JobArmPayload.
+        var payloadBytes = JobArmPayload.CreateReference(jobInfo.Payload, effectiveJobId);
 
         // Deferred arm: hand the caller a closure over everything the scheduler needs. Same call the
         // inline path makes, same failure handling — only the timing is the caller's to choose.

@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.Clock;
@@ -44,6 +45,13 @@ public class JobDispatcher(
 
         var argsPayload = CloudEventEnvelopeHelper.ExtractDataPayload(eventSerializer, jobPayload, out var envelope);
 
+        // An armed message normally carries only the envelope header; the arguments live on the job row
+        // and are rehydrated after the claim, which reads that row anyway. An inline or legacy payload
+        // (armed before this capability, or by a caller that bypassed the helper) still carries its own
+        // data and is used as-is.
+        var rehydrate = JobArmPayload.IsReference(envelope, out var expectedJobId);
+        activity?.SetTag("job.payload_ref", rehydrate);
+
         IDisposable? schemaScope = null;
         if (envelope != null && !string.IsNullOrWhiteSpace(envelope.Schema))
         {
@@ -53,7 +61,8 @@ public class JobDispatcher(
 
         using (schemaScope)
         {
-            await DispatchCoreAsync(scope, jobName, argsPayload, activity, cancellationToken);
+            await DispatchCoreAsync(scope, jobName, argsPayload, rehydrate, expectedJobId, activity,
+                cancellationToken);
         }
     }
 
@@ -66,18 +75,40 @@ public class JobDispatcher(
         JobKind Kind,
         int RetryCount,
         int MaxRetryCount,
-        Guid Token);
+        Guid Token,
+        JsonElement Payload);
 
     private async Task DispatchCoreAsync(
         AsyncServiceScope scope,
         string jobName,
         ReadOnlyMemory<byte> argsPayload,
+        bool rehydrate,
+        Guid expectedJobId,
         Activity? activity,
         CancellationToken cancellationToken)
     {
-        var claim = await ClaimAsync(scope, jobName, activity, cancellationToken);
+        var claim = await ClaimAsync(scope, jobName, expectedJobId, activity, cancellationToken);
         if (claim is not { } c)
             return;
+
+        if (rehydrate)
+        {
+            // The row the claim just read carries the full envelope, so this costs no extra query.
+            if (!JobArmPayload.TryExtractStoredData(c.Payload, out var storedArgs))
+            {
+                // The armed message said the body is on the row, and it is not. Running the handler with
+                // nothing would silently do the wrong work, so fail the job where it can be seen. This is
+                // terminal, not retryable: a re-run would read the same empty row.
+                const string reason = "Job payload was armed by reference but the job row carries no data member";
+                logger.LogError("{Reason} (job '{JobName}', id '{JobId}')", reason, jobName, c.JobId);
+                activity?.SetTag("job.status", "failed");
+                activity?.SetStatus(ActivityStatusCode.Error, reason);
+                await RecordTerminalFailureAsync(scope, c, reason, cancellationToken);
+                return;
+            }
+
+            argsPayload = storedArgs;
+        }
 
         // --- Phase 2: run the handler with NO dispatcher transaction ---
         // The dispatcher holds no open UoW/connection across the handler. The handler owns its own UoW
@@ -136,6 +167,7 @@ public class JobDispatcher(
     private async Task<JobClaim?> ClaimAsync(
         AsyncServiceScope scope,
         string jobName,
+        Guid expectedJobId,
         Activity? activity,
         CancellationToken cancellationToken)
     {
@@ -157,6 +189,22 @@ public class JobDispatcher(
 
         activity?.SetTag("job.id", jobInfo.Id.ToString());
         activity?.SetTag("job.handler_name", jobInfo.HandlerName);
+
+        // The job name is resolved with a FirstOrDefault over a NON-unique index, so two live rows can
+        // share a name. That was survivable while the arguments travelled in the armed message — the
+        // worst case was a mis-claim. Once the arguments come from the row, picking the wrong row means
+        // running the WRONG BODY, so an armer that told us which row it meant is taken at its word.
+        if (expectedJobId != Guid.Empty && jobInfo.Id != expectedJobId)
+        {
+            logger.LogError(
+                "Job '{JobName}' resolved to id '{ResolvedId}' but the armed message names id "
+                + "'{ExpectedId}'; refusing to run a job against another row's payload",
+                jobName, jobInfo.Id, expectedJobId);
+            await claimUow.CommitAsync(cancellationToken);
+            activity?.SetTag("job.status", "skipped");
+            activity?.SetStatus(ActivityStatusCode.Error, "job name resolved to an unexpected row");
+            return null;
+        }
 
         if (!options.Invokers.ContainsKey(jobInfo.HandlerName))
         {
@@ -185,7 +233,28 @@ public class JobDispatcher(
         }
 
         return new JobClaim(jobInfo.Id, jobInfo.HandlerName, jobInfo.Kind, jobInfo.RetryCount, jobInfo.MaxRetryCount,
-            runningToken);
+            runningToken, jobInfo.Payload);
+    }
+
+    /// <summary>
+    /// Records a terminal failure for a claimed job without the retry ladder: used where retrying could
+    /// not change the outcome. Mirrors <see cref="RecordFailureAsync"/>'s bookkeeping, minus the
+    /// scheduler delete, which <see cref="TryDeleteFromSchedulerAsync"/> handles for one-shots.
+    /// </summary>
+    private async Task RecordTerminalFailureAsync(
+        AsyncServiceScope scope,
+        JobClaim claim,
+        string error,
+        CancellationToken cancellationToken)
+    {
+        var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+        var jobStore = scope.ServiceProvider.GetRequiredService<IJobStore>();
+
+        await using var uow = uowManager.Begin(
+            new UnitOfWorkOptions { Scope = UnitOfWorkScopeOption.RequiresNew, IsTransactional = true });
+        await jobStore.TryRecordTerminalAsync(claim.JobId, claim.Token, BackgroundJobStatus.Failed,
+            clock.UtcNow, error, cancellationToken);
+        await uow.CommitAsync(cancellationToken);
     }
 
     /// <summary>

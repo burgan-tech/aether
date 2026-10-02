@@ -40,8 +40,10 @@ public sealed class DaprJobExecutionBridge(
         {
             await using var scope = scopeFactory.CreateAsyncScope();
 
-            // Parse envelope and set schema context (multi-tenant support) before dispatch.
-            var dataPayload = CloudEventEnvelopeHelper.ExtractDataPayload(eventSerializer, payload, out var envelope);
+            // Parse envelope and set schema context (multi-tenant support) before dispatch. The schema
+            // must come off the wire: it decides which schema the dispatcher's own job-row read runs in,
+            // so it cannot be recovered from the row itself.
+            var envelope = CloudEventEnvelopeHelper.TryParseEnvelope(eventSerializer, payload.ToArray());
 
             IDisposable? schemaScope = null;
             if (envelope != null && !string.IsNullOrWhiteSpace(envelope.Schema))
@@ -52,10 +54,12 @@ public sealed class DaprJobExecutionBridge(
 
             using (schemaScope)
             {
-                // Dispatch by job name with the extracted data payload. The dispatcher re-resolves the job,
-                // atomically claims it, runs the handler with no held transaction, and records the outcome.
+                // Hand the dispatcher the envelope as received, NOT the extracted data. An armed message
+                // is a reference (header only, no `data`), and the dispatcher needs the extension
+                // attributes to recognise that and rehydrate the arguments from the job row. It performs
+                // the same extraction itself for inline and legacy payloads, so this is lossless.
                 var dispatcher = scope.ServiceProvider.GetRequiredService<IJobDispatcher>();
-                await dispatcher.DispatchAsync(jobName, dataPayload, cancellationToken);
+                await dispatcher.DispatchAsync(jobName, payload, cancellationToken);
 
                 activity?.SetStatus(ActivityStatusCode.Ok);
             }

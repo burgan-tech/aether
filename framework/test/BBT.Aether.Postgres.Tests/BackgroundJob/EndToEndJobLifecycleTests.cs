@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BBT.Aether.BackgroundJob;
@@ -75,15 +76,23 @@ public sealed class EndToEndJobLifecycleTests(PostgresFixture fx)
         public static bool ShouldThrow { get; set; }
         public static int InvocationCount { get; set; }
 
+        /// <summary>
+        /// The args the handler last received. Arm-by-reference rehydrates these from the job row rather
+        /// than the armed message, so the tests assert on the value to prove the body survived the trip.
+        /// </summary>
+        public static string? LastValue { get; set; }
+
         public static void Reset()
         {
             ShouldThrow = false;
             InvocationCount = 0;
+            LastValue = null;
         }
 
         public Task HandleAsync(TestArgs args, CancellationToken cancellationToken)
         {
             InvocationCount++;
+            LastValue = args.Value;
             if (ShouldThrow)
             {
                 throw new InvalidOperationException("handler boom");
@@ -225,7 +234,7 @@ public sealed class EndToEndJobLifecycleTests(PostgresFixture fx)
 
     /// <summary>Enqueues a job through the REAL service while a schema scope is active.</summary>
     private async Task<Guid> EnqueueAsync(IServiceProvider sp, string jobName, string schedule,
-        bool directly = false)
+        bool directly = false, string value = "x")
     {
         await using var scope = sp.CreateAsyncScope();
         var ssp = scope.ServiceProvider;
@@ -234,8 +243,16 @@ public sealed class EndToEndJobLifecycleTests(PostgresFixture fx)
         {
             var svc = ssp.GetRequiredService<IBackgroundJobService>();
             return await svc.EnqueueAsync(
-                HandlerName, jobName, new TestArgs { Value = "x" }, schedule, directly: directly);
+                HandlerName, jobName, new TestArgs { Value = value }, schedule, directly: directly);
         }
+    }
+
+    /// <summary>Fires the bridge with the given bytes, exactly as Dapr's callback would.</summary>
+    private static async Task FireAsync(IServiceProvider sp, string jobName, ReadOnlyMemory<byte> payload)
+    {
+        await using var scope = sp.CreateAsyncScope();
+        var bridge = scope.ServiceProvider.GetRequiredService<IJobExecutionBridge>();
+        await bridge.ExecuteAsync(jobName, payload, CancellationToken.None);
     }
 
     /// <summary>
@@ -571,5 +588,184 @@ public sealed class EndToEndJobLifecycleTests(PostgresFixture fx)
         var done = await ReloadAsync(sp, id);
         done!.Status.ShouldBe(BackgroundJobStatus.Completed);
         done.RunningSince.ShouldBeNull();
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Arm-by-reference. The scheduler is armed with the envelope HEADER only; the handler arguments
+    // are rehydrated from the job row the dispatcher already reads in order to claim the job.
+    //
+    // This exists because Dapr keeps one-shot jobs in etcd, whose practical ceiling (~2 MiB) is far
+    // below what an HTTP request may carry. Arming the body meant an oversized payload failed the arm
+    // AFTER the caller's transaction had committed — leaving work durably reserved and unrunnable.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>A body far above any plausible scheduler ceiling, so "bounded" means something.</summary>
+    private const string BigValue2Mb = "payload-";
+
+    private static string BigBody() => string.Concat(System.Linq.Enumerable.Repeat(BigValue2Mb, 262_144));
+
+    [Fact]
+    public async Task Armed_payload_carries_no_body_and_stays_small_regardless_of_payload_size()
+    {
+        TestHandler.Reset();
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        var body = BigBody(); // ~2 MB, comfortably past etcd's one-shot ceiling
+        var jobName = "e2e-bigbody-" + Guid.NewGuid().ToString("N");
+        var id = await EnqueueAsync(sp, jobName, "2099-01-01T00:00:00Z", value: body);
+
+        await BuildArmingProcessor(sp, options).RunAsync();
+
+        // The armed message must be bounded. Without arm-by-reference this is ~2 MB and the real
+        // scheduler rejects it after the row is already committed.
+        var armedBytes = scheduler.CapturedPayloads[jobName];
+        armedBytes.Length.ShouldBeLessThan(2048,
+            "the armed message must not grow with the payload — that is the whole point");
+
+        using (var armed = JsonDocument.Parse(armedBytes))
+        {
+            var root = armed.RootElement;
+            root.TryGetProperty("data", out _).ShouldBeFalse("the body must not travel to the scheduler");
+
+            // The header must survive: `schema` establishes the multi-schema scope BEFORE the job row is
+            // read, so losing it would send that read to the wrong schema and silently find nothing.
+            root.GetProperty("schema").GetString().ShouldBe(_schema);
+            root.GetProperty("type").GetString().ShouldBe(HandlerName);
+
+            var extensions = root.GetProperty("extensions");
+            extensions.GetProperty("payloadref").GetBoolean().ShouldBeTrue();
+            Guid.Parse(extensions.GetProperty("jobid").GetString()!).ShouldBe(id);
+        }
+
+        // And the handler still receives the FULL body, rehydrated from the row.
+        await FireAsync(sp, jobName, armedBytes);
+
+        TestHandler.InvocationCount.ShouldBe(1);
+        TestHandler.LastValue.ShouldBe(body);
+        (await ReloadAsync(sp, id))!.Status.ShouldBe(BackgroundJobStatus.Completed);
+    }
+
+    [Fact]
+    public async Task Inline_arm_path_produces_the_same_reference_shape_as_the_poller()
+    {
+        TestHandler.Reset();
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        // directly: true arms inline through BackgroundJobService, never touching the poller. Both paths
+        // must emit the same wire shape — if they drift, a job armed by one and recovered by the other
+        // behaves differently, and the recovery path is the one that runs during an incident.
+        var jobName = "e2e-inline-ref-" + Guid.NewGuid().ToString("N");
+        var id = await EnqueueAsync(sp, jobName, "*/5 * * * *", directly: true, value: BigBody());
+
+        var armedBytes = scheduler.CapturedPayloads[jobName];
+        armedBytes.Length.ShouldBeLessThan(2048);
+
+        using var armed = JsonDocument.Parse(armedBytes);
+        armed.RootElement.TryGetProperty("data", out _).ShouldBeFalse();
+        armed.RootElement.GetProperty("schema").GetString().ShouldBe(_schema);
+        armed.RootElement.GetProperty("extensions").GetProperty("payloadref").GetBoolean().ShouldBeTrue();
+        Guid.Parse(armed.RootElement.GetProperty("extensions").GetProperty("jobid").GetString()!)
+            .ShouldBe(id);
+    }
+
+    [Fact]
+    public async Task Reference_whose_row_lost_its_body_fails_loudly_instead_of_running_empty()
+    {
+        TestHandler.Reset();
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        var jobName = "e2e-lostbody-" + Guid.NewGuid().ToString("N");
+        var id = await EnqueueAsync(sp, jobName, "2099-01-01T00:00:00Z");
+        await BuildArmingProcessor(sp, options).RunAsync();
+
+        // Strip the body from the row behind the dispatcher's back. The armed message still claims the
+        // body is on the row; it is not.
+        await using (var conn = new NpgsqlConnection(fx.ConnectionString))
+        {
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                $"UPDATE \"{_schema}\".\"BackgroundJobs\" SET \"Payload\" = \"Payload\" - 'data' WHERE \"Id\" = @id;";
+            cmd.Parameters.AddWithValue("id", id);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        await FireAsync(sp, jobName, scheduler.CapturedPayloads[jobName]);
+
+        // Running the handler with no arguments would silently do the wrong work. Fail where it shows.
+        TestHandler.InvocationCount.ShouldBe(0);
+        var after = await ReloadAsync(sp, id);
+        after!.Status.ShouldBe(BackgroundJobStatus.Failed);
+        after.LastError.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task Reference_naming_a_different_row_is_refused_rather_than_running_the_wrong_body()
+    {
+        TestHandler.Reset();
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        var jobName = "e2e-wrongrow-" + Guid.NewGuid().ToString("N");
+        var id = await EnqueueAsync(sp, jobName, "2099-01-01T00:00:00Z");
+        await BuildArmingProcessor(sp, options).RunAsync();
+
+        // Job names are resolved with FirstOrDefault over a NON-unique index, so two live rows can share
+        // one. While the body travelled in the armed message that was a mis-claim at worst; now it would
+        // mean running a job against ANOTHER row's payload. Rewrite the id to simulate that collision.
+        var tampered = System.Text.Encoding.UTF8.GetString(scheduler.CapturedPayloads[jobName])
+            .Replace(id.ToString(), Guid.NewGuid().ToString(), StringComparison.OrdinalIgnoreCase);
+
+        await FireAsync(sp, jobName, System.Text.Encoding.UTF8.GetBytes(tampered));
+
+        TestHandler.InvocationCount.ShouldBe(0);
+        // Refused, not consumed: the row is left exactly as it was for the rightful delivery.
+        (await ReloadAsync(sp, id))!.Status.ShouldBe(BackgroundJobStatus.Scheduled);
+    }
+
+    [Fact]
+    public async Task Inline_payload_armed_before_this_capability_still_dispatches()
+    {
+        TestHandler.Reset();
+        var scheduler = new FakeJobScheduler();
+        var options = BuildOptions();
+        var sp = BuildProvider(scheduler, options);
+        await ArrangeSchemaAsync(sp);
+
+        var jobName = "e2e-legacy-" + Guid.NewGuid().ToString("N");
+        var id = await EnqueueAsync(sp, jobName, "2099-01-01T00:00:00Z");
+        await BuildArmingProcessor(sp, options).RunAsync();
+
+        // A job armed by a pod running the previous version carries its body inline and no marker. Those
+        // registrations outlive the deployment that made them — a one-shot can sit in etcd for weeks — so
+        // the dispatcher must keep honouring them.
+        var legacy = new CloudEventEnvelope
+        {
+            Type = HandlerName,
+            Source = "urn:test",
+            Schema = _schema,
+            Data = new TestArgs { Value = "armed-by-an-older-pod" }
+        };
+
+        await using (var scope = sp.CreateAsyncScope())
+        {
+            var serializer = scope.ServiceProvider.GetRequiredService<IEventSerializer>();
+            await FireAsync(sp, jobName, serializer.Serialize(legacy));
+        }
+
+        TestHandler.InvocationCount.ShouldBe(1);
+        TestHandler.LastValue.ShouldBe("armed-by-an-older-pod");
+        (await ReloadAsync(sp, id))!.Status.ShouldBe(BackgroundJobStatus.Completed);
     }
 }
