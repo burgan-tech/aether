@@ -58,23 +58,8 @@ public static class EventHandlerAutoDiscovery
             // Resolve PubSubName: use from event metadata or fall back to options default
             var resolvedPubSubName = pubSubName ?? options.PubSubName;
             
-            // Build topic name: use override if specified, otherwise generate from name and version
-            string topicName;
-            if (!string.IsNullOrWhiteSpace(topicOverride))
-            {
-                topicName = topicOverride;
-            }
-            else
-            {
-                // Generate topic: EventName.vVersion format
-                topicName = $"{eventName}.v{version}";
-            }
-            
-            // Apply environment prefix if enabled
-            if (options.PrefixEnvironmentToTopic && !string.IsNullOrWhiteSpace(environmentName))
-            {
-                topicName = $"{environmentName.ToLowerInvariant()}.{topicName}";
-            }
+            // Same builder as the publisher (DefaultTopicNameStrategy), so both sides agree on the topic
+            var topicName = TopicNameFormatter.Format(eventName, version, topicOverride, options, environmentName);
 
             // Create invoker using reflection (once at startup)
             var invokerType = typeof(DistributedEventInvoker<>).MakeGenericType(metadata.EventType);

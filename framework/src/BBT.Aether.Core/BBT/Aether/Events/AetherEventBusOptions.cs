@@ -12,6 +12,15 @@ public class AetherEventBusOptions
     public bool PrefixEnvironmentToTopic { get; set; } = true;
 
     /// <summary>
+    /// Gets or sets a fixed prefix for every topic name, e.g. <c>"vnext.core.production"</c> gives
+    /// <c>vnext.core.production.{eventName}.v{version}</c>. When set it replaces the environment prefix
+    /// (<see cref="PrefixEnvironmentToTopic"/> is ignored) and also applies to a topic given explicitly
+    /// through <see cref="EventNameAttribute"/>, so broker ACLs can be granted on the prefix alone.
+    /// A trailing dot is optional. Default: null (no fixed prefix).
+    /// </summary>
+    public string? TopicPrefix { get; set; }
+
+    /// <summary>
     /// Gets or sets the default Source value for CloudEventEnvelope.
     /// Format: "urn:vnext:{service}" (e.g., "urn:vnext:order-service")
     /// If not set, Source must be provided manually when creating CloudEventEnvelope.
